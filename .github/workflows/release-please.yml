@@ -86,7 +86,7 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/${{ matrix.artifact }}"
 
       - name: Upload release asset
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.release-please.outputs.tag_name }}
           files: dist/${{ matrix.artifact }}
