@@ -67,7 +67,7 @@ repo-analyzer /path/to/repo --threads 4
 | Churn | `churn` | Lines added/removed per file over time |
 | Ownership | `ownership` | Code ownership distribution by author per file |
 | Coupling | `coupling` | Files that frequently change together |
-| Patterns | `patterns` | Recurring change patterns across constructs |
+| Patterns | `patterns` | Commit distribution by hour of day and day of week |
 | Age | `age` | Time since last modification per file/construct |
 
 By default all 7 reports are generated. Use `--only` to select a subset.
@@ -93,15 +93,24 @@ By default all 7 reports are generated. Use `--only` to select a subset.
 | C++ | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.h` | `tree-sitter-cpp` |
 | C# | `.cs` | `tree-sitter-c-sharp` |
 | Kotlin | `.kt`, `.kts` | `tree-sitter-kotlin-ng` |
+| PHP | `.php` | `tree-sitter-php` |
+| Ruby | `.rb` | `tree-sitter-ruby` |
+| Scala | `.scala`, `.sc` | `tree-sitter-scala` |
+| Swift | `.swift` | `tree-sitter-swift` |
+| Bash | `.sh`, `.bash` | `tree-sitter-bash` |
+| HTML | `.html`, `.htm` | `tree-sitter-html` |
+| CSS | `.css`, `.scss` | `tree-sitter-css` |
 
 Files with unrecognized extensions are still tracked at the file level; they just lack construct-level detail.
+
+Lock files (`Cargo.lock`, `package-lock.json`, `yarn.lock`, `bun.lock`, `uv.lock`, `pnpm-lock.yaml`, etc.) are automatically excluded from analysis.
 
 ## Development
 
 Requires Rust edition 2024 (nightly or stable 1.85+).
 
 ```bash
-make help            # Show all targets
+make setup           # Install rustfmt + clippy (run once after clone)
 make build           # Build debug binary
 make release         # Build release binary
 make test            # Run all tests
@@ -114,7 +123,9 @@ make check           # Fast compile check
 make clean           # Clean build artifacts
 make install         # Build release + install to ~/.cargo/bin
 make run             # Run with default args (current dir, table output)
-make ci              # fmt-check + lint + test (CI pipeline)
+make pre-commit      # fmt + lint + test (run before committing)
+make ci              # fmt-check + lint + test (mirrors GitHub Actions)
+make help            # Show all targets
 ```
 
 Shortcut targets for common output formats:
@@ -124,6 +135,14 @@ make run-json        # JSON to stdout, quiet mode
 make run-html        # HTML to report.html
 make run-csv         # CSV to report.csv
 ```
+
+## CI/CD
+
+The project uses [release-please](https://github.com/googleapis/release-please-action) for automated versioning.
+
+- Every push to `master` runs CI checks (`fmt`, `clippy`, `test`).
+- Conventional commits (`feat:`, `fix:`, etc.) trigger automatic version bump PRs.
+- Merging a release PR creates a git tag, GitHub Release, and builds binaries for Linux, macOS, and Windows (amd64 + arm64).
 
 ## License
 

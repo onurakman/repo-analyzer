@@ -50,11 +50,13 @@ Language module files use the pattern `<language>.rs` (e.g., `rust_lang.rs`, `go
    - `process(&mut self, change: &ParsedChange)` -- incrementally aggregate data. Do not store raw changes.
    - `finalize(&mut self) -> MetricResult` -- return columns and entries.
 3. Add a variant to `ReportKind` in `src/types.rs`.
-4. Update `ReportKind::all()`, `ReportKind::from_str()`, and `Display` impl in `src/types.rs`.
+4. Update `ReportKind::all()`, `ReportKind::parse()`, and `Display` impl in `src/types.rs`.
 5. Update the `--only` help text in `src/cli.rs` to include the new name.
 6. Add a match arm in `Pipeline::create_collectors()` in `src/pipeline/engine.rs`.
 7. Add `pub mod <name>;` to `src/metrics/mod.rs`.
-8. Write unit tests in the same file. Write an integration test in `tests/`.
+8. Implement `Default` for the collector (delegates to `new()`).
+9. Sort entries descending by the primary metric in `finalize()`.
+10. Write unit tests in the same file. Write an integration test in `tests/`.
 
 ## Adding a New Language
 
@@ -135,6 +137,44 @@ cargo test --test '*'   # Integration tests only
 - **Incremental aggregation:** Collectors maintain running counters/maps, not raw data vectors.
 - **Thread pool:** Rayon global thread pool is configured once via `--threads`. Default (`0`) lets Rayon auto-detect.
 - **Progress indication:** Use `indicatif` progress bars. Respect `--quiet` by using `ProgressBar::hidden()`.
+
+## Pipeline Rules
+
+- **Lock file exclusion:** The pipeline automatically skips known lock files (`Cargo.lock`, `package-lock.json`, `yarn.lock`, `bun.lock`, `uv.lock`, `pnpm-lock.yaml`, etc.). New lock files are added to `LOCK_FILE_NAMES` in `src/pipeline/engine.rs`.
+- **Author grouping:** Authors are grouped by **email**, not by name. This handles name variations across commits.
+- **Signed values:** Use `MetricValue::SignedCount(i64)` for values that can be negative (e.g., `net_change`). Never cast a signed value to `MetricValue::Count(u64)`.
+- **Default impls:** Every collector struct with a `pub fn new()` must also have a `Default` impl.
+
+## CI/CD & Release
+
+### Workflows (`.github/workflows/`)
+
+- **`ci.yml`** -- Runs on every push and PR to `master`: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`.
+- **`release-please.yml`** -- Runs on push to `master`. Uses [release-please](https://github.com/googleapis/release-please-action) to automate versioning.
+
+### Release flow
+
+1. Use conventional commits (`feat:`, `fix:`, etc.) and push to `master`.
+2. Release-please automatically opens a PR with version bump (`Cargo.toml`), `CHANGELOG.md`, and manifest update.
+3. Merge the release PR → git tag + GitHub Release + 6 binary builds (linux/macos/windows × amd64/arm64).
+
+### Version bump rules
+
+| Commit prefix | Bump | Example |
+|---|---|---|
+| `fix:` | patch (0.1.0 → 0.1.1) | `fix: handle empty diff` |
+| `feat:` | minor (0.1.0 → 0.2.0) | `feat: add Kotlin support` |
+| `feat!:` / `BREAKING CHANGE:` | major* | `feat!: new config format` |
+
+\* While < 1.0.0, breaking changes bump minor (controlled by `bump-minor-pre-major` in `release-please-config.json`).
+
+### Makefile targets
+
+| Target | What it does | When to use |
+|---|---|---|
+| `make setup` | Installs `rustfmt` + `clippy` | After first clone |
+| `make pre-commit` | `fmt` + `clippy` + `test` | Before every commit |
+| `make ci` | `fmt-check` + `clippy` + `test` | To mirror GitHub Actions locally |
 
 ## Commit Messages
 
