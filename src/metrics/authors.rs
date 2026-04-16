@@ -86,10 +86,7 @@ impl MetricCollector for AuthorsCollector {
                 );
                 values.insert("first_commit".into(), MetricValue::Date(stats.first_commit));
                 values.insert("last_commit".into(), MetricValue::Date(stats.last_commit));
-                MetricEntry {
-                    key: email,
-                    values,
-                }
+                MetricEntry { key: email, values }
             })
             .collect();
 
@@ -163,7 +160,11 @@ mod tests {
         let result = collector.finalize();
         assert_eq!(result.entries.len(), 2);
 
-        let alice = result.entries.iter().find(|e| e.key == "Alice@test.com").unwrap();
+        let alice = result
+            .entries
+            .iter()
+            .find(|e| e.key == "Alice@test.com")
+            .unwrap();
         match alice.values.get("commits") {
             Some(MetricValue::Count(n)) => assert_eq!(*n, 2),
             other => panic!("Expected Count(2), got {:?}", other),
@@ -173,7 +174,11 @@ mod tests {
             other => panic!("Expected Count(15), got {:?}", other),
         }
 
-        let bob = result.entries.iter().find(|e| e.key == "Bob@test.com").unwrap();
+        let bob = result
+            .entries
+            .iter()
+            .find(|e| e.key == "Bob@test.com")
+            .unwrap();
         match bob.values.get("commits") {
             Some(MetricValue::Count(n)) => assert_eq!(*n, 1),
             other => panic!("Expected Count(1), got {:?}", other),

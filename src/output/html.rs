@@ -124,7 +124,11 @@ impl HtmlWriter {
                 } else {
                     0
                 };
-                let extra_class = if i >= Self::TOP_N { " bar-row extra-row" } else { "" };
+                let extra_class = if i >= Self::TOP_N {
+                    " bar-row extra-row"
+                } else {
+                    ""
+                };
                 html.push_str(&format!(
                     "      <div class=\"bar-row{extra_class}\" style=\"margin: 2px 0;\"><span class=\"bar\" style=\"width: {width_pct}%;\"></span><span>{} ({})</span></div>\n",
                     escape_html(&entry.key),
@@ -146,7 +150,11 @@ impl HtmlWriter {
         html.push_str("      <tbody>\n");
 
         for (i, entry) in result.entries.iter().enumerate() {
-            let extra_class = if i >= Self::TOP_N { " class=\"extra-row\"" } else { "" };
+            let extra_class = if i >= Self::TOP_N {
+                " class=\"extra-row\""
+            } else {
+                ""
+            };
             html.push_str(&format!("        <tr{extra_class}>"));
             html.push_str(&format!("<td>{}</td>", escape_html(&entry.key)));
             for col in &columns {
