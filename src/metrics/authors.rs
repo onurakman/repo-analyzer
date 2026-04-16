@@ -114,6 +114,7 @@ impl MetricCollector for AuthorsCollector {
                 "last_commit".into(),
             ],
             entries,
+            entry_groups: vec![],
         }
     }
 }

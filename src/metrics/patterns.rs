@@ -55,23 +55,15 @@ impl MetricCollector for PatternsCollector {
             .map(|h| {
                 let key = format!("{:02}:00", h);
                 let mut values = HashMap::new();
-                values.insert("type".into(), MetricValue::Text("hourly".into()));
                 values.insert("order".into(), MetricValue::Count(h as u64));
                 values.insert("commits".into(), MetricValue::Count(self.hourly[h]));
                 MetricEntry { key, values }
             })
             .collect();
 
-        hourly_entries.sort_by(|a, b| {
-            let ca = match a.values.get("commits") {
-                Some(MetricValue::Count(n)) => *n,
-                _ => 0,
-            };
-            let cb = match b.values.get("commits") {
-                Some(MetricValue::Count(n)) => *n,
-                _ => 0,
-            };
-            cb.cmp(&ca)
+        hourly_entries.sort_by_key(|e| match e.values.get("order") {
+            Some(MetricValue::Count(n)) => *n,
+            _ => 0,
         });
 
         // 7 daily entries
@@ -81,7 +73,6 @@ impl MetricCollector for PatternsCollector {
             .enumerate()
             .map(|(i, &name)| {
                 let mut values = HashMap::new();
-                values.insert("type".into(), MetricValue::Text("daily".into()));
                 values.insert("order".into(), MetricValue::Count((i + 1) as u64));
                 values.insert("commits".into(), MetricValue::Count(self.daily[i]));
                 MetricEntry {
@@ -91,26 +82,20 @@ impl MetricCollector for PatternsCollector {
             })
             .collect();
 
-        daily_entries.sort_by(|a, b| {
-            let ca = match a.values.get("commits") {
-                Some(MetricValue::Count(n)) => *n,
-                _ => 0,
-            };
-            let cb = match b.values.get("commits") {
-                Some(MetricValue::Count(n)) => *n,
-                _ => 0,
-            };
-            cb.cmp(&ca)
+        daily_entries.sort_by_key(|e| match e.values.get("order") {
+            Some(MetricValue::Count(n)) => *n,
+            _ => 0,
         });
-
-        let mut entries = hourly_entries;
-        entries.append(&mut daily_entries);
 
         MetricResult {
             name: "patterns".into(),
             description: "Commit distribution by hour of day and day of week".into(),
-            columns: vec!["type".into(), "order".into(), "commits".into()],
-            entries,
+            columns: vec!["order".into(), "commits".into()],
+            entries: vec![],
+            entry_groups: vec![
+                ("hourly".into(), hourly_entries),
+                ("daily".into(), daily_entries),
+            ],
         }
     }
 }
@@ -148,6 +133,15 @@ mod tests {
         }
     }
 
+    fn get_group<'a>(result: &'a MetricResult, group: &str) -> &'a Vec<MetricEntry> {
+        &result
+            .entry_groups
+            .iter()
+            .find(|(name, _)| name == group)
+            .unwrap_or_else(|| panic!("missing group: {group}"))
+            .1
+    }
+
     #[test]
     fn test_hourly_pattern() {
         let mut collector = PatternsCollector::new();
@@ -156,16 +150,17 @@ mod tests {
         collector.process(&make_change_at("c3", 14, "a.rs"));
 
         let result = collector.finalize();
+        let hourly = get_group(&result, "hourly");
 
         // Find the 09:00 entry
-        let h9 = result.entries.iter().find(|e| e.key == "09:00").unwrap();
+        let h9 = hourly.iter().find(|e| e.key == "09:00").unwrap();
         match h9.values.get("commits") {
             Some(MetricValue::Count(n)) => assert_eq!(*n, 2),
             other => panic!("Expected Count(2), got {:?}", other),
         }
 
         // Find the 14:00 entry
-        let h14 = result.entries.iter().find(|e| e.key == "14:00").unwrap();
+        let h14 = hourly.iter().find(|e| e.key == "14:00").unwrap();
         match h14.values.get("commits") {
             Some(MetricValue::Count(n)) => assert_eq!(*n, 1),
             other => panic!("Expected Count(1), got {:?}", other),
@@ -181,7 +176,8 @@ mod tests {
         collector.process(&make_change_at("same_commit", 10, "c.rs"));
 
         let result = collector.finalize();
-        let h10 = result.entries.iter().find(|e| e.key == "10:00").unwrap();
+        let hourly = get_group(&result, "hourly");
+        let h10 = hourly.iter().find(|e| e.key == "10:00").unwrap();
         match h10.values.get("commits") {
             Some(MetricValue::Count(n)) => assert_eq!(*n, 1),
             other => panic!("Expected Count(1), got {:?}", other),

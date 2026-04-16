@@ -1,7 +1,7 @@
 use std::fs;
 
 use crate::output::ReportWriter;
-use crate::types::{MetricResult, MetricValue, OutputConfig};
+use crate::types::{MetricEntry, MetricResult, MetricValue, OutputConfig};
 
 const TEMPLATE: &str = include_str!("../../templates/report.html");
 
@@ -72,18 +72,20 @@ impl HtmlWriter {
     /// Number of entries shown by default before requiring expand.
     const TOP_N: usize = 10;
 
-    fn render_section(result: &MetricResult) -> String {
-        let columns = Self::get_columns(result);
-        let bar_col = Self::first_numeric_column(result);
-        let total = result.entries.len();
+    fn render_entries_block(
+        entries: &[MetricEntry],
+        columns: &[String],
+        bar_col: &Option<String>,
+    ) -> String {
+        let mut html = String::new();
+        let total = entries.len();
         let has_extra = total > Self::TOP_N;
 
         // Find max value for bar chart scaling
         let max_val = bar_col
             .as_ref()
             .map(|col| {
-                result
-                    .entries
+                entries
                     .iter()
                     .filter_map(|e| e.values.get(col))
                     .map(Self::numeric_value)
@@ -91,29 +93,10 @@ impl HtmlWriter {
             })
             .unwrap_or(0.0);
 
-        let mut html = String::new();
-
-        // Section wrapper
-        html.push_str("<div class=\"report-section\">\n");
-        html.push_str(&format!(
-            "  <div class=\"section-header\"><h2>{}<span class=\"entry-count\">({} entries)</span></h2><span class=\"toggle\">\u{25be}</span></div>\n",
-            escape_html(&result.name),
-            total
-        ));
-        html.push_str("  <div class=\"section-body\">\n");
-
-        // Description
-        if !result.description.is_empty() {
-            html.push_str(&format!(
-                "    <p class=\"section-desc\">{}</p>\n",
-                escape_html(&result.description)
-            ));
-        }
-
         // Bar chart (if numeric column exists)
-        if let Some(ref bar_col_name) = bar_col {
+        if let Some(bar_col_name) = bar_col {
             html.push_str("    <div style=\"margin-bottom: 1rem;\">\n");
-            for (i, entry) in result.entries.iter().enumerate() {
+            for (i, entry) in entries.iter().enumerate() {
                 let val = entry
                     .values
                     .get(bar_col_name)
@@ -143,13 +126,13 @@ impl HtmlWriter {
         // Data table
         html.push_str("    <table>\n");
         html.push_str("      <thead><tr><th>Name</th>");
-        for col in &columns {
+        for col in columns {
             html.push_str(&format!("<th>{}</th>", escape_html(col)));
         }
         html.push_str("</tr></thead>\n");
         html.push_str("      <tbody>\n");
 
-        for (i, entry) in result.entries.iter().enumerate() {
+        for (i, entry) in entries.iter().enumerate() {
             let extra_class = if i >= Self::TOP_N {
                 " class=\"extra-row\""
             } else {
@@ -157,7 +140,7 @@ impl HtmlWriter {
             };
             html.push_str(&format!("        <tr{extra_class}>"));
             html.push_str(&format!("<td>{}</td>", escape_html(&entry.key)));
-            for col in &columns {
+            for col in columns {
                 let val = entry
                     .values
                     .get(col)
@@ -182,6 +165,63 @@ impl HtmlWriter {
                 escape_html(&hide_text),
                 escape_html(&format!("Show {} more entries", remaining))
             ));
+        }
+
+        html
+    }
+
+    fn render_section(result: &MetricResult) -> String {
+        let columns = Self::get_columns(result);
+        let bar_col = Self::first_numeric_column(result);
+
+        let total: usize = if result.entry_groups.is_empty() {
+            result.entries.len()
+        } else {
+            result
+                .entry_groups
+                .iter()
+                .map(|(_, entries)| entries.len())
+                .sum()
+        };
+
+        let mut html = String::new();
+
+        // Section wrapper
+        html.push_str("<div class=\"report-section\">\n");
+        html.push_str(&format!(
+            "  <div class=\"section-header\"><h2>{}<span class=\"entry-count\">({} entries)</span></h2><span class=\"toggle\">\u{25be}</span></div>\n",
+            escape_html(&result.name),
+            total
+        ));
+        html.push_str("  <div class=\"section-body\">\n");
+
+        // Description
+        if !result.description.is_empty() {
+            html.push_str(&format!(
+                "    <p class=\"section-desc\">{}</p>\n",
+                escape_html(&result.description)
+            ));
+        }
+
+        if result.entry_groups.is_empty() {
+            html.push_str(&Self::render_entries_block(
+                &result.entries,
+                &columns,
+                &bar_col,
+            ));
+        } else {
+            for (group_name, group_entries) in &result.entry_groups {
+                html.push_str(&format!(
+                    "    <h3 style=\"color: #58a6ff; margin: 1.2rem 0 0.5rem; font-size: 0.95rem; text-transform: capitalize;\">{} <span style=\"color: #8b949e; font-size: 0.8rem;\">({} entries)</span></h3>\n",
+                    escape_html(group_name),
+                    group_entries.len()
+                ));
+                html.push_str(&Self::render_entries_block(
+                    group_entries,
+                    &columns,
+                    &bar_col,
+                ));
+            }
         }
 
         html.push_str("  </div>\n");
@@ -225,6 +265,7 @@ mod tests {
             name: "Authors".to_string(),
             description: "Top authors by commits".to_string(),
             columns: vec!["commits".to_string()],
+            entry_groups: vec![],
             entries: vec![
                 MetricEntry {
                     key: "alice".to_string(),

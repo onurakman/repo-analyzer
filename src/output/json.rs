@@ -4,7 +4,7 @@ use std::fs;
 use serde_json::{Map, Value, json};
 
 use crate::output::ReportWriter;
-use crate::types::{MetricResult, MetricValue, OutputConfig};
+use crate::types::{MetricEntry, MetricResult, MetricValue, OutputConfig};
 
 pub struct JsonWriter;
 
@@ -22,9 +22,8 @@ impl JsonWriter {
         }
     }
 
-    fn result_to_json(result: &MetricResult) -> Value {
-        let entries: Vec<Value> = result
-            .entries
+    fn entries_to_json(entries: &[MetricEntry]) -> Vec<Value> {
+        entries
             .iter()
             .map(|entry| {
                 let mut map = Map::new();
@@ -36,14 +35,28 @@ impl JsonWriter {
                 }
                 Value::Object(map)
             })
-            .collect();
+            .collect()
+    }
 
-        json!({
-            "name": result.name,
-            "description": result.description,
-            "columns": result.columns,
-            "entries": entries
-        })
+    fn result_to_json(result: &MetricResult) -> Value {
+        let mut obj = Map::new();
+        obj.insert("name".to_string(), json!(result.name));
+        obj.insert("description".to_string(), json!(result.description));
+        obj.insert("columns".to_string(), json!(result.columns));
+
+        if result.entry_groups.is_empty() {
+            obj.insert(
+                "entries".to_string(),
+                json!(Self::entries_to_json(&result.entries)),
+            );
+        } else {
+            for (group_name, group_entries) in &result.entry_groups {
+                let key = format!("entries_{group_name}");
+                obj.insert(key, json!(Self::entries_to_json(group_entries)));
+            }
+        }
+
+        Value::Object(obj)
     }
 }
 
@@ -88,6 +101,7 @@ mod tests {
             name: "Authors".to_string(),
             description: "Top authors".to_string(),
             columns: vec!["commits".to_string()],
+            entry_groups: vec![],
             entries: vec![
                 MetricEntry {
                     key: "alice".to_string(),

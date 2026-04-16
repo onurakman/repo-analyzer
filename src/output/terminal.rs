@@ -1,7 +1,7 @@
 use comfy_table::{Cell, CellAlignment, Color, Table};
 
 use crate::output::ReportWriter;
-use crate::types::{MetricResult, MetricValue, OutputConfig};
+use crate::types::{MetricEntry, MetricResult, MetricValue, OutputConfig};
 
 pub struct TerminalWriter;
 
@@ -35,6 +35,49 @@ impl TerminalWriter {
     }
 }
 
+impl TerminalWriter {
+    fn render_table(entries: &[MetricEntry], columns: &[String], top_n: usize) {
+        let mut table = Table::new();
+
+        // Header row
+        let mut header_cells = vec![
+            Cell::new("Name")
+                .fg(Color::Cyan)
+                .set_alignment(CellAlignment::Left),
+        ];
+        for col in columns {
+            header_cells.push(
+                Cell::new(col)
+                    .fg(Color::Cyan)
+                    .set_alignment(CellAlignment::Left),
+            );
+        }
+        table.set_header(header_cells);
+
+        // Data rows
+        let display_count = entries.len().min(top_n);
+        for entry in entries.iter().take(display_count) {
+            let mut row = vec![entry.key.clone()];
+            for col in columns {
+                let val = entry
+                    .values
+                    .get(col)
+                    .map(Self::format_value)
+                    .unwrap_or_default();
+                row.push(val);
+            }
+            table.add_row(row);
+        }
+
+        println!("{table}");
+
+        if entries.len() > top_n {
+            let remaining = entries.len() - top_n;
+            println!("  ... and {remaining} more");
+        }
+    }
+}
+
 impl ReportWriter for TerminalWriter {
     fn write(&self, results: &[MetricResult], config: &OutputConfig) -> anyhow::Result<()> {
         let top_n = config.top.unwrap_or(usize::MAX);
@@ -50,48 +93,18 @@ impl ReportWriter for TerminalWriter {
             }
 
             let columns = Self::get_columns(result);
-            if columns.is_empty() && result.entries.is_empty() {
-                println!("  (no data)");
-                continue;
-            }
 
-            let mut table = Table::new();
-
-            // Header row
-            let mut header_cells = vec![
-                Cell::new("Name")
-                    .fg(Color::Cyan)
-                    .set_alignment(CellAlignment::Left),
-            ];
-            for col in &columns {
-                header_cells.push(
-                    Cell::new(col)
-                        .fg(Color::Cyan)
-                        .set_alignment(CellAlignment::Left),
-                );
-            }
-            table.set_header(header_cells);
-
-            // Data rows
-            let display_count = result.entries.len().min(top_n);
-            for entry in result.entries.iter().take(display_count) {
-                let mut row = vec![entry.key.clone()];
-                for col in &columns {
-                    let val = entry
-                        .values
-                        .get(col)
-                        .map(Self::format_value)
-                        .unwrap_or_default();
-                    row.push(val);
+            if result.entry_groups.is_empty() {
+                if columns.is_empty() && result.entries.is_empty() {
+                    println!("  (no data)");
+                    continue;
                 }
-                table.add_row(row);
-            }
-
-            println!("{table}");
-
-            if result.entries.len() > top_n {
-                let remaining = result.entries.len() - top_n;
-                println!("  ... and {remaining} more");
+                Self::render_table(&result.entries, &columns, top_n);
+            } else {
+                for (group_name, group_entries) in &result.entry_groups {
+                    println!("\n  -- {} ({} entries) --", group_name, group_entries.len());
+                    Self::render_table(group_entries, &columns, top_n);
+                }
             }
         }
 
@@ -111,6 +124,7 @@ mod tests {
             name: "Test Metric".to_string(),
             description: "A test metric".to_string(),
             columns: vec!["commits".to_string(), "lines".to_string()],
+            entry_groups: vec![],
             entries: vec![MetricEntry {
                 key: "alice".to_string(),
                 values: HashMap::from([

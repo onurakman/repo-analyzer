@@ -105,6 +105,7 @@ impl MetricCollector for CouplingCollector {
         MetricResult {
             name: "coupling".into(),
             description: "Temporal coupling between files changed together".into(),
+            entry_groups: vec![],
             columns: vec![
                 "file_a".into(),
                 "file_b".into(),

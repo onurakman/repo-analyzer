@@ -3,7 +3,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::output::ReportWriter;
-use crate::types::{MetricResult, MetricValue, OutputConfig};
+use crate::types::{MetricEntry, MetricResult, MetricValue, OutputConfig};
 
 pub struct CsvWriter;
 
@@ -35,22 +35,14 @@ impl CsvWriter {
         }
     }
 
-    fn write_result_to_writer<W: io::Write>(
-        result: &MetricResult,
-        writer: W,
+    fn write_entries<W: io::Write>(
+        entries: &[MetricEntry],
+        columns: &[String],
+        csv_writer: &mut csv::Writer<W>,
     ) -> anyhow::Result<()> {
-        let columns = Self::get_columns(result);
-        let mut csv_writer = csv::Writer::from_writer(writer);
-
-        // Header: "name" + column names
-        let mut header = vec!["name".to_string()];
-        header.extend(columns.iter().cloned());
-        csv_writer.write_record(&header)?;
-
-        // Data rows
-        for entry in &result.entries {
+        for entry in entries {
             let mut row = vec![entry.key.clone()];
-            for col in &columns {
+            for col in columns {
                 let val = entry
                     .values
                     .get(col)
@@ -59,6 +51,44 @@ impl CsvWriter {
                 row.push(val);
             }
             csv_writer.write_record(&row)?;
+        }
+        Ok(())
+    }
+
+    fn write_result_to_writer<W: io::Write>(
+        result: &MetricResult,
+        writer: W,
+    ) -> anyhow::Result<()> {
+        let columns = Self::get_columns(result);
+        let mut csv_writer = csv::Writer::from_writer(writer);
+
+        if result.entry_groups.is_empty() {
+            // Header: "name" + column names
+            let mut header = vec!["name".to_string()];
+            header.extend(columns.iter().cloned());
+            csv_writer.write_record(&header)?;
+
+            Self::write_entries(&result.entries, &columns, &mut csv_writer)?;
+        } else {
+            // Header: "group" + "name" + column names
+            let mut header = vec!["group".to_string(), "name".to_string()];
+            header.extend(columns.iter().cloned());
+            csv_writer.write_record(&header)?;
+
+            for (group_name, group_entries) in &result.entry_groups {
+                for entry in group_entries {
+                    let mut row = vec![group_name.clone(), entry.key.clone()];
+                    for col in &columns {
+                        let val = entry
+                            .values
+                            .get(col)
+                            .map(Self::format_value)
+                            .unwrap_or_default();
+                        row.push(val);
+                    }
+                    csv_writer.write_record(&row)?;
+                }
+            }
         }
 
         csv_writer.flush()?;
@@ -130,6 +160,7 @@ mod tests {
             name: name.to_string(),
             description: format!("{name} description"),
             columns: vec!["commits".to_string(), "lines".to_string()],
+            entry_groups: vec![],
             entries: vec![
                 MetricEntry {
                     key: "alice".to_string(),

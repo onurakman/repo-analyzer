@@ -111,6 +111,7 @@ impl MetricCollector for AgeCollector {
         MetricResult {
             name: "age".into(),
             description: "File age and change frequency analysis".into(),
+            entry_groups: vec![],
             columns: vec![
                 "age_days".into(),
                 "first_seen".into(),

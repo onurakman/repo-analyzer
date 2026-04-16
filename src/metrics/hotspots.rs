@@ -130,6 +130,7 @@ impl MetricCollector for HotspotsCollector {
             name: "hotspots".into(),
             description: "Files and constructs with high change frequency and author diversity"
                 .into(),
+            entry_groups: vec![],
             columns: vec![
                 "level".into(),
                 "kind".into(),

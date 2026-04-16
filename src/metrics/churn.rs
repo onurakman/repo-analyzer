@@ -87,6 +87,7 @@ impl MetricCollector for ChurnCollector {
         MetricResult {
             name: "churn".into(),
             description: "File-level code churn statistics".into(),
+            entry_groups: vec![],
             columns: vec![
                 "lines_added".into(),
                 "lines_deleted".into(),

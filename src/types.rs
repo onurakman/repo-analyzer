@@ -298,12 +298,18 @@ pub struct MetricEntry {
 }
 
 /// The result of one metric collector's run.
+///
+/// When `entry_groups` is non-empty, entries are organized into named groups
+/// (e.g., "hourly" and "daily" for patterns). Output writers should render
+/// each group separately. The flat `entries` field is ignored in this case.
 #[derive(Debug, Clone, Serialize)]
 pub struct MetricResult {
     pub name: String,
     pub description: String,
     pub columns: Vec<String>,
     pub entries: Vec<MetricEntry>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub entry_groups: Vec<(String, Vec<MetricEntry>)>,
 }
 
 // ---------------------------------------------------------------------------

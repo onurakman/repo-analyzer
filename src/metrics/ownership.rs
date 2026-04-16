@@ -79,6 +79,7 @@ impl MetricCollector for OwnershipCollector {
         MetricResult {
             name: "ownership".into(),
             description: "File ownership distribution and bus factor analysis".into(),
+            entry_groups: vec![],
             columns: vec![
                 "total_authors".into(),
                 "bus_factor".into(),
