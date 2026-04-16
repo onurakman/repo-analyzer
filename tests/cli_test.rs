@@ -110,7 +110,7 @@ fn test_cli_json_output() {
         .args(["-f", "json", "-q", "--only", "authors"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Test User"));
+        .stdout(predicate::str::contains("test@example.com"));
 }
 
 #[test]
@@ -136,8 +136,8 @@ fn test_cli_csv_output_to_file() {
 
     let contents = fs::read_to_string(&out_file).expect("failed to read output file");
     assert!(
-        contents.contains("Test User"),
-        "CSV output should contain 'Test User', got: {contents}"
+        contents.contains("test@example.com"),
+        "CSV output should contain 'test@example.com', got: {contents}"
     );
 }
 

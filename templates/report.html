@@ -5,19 +5,28 @@
     <title>repo-analyzer Report</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; padding: 2rem; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; padding: 2rem; max-width: 1200px; margin: 0 auto; }
         h1 { color: #58a6ff; margin-bottom: 0.5rem; }
         .meta { color: #8b949e; margin-bottom: 2rem; font-size: 0.9rem; }
         .report-section { margin-bottom: 2rem; border: 1px solid #30363d; border-radius: 6px; overflow: hidden; }
-        .section-header { background: #161b22; padding: 1rem; cursor: pointer; display: flex; justify-content: space-between; }
+        .section-header { background: #161b22; padding: 1rem; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
         .section-header h2 { color: #58a6ff; font-size: 1.1rem; }
+        .section-header .toggle { color: #8b949e; font-size: 1.2rem; }
+        .section-header .entry-count { color: #8b949e; font-size: 0.8rem; margin-left: 0.75rem; }
         .section-body { padding: 1rem; }
         .section-body.collapsed { display: none; }
+        .section-desc { color: #8b949e; font-size: 0.85rem; margin-bottom: 1rem; font-style: italic; }
         table { width: 100%; border-collapse: collapse; }
         th { text-align: left; padding: 0.5rem; border-bottom: 2px solid #30363d; color: #58a6ff; font-size: 0.85rem; }
         td { padding: 0.5rem; border-bottom: 1px solid #21262d; font-size: 0.85rem; }
         tr:hover { background: #161b22; }
+        tr.extra-row { display: none; }
+        tr.extra-row.visible { display: table-row; }
         .bar { display: inline-block; height: 20px; background: #238636; border-radius: 3px; margin-right: 0.5rem; min-width: 2px; }
+        .bar-row.extra-row { display: none; }
+        .bar-row.extra-row.visible { display: block; }
+        .show-more-btn { display: inline-block; margin-top: 0.75rem; padding: 0.4rem 1rem; background: #21262d; color: #58a6ff; border: 1px solid #30363d; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+        .show-more-btn:hover { background: #30363d; }
     </style>
 </head>
 <body>
@@ -25,11 +34,24 @@
     <div class="meta">Generated: {{GENERATED_AT}}</div>
     {{REPORT_SECTIONS}}
     <script>
+        // Section expand/collapse
         document.querySelectorAll('.section-header').forEach(h => {
             h.addEventListener('click', () => {
                 const body = h.nextElementSibling;
                 body.classList.toggle('collapsed');
-                h.querySelector('.toggle').textContent = body.classList.contains('collapsed') ? '▸' : '▾';
+                h.querySelector('.toggle').textContent = body.classList.contains('collapsed') ? '\u25b8' : '\u25be';
+            });
+        });
+        // Show more / show less toggle
+        document.querySelectorAll('.show-more-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const section = btn.closest('.section-body');
+                const extras = section.querySelectorAll('.extra-row');
+                const expanded = btn.dataset.expanded === 'true';
+                extras.forEach(r => r.classList.toggle('visible', !expanded));
+                btn.dataset.expanded = String(!expanded);
+                btn.textContent = expanded ? btn.dataset.showText : btn.dataset.hideText;
             });
         });
     </script>

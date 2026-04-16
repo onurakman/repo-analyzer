@@ -69,9 +69,14 @@ impl HtmlWriter {
         }
     }
 
+    /// Number of entries shown by default before requiring expand.
+    const TOP_N: usize = 10;
+
     fn render_section(result: &MetricResult) -> String {
         let columns = Self::get_columns(result);
         let bar_col = Self::first_numeric_column(result);
+        let total = result.entries.len();
+        let has_extra = total > Self::TOP_N;
 
         // Find max value for bar chart scaling
         let max_val = bar_col
@@ -91,15 +96,24 @@ impl HtmlWriter {
         // Section wrapper
         html.push_str("<div class=\"report-section\">\n");
         html.push_str(&format!(
-            "  <div class=\"section-header\"><h2>{}</h2><span class=\"toggle\">\u{25be}</span></div>\n",
-            escape_html(&result.name)
+            "  <div class=\"section-header\"><h2>{}<span class=\"entry-count\">({} entries)</span></h2><span class=\"toggle\">\u{25be}</span></div>\n",
+            escape_html(&result.name),
+            total
         ));
         html.push_str("  <div class=\"section-body\">\n");
+
+        // Description
+        if !result.description.is_empty() {
+            html.push_str(&format!(
+                "    <p class=\"section-desc\">{}</p>\n",
+                escape_html(&result.description)
+            ));
+        }
 
         // Bar chart (if numeric column exists)
         if let Some(ref bar_col_name) = bar_col {
             html.push_str("    <div style=\"margin-bottom: 1rem;\">\n");
-            for entry in &result.entries {
+            for (i, entry) in result.entries.iter().enumerate() {
                 let val = entry
                     .values
                     .get(bar_col_name)
@@ -110,8 +124,9 @@ impl HtmlWriter {
                 } else {
                     0
                 };
+                let extra_class = if i >= Self::TOP_N { " bar-row extra-row" } else { "" };
                 html.push_str(&format!(
-                    "      <div style=\"margin: 2px 0;\"><span class=\"bar\" style=\"width: {width_pct}%;\"></span><span>{} ({})</span></div>\n",
+                    "      <div class=\"bar-row{extra_class}\" style=\"margin: 2px 0;\"><span class=\"bar\" style=\"width: {width_pct}%;\"></span><span>{} ({})</span></div>\n",
                     escape_html(&entry.key),
                     escape_html(&Self::format_value(
                         entry.values.get(bar_col_name).unwrap_or(&MetricValue::Count(0))
@@ -130,8 +145,9 @@ impl HtmlWriter {
         html.push_str("</tr></thead>\n");
         html.push_str("      <tbody>\n");
 
-        for entry in &result.entries {
-            html.push_str("        <tr>");
+        for (i, entry) in result.entries.iter().enumerate() {
+            let extra_class = if i >= Self::TOP_N { " class=\"extra-row\"" } else { "" };
+            html.push_str(&format!("        <tr{extra_class}>"));
             html.push_str(&format!("<td>{}</td>", escape_html(&entry.key)));
             for col in &columns {
                 let val = entry
@@ -146,6 +162,20 @@ impl HtmlWriter {
 
         html.push_str("      </tbody>\n");
         html.push_str("    </table>\n");
+
+        // Show more button (only if there are extra rows)
+        if has_extra {
+            let remaining = total - Self::TOP_N;
+            let show_text = format!("Show all {} entries", total);
+            let hide_text = format!("Show top {} only", Self::TOP_N);
+            html.push_str(&format!(
+                "    <span class=\"show-more-btn\" data-expanded=\"false\" data-show-text=\"{}\" data-hide-text=\"{}\">{}</span>\n",
+                escape_html(&show_text),
+                escape_html(&hide_text),
+                escape_html(&format!("Show {} more entries", remaining))
+            ));
+        }
+
         html.push_str("  </div>\n");
         html.push_str("</div>\n");
 

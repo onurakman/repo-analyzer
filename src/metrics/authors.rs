@@ -6,7 +6,6 @@ use crate::metrics::MetricCollector;
 use crate::types::{MetricEntry, MetricResult, MetricValue, ParsedChange};
 
 struct AuthorStats {
-    name: String,
     commits: u64,
     lines_added: u64,
     lines_deleted: u64,
@@ -48,7 +47,6 @@ impl MetricCollector for AuthorsCollector {
             .authors
             .entry(email.clone())
             .or_insert_with(|| AuthorStats {
-                name: commit.author.clone(),
                 commits: 0,
                 lines_added: 0,
                 lines_deleted: 0,
@@ -76,7 +74,6 @@ impl MetricCollector for AuthorsCollector {
             .drain()
             .map(|(email, stats)| {
                 let mut values = HashMap::new();
-                values.insert("email".into(), MetricValue::Text(email));
                 values.insert("commits".into(), MetricValue::Count(stats.commits));
                 values.insert("lines_added".into(), MetricValue::Count(stats.lines_added));
                 values.insert(
@@ -90,7 +87,7 @@ impl MetricCollector for AuthorsCollector {
                 values.insert("first_commit".into(), MetricValue::Date(stats.first_commit));
                 values.insert("last_commit".into(), MetricValue::Date(stats.last_commit));
                 MetricEntry {
-                    key: stats.name,
+                    key: email,
                     values,
                 }
             })
@@ -112,7 +109,6 @@ impl MetricCollector for AuthorsCollector {
             name: "authors".into(),
             description: "Per-author contribution statistics".into(),
             columns: vec![
-                "email".into(),
                 "commits".into(),
                 "lines_added".into(),
                 "lines_deleted".into(),
@@ -167,7 +163,7 @@ mod tests {
         let result = collector.finalize();
         assert_eq!(result.entries.len(), 2);
 
-        let alice = result.entries.iter().find(|e| e.key == "Alice").unwrap();
+        let alice = result.entries.iter().find(|e| e.key == "Alice@test.com").unwrap();
         match alice.values.get("commits") {
             Some(MetricValue::Count(n)) => assert_eq!(*n, 2),
             other => panic!("Expected Count(2), got {:?}", other),
@@ -177,7 +173,7 @@ mod tests {
             other => panic!("Expected Count(15), got {:?}", other),
         }
 
-        let bob = result.entries.iter().find(|e| e.key == "Bob").unwrap();
+        let bob = result.entries.iter().find(|e| e.key == "Bob@test.com").unwrap();
         match bob.values.get("commits") {
             Some(MetricValue::Count(n)) => assert_eq!(*n, 1),
             other => panic!("Expected Count(1), got {:?}", other),
@@ -251,7 +247,7 @@ mod tests {
         collector.process(&make_change("Bob", "a.rs", 1, 0));
 
         let result = collector.finalize();
-        assert_eq!(result.entries[0].key, "Alice");
-        assert_eq!(result.entries[1].key, "Bob");
+        assert_eq!(result.entries[0].key, "Alice@test.com");
+        assert_eq!(result.entries[1].key, "Bob@test.com");
     }
 }

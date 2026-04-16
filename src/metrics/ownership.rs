@@ -29,11 +29,11 @@ impl MetricCollector for OwnershipCollector {
 
     fn process(&mut self, change: &ParsedChange) {
         let file = &change.diff.file_path;
-        let author = &change.diff.commit.author;
+        let email = &change.diff.commit.email;
         let added = change.diff.additions as u64;
 
         let authors = self.files.entry(file.clone()).or_default();
-        *authors.entry(author.clone()).or_insert(0) += added;
+        *authors.entry(email.clone()).or_insert(0) += added;
     }
 
     fn finalize(&mut self) -> MetricResult {

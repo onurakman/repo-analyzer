@@ -317,9 +317,9 @@ mod tests {
 
         // First result should be authors
         assert_eq!(results[0].name, "authors");
-        // Should have Test User as an author
-        let has_test_user = results[0].entries.iter().any(|e| e.key == "Test User");
-        assert!(has_test_user, "should have 'Test User' in authors report");
+        // Should have test@example.com as an author (grouped by email)
+        let has_test_user = results[0].entries.iter().any(|e| e.key == "test@example.com");
+        assert!(has_test_user, "should have 'test@example.com' in authors report");
 
         // Second result should be churn
         assert_eq!(results[1].name, "churn");
@@ -377,8 +377,8 @@ mod tests {
         assert_eq!(results.len(), 1, "should have 1 metric result (authors)");
         assert_eq!(results[0].name, "authors");
 
-        // Should have Test User
-        let has_test_user = results[0].entries.iter().any(|e| e.key == "Test User");
-        assert!(has_test_user, "should have 'Test User' in authors report");
+        // Should have test@example.com (grouped by email)
+        let has_test_user = results[0].entries.iter().any(|e| e.key == "test@example.com");
+        assert!(has_test_user, "should have 'test@example.com' in authors report");
     }
 }

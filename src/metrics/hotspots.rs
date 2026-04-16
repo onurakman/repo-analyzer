@@ -54,7 +54,7 @@ impl MetricCollector for HotspotsCollector {
 
     fn process(&mut self, change: &ParsedChange) {
         let file = &change.diff.file_path;
-        let author = &change.diff.commit.author;
+        let email = &change.diff.commit.email;
 
         // File-level hotspot
         let file_data = self
@@ -62,7 +62,7 @@ impl MetricCollector for HotspotsCollector {
             .entry(file.clone())
             .or_insert_with(HotspotData::new);
         file_data.change_count += 1;
-        file_data.authors.insert(author.clone());
+        file_data.authors.insert(email.clone());
 
         // Construct-level hotspots
         for construct in &change.constructs {
@@ -76,7 +76,7 @@ impl MetricCollector for HotspotsCollector {
                     file: file.clone(),
                 });
             entry.data.change_count += 1;
-            entry.data.authors.insert(author.clone());
+            entry.data.authors.insert(email.clone());
         }
     }
 
