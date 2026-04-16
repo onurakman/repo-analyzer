@@ -32,6 +32,12 @@ struct ConstructHotspot {
     file: String,
 }
 
+impl Default for HotspotsCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HotspotsCollector {
     pub fn new() -> Self {
         Self {
@@ -122,7 +128,8 @@ impl MetricCollector for HotspotsCollector {
 
         MetricResult {
             name: "hotspots".into(),
-            description: "Files and constructs with high change frequency and author diversity".into(),
+            description: "Files and constructs with high change frequency and author diversity"
+                .into(),
             columns: vec![
                 "level".into(),
                 "kind".into(),
@@ -142,11 +149,7 @@ mod tests {
     use crate::types::{CodeConstruct, CommitInfo, DiffRecord, FileStatus, ParsedChange};
     use chrono::{FixedOffset, TimeZone};
 
-    fn make_change(
-        author: &str,
-        file: &str,
-        constructs: Vec<CodeConstruct>,
-    ) -> ParsedChange {
+    fn make_change(author: &str, file: &str, constructs: Vec<CodeConstruct>) -> ParsedChange {
         let ts = FixedOffset::east_opt(0)
             .unwrap()
             .with_ymd_and_hms(2025, 1, 15, 12, 0, 0)

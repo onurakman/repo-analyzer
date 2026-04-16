@@ -16,6 +16,12 @@ pub struct AgeCollector {
     files: HashMap<String, FileAge>,
 }
 
+impl Default for AgeCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AgeCollector {
     pub fn new() -> Self {
         Self {
@@ -63,8 +69,7 @@ impl MetricCollector for AgeCollector {
             .filter(|(_, age)| !age.deleted)
             .map(|(file, age)| {
                 let age_days = (today - age.first_seen).num_days().max(0) as u64;
-                let days_since_last_change =
-                    (today - age.last_modified).num_days().max(0) as u64;
+                let days_since_last_change = (today - age.last_modified).num_days().max(0) as u64;
 
                 let age_years = age_days as f64 / 365.25;
                 let changes_per_year = if age_years > 0.0 {
@@ -82,7 +87,10 @@ impl MetricCollector for AgeCollector {
                     MetricValue::Count(days_since_last_change),
                 );
                 values.insert("change_count".into(), MetricValue::Count(age.change_count));
-                values.insert("changes_per_year".into(), MetricValue::Float(changes_per_year));
+                values.insert(
+                    "changes_per_year".into(),
+                    MetricValue::Float(changes_per_year),
+                );
 
                 MetricEntry { key: file, values }
             })
@@ -122,7 +130,13 @@ mod tests {
     use crate::types::{CommitInfo, DiffRecord, FileStatus, ParsedChange};
     use chrono::{FixedOffset, TimeZone};
 
-    fn make_change(file: &str, status: FileStatus, year: i32, month: u32, day: u32) -> ParsedChange {
+    fn make_change(
+        file: &str,
+        status: FileStatus,
+        year: i32,
+        month: u32,
+        day: u32,
+    ) -> ParsedChange {
         let ts = FixedOffset::east_opt(0)
             .unwrap()
             .with_ymd_and_hms(year, month, day, 12, 0, 0)

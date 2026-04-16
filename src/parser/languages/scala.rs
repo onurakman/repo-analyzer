@@ -25,11 +25,7 @@ fn node_text<'a>(node: &Node, source: &'a str) -> &'a str {
 }
 
 /// Recursively walks the AST, extracting constructs.
-fn walk_node(
-    node: &Node,
-    source: &str,
-    constructs: &mut Vec<CodeConstruct>,
-) {
+fn walk_node(node: &Node, source: &str, constructs: &mut Vec<CodeConstruct>) {
     match node.kind() {
         "function_definition" => {
             if let Some(name_node) = node.child_by_field_name("name") {
@@ -107,7 +103,10 @@ mod tests {
     fn test_function() {
         let source = "def hello(): Unit = { println(\"hi\") }";
         let constructs = parse_and_map(source);
-        let funcs: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "function").collect();
+        let funcs: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "function")
+            .collect();
         assert_eq!(funcs.len(), 1);
         assert_eq!(funcs[0].name(), "hello");
     }
@@ -124,7 +123,10 @@ object Dog {
 }
 "#;
         let constructs = parse_and_map(source);
-        let classes: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "class").collect();
+        let classes: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "class")
+            .collect();
         // class Dog + object Dog (both map to Class)
         assert_eq!(classes.len(), 2);
     }
@@ -133,7 +135,10 @@ object Dog {
     fn test_trait() {
         let source = "trait Greetable { def greet(): String }";
         let constructs = parse_and_map(source);
-        let traits: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "trait").collect();
+        let traits: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "trait")
+            .collect();
         assert_eq!(traits.len(), 1);
         assert_eq!(traits[0].name(), "Greetable");
     }

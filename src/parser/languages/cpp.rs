@@ -142,11 +142,8 @@ fn find_function_name(node: &Node, source: &str) -> Option<String> {
         }
         _ => {
             // Try to find an identifier child
-            if let Some(name_node) = node.child_by_field_name("name") {
-                Some(node_text(&name_node, source).to_string())
-            } else {
-                None
-            }
+            node.child_by_field_name("name")
+                .map(|name_node| node_text(&name_node, source).to_string())
         }
     }
 }
@@ -169,7 +166,10 @@ mod tests {
     fn test_function() {
         let source = "int greet(const char* name) { return 0; }";
         let constructs = parse_and_map(source);
-        let funcs: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "function").collect();
+        let funcs: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "function")
+            .collect();
         assert_eq!(funcs.len(), 1);
         assert_eq!(funcs[0].name(), "greet");
     }
@@ -184,11 +184,17 @@ public:
 "#;
         let constructs = parse_and_map(source);
 
-        let classes: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "class").collect();
+        let classes: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "class")
+            .collect();
         assert_eq!(classes.len(), 1);
         assert_eq!(classes[0].name(), "Animal");
 
-        let methods: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "method").collect();
+        let methods: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "method")
+            .collect();
         assert_eq!(methods.len(), 1);
         assert_eq!(methods[0].name(), "speak");
     }
@@ -201,7 +207,10 @@ namespace utils {
 }
 "#;
         let constructs = parse_and_map(source);
-        let modules: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "module").collect();
+        let modules: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "module")
+            .collect();
         assert_eq!(modules.len(), 1);
         assert_eq!(modules[0].name(), "utils");
     }

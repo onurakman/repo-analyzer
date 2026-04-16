@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::output::ReportWriter;
 use crate::types::{MetricResult, MetricValue, OutputConfig};
@@ -30,8 +30,7 @@ impl JsonWriter {
                 let mut map = Map::new();
                 map.insert("name".to_string(), json!(&entry.key));
                 // Use sorted keys for deterministic output
-                let sorted_values: BTreeMap<&String, &MetricValue> =
-                    entry.values.iter().collect();
+                let sorted_values: BTreeMap<&String, &MetricValue> = entry.values.iter().collect();
                 for (k, v) in &sorted_values {
                     map.insert((*k).clone(), Self::metric_value_to_json(v));
                 }
@@ -78,9 +77,9 @@ impl ReportWriter for JsonWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{MetricEntry, OutputFormat};
     use std::collections::HashMap;
     use std::fs;
-    use crate::types::{MetricEntry, OutputFormat};
     use tempfile::NamedTempFile;
 
     #[test]
@@ -92,15 +91,11 @@ mod tests {
             entries: vec![
                 MetricEntry {
                     key: "alice".to_string(),
-                    values: HashMap::from([
-                        ("commits".to_string(), MetricValue::Count(50)),
-                    ]),
+                    values: HashMap::from([("commits".to_string(), MetricValue::Count(50))]),
                 },
                 MetricEntry {
                     key: "bob".to_string(),
-                    values: HashMap::from([
-                        ("commits".to_string(), MetricValue::Count(30)),
-                    ]),
+                    values: HashMap::from([("commits".to_string(), MetricValue::Count(30))]),
                 },
             ],
         };
@@ -129,10 +124,7 @@ mod tests {
         assert!(reports.contains_key("authors"));
 
         let authors = reports.get("authors").unwrap();
-        assert_eq!(
-            authors.get("name").unwrap().as_str().unwrap(),
-            "Authors"
-        );
+        assert_eq!(authors.get("name").unwrap().as_str().unwrap(), "Authors");
 
         let entries = authors.get("entries").unwrap().as_array().unwrap();
         assert_eq!(entries.len(), 2);

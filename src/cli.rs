@@ -94,7 +94,7 @@ impl Cli {
                     if trimmed.is_empty() {
                         continue;
                     }
-                    match ReportKind::from_str(trimmed) {
+                    match ReportKind::parse(trimmed) {
                         Some(k) => kinds.push(k),
                         None => anyhow::bail!("Unknown report kind: '{trimmed}'"),
                     }

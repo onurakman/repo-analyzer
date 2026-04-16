@@ -122,7 +122,10 @@ mod tests {
     fn test_function() {
         let source = "def greet(name):\n    print(name)\n";
         let constructs = parse_and_map(source);
-        let funcs: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "function").collect();
+        let funcs: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "function")
+            .collect();
         assert_eq!(funcs.len(), 1);
         assert_eq!(funcs[0].name(), "greet");
     }
@@ -139,11 +142,17 @@ class Animal:
 "#;
         let constructs = parse_and_map(source);
 
-        let classes: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "class").collect();
+        let classes: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "class")
+            .collect();
         assert_eq!(classes.len(), 1);
         assert_eq!(classes[0].name(), "Animal");
 
-        let methods: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "method").collect();
+        let methods: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "method")
+            .collect();
         assert_eq!(methods.len(), 2);
 
         let method_names: Vec<String> = methods.iter().map(|m| m.qualified_name()).collect();
@@ -155,7 +164,10 @@ class Animal:
     fn test_lambda() {
         let source = "f = lambda x: x + 1\n";
         let constructs = parse_and_map(source);
-        let closures: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "closure").collect();
+        let closures: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "closure")
+            .collect();
         assert_eq!(closures.len(), 1);
     }
 }

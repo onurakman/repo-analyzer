@@ -19,6 +19,12 @@ pub struct AuthorsCollector {
     authors: HashMap<String, AuthorStats>,
 }
 
+impl Default for AuthorsCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AuthorsCollector {
     pub fn new() -> Self {
         Self {
@@ -38,15 +44,18 @@ impl MetricCollector for AuthorsCollector {
         let date = commit.timestamp.date_naive();
         let day_str = date.format("%Y-%m-%d").to_string();
 
-        let stats = self.authors.entry(email.clone()).or_insert_with(|| AuthorStats {
-            name: commit.author.clone(),
-            commits: 0,
-            lines_added: 0,
-            lines_deleted: 0,
-            active_days: HashSet::new(),
-            first_commit: date,
-            last_commit: date,
-        });
+        let stats = self
+            .authors
+            .entry(email.clone())
+            .or_insert_with(|| AuthorStats {
+                name: commit.author.clone(),
+                commits: 0,
+                lines_added: 0,
+                lines_deleted: 0,
+                active_days: HashSet::new(),
+                first_commit: date,
+                last_commit: date,
+            });
 
         stats.commits += 1;
         stats.lines_added += change.diff.additions as u64;
@@ -70,14 +79,20 @@ impl MetricCollector for AuthorsCollector {
                 values.insert("email".into(), MetricValue::Text(email));
                 values.insert("commits".into(), MetricValue::Count(stats.commits));
                 values.insert("lines_added".into(), MetricValue::Count(stats.lines_added));
-                values.insert("lines_deleted".into(), MetricValue::Count(stats.lines_deleted));
+                values.insert(
+                    "lines_deleted".into(),
+                    MetricValue::Count(stats.lines_deleted),
+                );
                 values.insert(
                     "active_days".into(),
                     MetricValue::Count(stats.active_days.len() as u64),
                 );
                 values.insert("first_commit".into(), MetricValue::Date(stats.first_commit));
                 values.insert("last_commit".into(), MetricValue::Date(stats.last_commit));
-                MetricEntry { key: stats.name, values }
+                MetricEntry {
+                    key: stats.name,
+                    values,
+                }
             })
             .collect();
 

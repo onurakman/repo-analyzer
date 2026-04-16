@@ -47,16 +47,13 @@ impl HtmlWriter {
     /// Find the first numeric column name (for bar chart widths).
     fn first_numeric_column(result: &MetricResult) -> Option<String> {
         let columns = Self::get_columns(result);
-        if let Some(first_entry) = result.entries.first() {
-            for col in &columns {
-                if let Some(val) = first_entry.values.get(col) {
-                    match val {
-                        MetricValue::Count(_) | MetricValue::SignedCount(_) | MetricValue::Float(_) => {
-                            return Some(col.clone());
-                        }
-                        _ => {}
-                    }
-                }
+        let first_entry = result.entries.first()?;
+        for col in &columns {
+            if let Some(
+                MetricValue::Count(_) | MetricValue::SignedCount(_) | MetricValue::Float(_),
+            ) = first_entry.values.get(col)
+            {
+                return Some(col.clone());
             }
         }
         None
@@ -179,9 +176,9 @@ impl ReportWriter for HtmlWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{MetricEntry, OutputFormat};
     use std::collections::HashMap;
     use std::fs;
-    use crate::types::{MetricEntry, OutputFormat};
     use tempfile::NamedTempFile;
 
     #[test]
@@ -193,15 +190,11 @@ mod tests {
             entries: vec![
                 MetricEntry {
                     key: "alice".to_string(),
-                    values: HashMap::from([
-                        ("commits".to_string(), MetricValue::Count(50)),
-                    ]),
+                    values: HashMap::from([("commits".to_string(), MetricValue::Count(50))]),
                 },
                 MetricEntry {
                     key: "bob".to_string(),
-                    values: HashMap::from([
-                        ("commits".to_string(), MetricValue::Count(30)),
-                    ]),
+                    values: HashMap::from([("commits".to_string(), MetricValue::Count(30))]),
                 },
             ],
         };
@@ -224,7 +217,10 @@ mod tests {
         assert!(content.contains("alice"), "should contain entry data");
         assert!(content.contains("bob"), "should contain entry data");
         assert!(content.contains("50"), "should contain metric value");
-        assert!(content.contains("Generated:"), "should contain generated timestamp");
+        assert!(
+            content.contains("Generated:"),
+            "should contain generated timestamp"
+        );
     }
 
     #[test]

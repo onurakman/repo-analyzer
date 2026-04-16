@@ -141,31 +141,91 @@ impl CodeConstruct {
     /// Returns the (start, end) line range (1-based, inclusive).
     pub fn line_range(&self) -> (u32, u32) {
         match self {
-            Self::Function { start_line, end_line, .. }
-            | Self::Method { start_line, end_line, .. }
-            | Self::Class { start_line, end_line, .. }
-            | Self::Struct { start_line, end_line, .. }
-            | Self::Enum { start_line, end_line, .. }
-            | Self::Trait { start_line, end_line, .. }
-            | Self::Interface { start_line, end_line, .. }
-            | Self::Impl { start_line, end_line, .. }
-            | Self::Closure { start_line, end_line, .. }
-            | Self::Module { start_line, end_line, .. }
-            | Self::Block { start_line, end_line, .. } => (*start_line, *end_line),
+            Self::Function {
+                start_line,
+                end_line,
+                ..
+            }
+            | Self::Method {
+                start_line,
+                end_line,
+                ..
+            }
+            | Self::Class {
+                start_line,
+                end_line,
+                ..
+            }
+            | Self::Struct {
+                start_line,
+                end_line,
+                ..
+            }
+            | Self::Enum {
+                start_line,
+                end_line,
+                ..
+            }
+            | Self::Trait {
+                start_line,
+                end_line,
+                ..
+            }
+            | Self::Interface {
+                start_line,
+                end_line,
+                ..
+            }
+            | Self::Impl {
+                start_line,
+                end_line,
+                ..
+            }
+            | Self::Closure {
+                start_line,
+                end_line,
+                ..
+            }
+            | Self::Module {
+                start_line,
+                end_line,
+                ..
+            }
+            | Self::Block {
+                start_line,
+                end_line,
+                ..
+            } => (*start_line, *end_line),
         }
     }
 
     /// Returns a qualified name like `MyStruct::my_method` or `<closure@42>`.
     pub fn qualified_name(&self) -> String {
         match self {
-            Self::Method { name, enclosing: Some(enc), .. }
-            | Self::Function { name, enclosing: Some(enc), .. } => {
+            Self::Method {
+                name,
+                enclosing: Some(enc),
+                ..
+            }
+            | Self::Function {
+                name,
+                enclosing: Some(enc),
+                ..
+            } => {
                 format!("{enc}::{name}")
             }
-            Self::Closure { start_line, enclosing: Some(enc), .. } => {
+            Self::Closure {
+                start_line,
+                enclosing: Some(enc),
+                ..
+            } => {
                 format!("{enc}::<closure@{start_line}>")
             }
-            Self::Closure { start_line, enclosing: None, .. } => {
+            Self::Closure {
+                start_line,
+                enclosing: None,
+                ..
+            } => {
                 format!("<closure@{start_line}>")
             }
             _ => self.name().to_string(),
@@ -277,7 +337,7 @@ impl ReportKind {
     }
 
     /// Parse from a string (case-insensitive).
-    pub fn from_str(s: &str) -> Option<ReportKind> {
+    pub fn parse(s: &str) -> Option<ReportKind> {
         match s.to_lowercase().as_str() {
             "authors" => Some(Self::Authors),
             "hotspots" => Some(Self::Hotspots),

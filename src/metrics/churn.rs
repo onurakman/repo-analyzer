@@ -13,6 +13,12 @@ pub struct ChurnCollector {
     files: HashMap<String, ChurnData>,
 }
 
+impl Default for ChurnCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ChurnCollector {
     pub fn new() -> Self {
         Self {
@@ -53,7 +59,10 @@ impl MetricCollector for ChurnCollector {
 
                 let mut values = HashMap::new();
                 values.insert("lines_added".into(), MetricValue::Count(data.lines_added));
-                values.insert("lines_deleted".into(), MetricValue::Count(data.lines_deleted));
+                values.insert(
+                    "lines_deleted".into(),
+                    MetricValue::Count(data.lines_deleted),
+                );
                 values.insert("net_change".into(), MetricValue::SignedCount(net_change));
                 values.insert("total_churn".into(), MetricValue::Count(total_churn));
                 values.insert("change_count".into(), MetricValue::Count(data.change_count));

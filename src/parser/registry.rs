@@ -19,6 +19,12 @@ pub struct LanguageRegistry {
     configs: Vec<LanguageConfig>,
 }
 
+impl Default for LanguageRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LanguageRegistry {
     /// Creates an empty registry.
     pub fn new() -> Self {
@@ -67,9 +73,7 @@ impl LanguageRegistry {
             .into_iter()
             .filter(|c| {
                 let (cs, ce) = c.line_range();
-                line_ranges
-                    .iter()
-                    .any(|&(rs, re)| cs <= re && rs <= ce)
+                line_ranges.iter().any(|&(rs, re)| cs <= re && rs <= ce)
             })
             .collect();
         Some(filtered)
@@ -89,21 +93,21 @@ impl LanguageRegistry {
 
     /// Builds the default registry with all supported languages.
     pub fn build_default() -> Self {
-        use super::languages::rust_lang;
-        use super::languages::typescript;
-        use super::languages::python;
-        use super::languages::java;
-        use super::languages::go_lang;
+        use super::languages::bash;
         use super::languages::cpp;
         use super::languages::csharp;
+        use super::languages::css;
+        use super::languages::go_lang;
+        use super::languages::html_lang;
+        use super::languages::java;
         use super::languages::kotlin;
         use super::languages::php;
+        use super::languages::python;
         use super::languages::ruby;
-        use super::languages::html_lang;
-        use super::languages::css;
-        use super::languages::bash;
+        use super::languages::rust_lang;
         use super::languages::scala;
         use super::languages::swift;
+        use super::languages::typescript;
 
         let mut registry = Self::new();
 
@@ -310,6 +314,10 @@ mod tests {
     fn test_unknown_extension_returns_none() {
         let registry = LanguageRegistry::new();
         assert!(registry.get_for_file("unknown.xyz").is_none());
-        assert!(registry.parse_constructs("unknown.xyz", "some code").is_none());
+        assert!(
+            registry
+                .parse_constructs("unknown.xyz", "some code")
+                .is_none()
+        );
     }
 }

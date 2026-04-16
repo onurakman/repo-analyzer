@@ -50,8 +50,14 @@ impl DiffExtractor {
         let raw_output = if commit.parent_ids.is_empty() {
             let output = Command::new("git")
                 .args([
-                    "diff-tree", "--root", "-r", "-z", "-M", "--diff-filter=AMDRT",
-                    "--name-status", oid,
+                    "diff-tree",
+                    "--root",
+                    "-r",
+                    "-z",
+                    "-M",
+                    "--diff-filter=AMDRT",
+                    "--name-status",
+                    oid,
                 ])
                 .current_dir(&self.repo_path)
                 .output()?;
@@ -66,8 +72,14 @@ impl DiffExtractor {
             let parent = &commit.parent_ids[0];
             let output = Command::new("git")
                 .args([
-                    "diff-tree", "-r", "-z", "-M", "--diff-filter=AMDRT",
-                    "--name-status", parent, oid,
+                    "diff-tree",
+                    "-r",
+                    "-z",
+                    "-M",
+                    "--diff-filter=AMDRT",
+                    "--name-status",
+                    parent,
+                    oid,
                 ])
                 .current_dir(&self.repo_path)
                 .output()?;
@@ -157,7 +169,7 @@ fn parse_name_status(raw: &str) -> Vec<FileEntry> {
                     i += 1;
                 }
             }
-            'M' | 'T' | _ => {
+            _ => {
                 if i + 1 < parts.len() {
                     entries.push(FileEntry {
                         status: FileStatus::Modified,
@@ -177,11 +189,7 @@ fn parse_name_status(raw: &str) -> Vec<FileEntry> {
 
 /// Parse NUL-delimited --numstat output and combine with status info.
 /// numstat format: added\tdeleted\tpath (or for renames: added\tdeleted\told\0new)
-fn parse_numstat(
-    raw: &str,
-    commit: &CommitInfo,
-    status_entries: &[FileEntry],
-) -> Vec<DiffRecord> {
+fn parse_numstat(raw: &str, commit: &CommitInfo, status_entries: &[FileEntry]) -> Vec<DiffRecord> {
     let mut records = Vec::new();
 
     // Split on NUL
@@ -215,8 +223,7 @@ fn parse_numstat(
         let deletions: u32 = deletions_str.parse().unwrap_or(0);
 
         // Determine file path — for renames, path_part is empty and next two NUL parts are old/new
-        let (file_path, old_path, consumed_extra) = if path_part.is_empty() && i + 2 < parts.len()
-        {
+        let (file_path, old_path, consumed_extra) = if path_part.is_empty() && i + 2 < parts.len() {
             // Rename case: numstat gives empty path, then old\0new
             let old = parts[i + 1].to_string();
             let new = parts[i + 2].to_string();
@@ -226,13 +233,8 @@ fn parse_numstat(
         };
 
         // Look up status from name-status parsing
-        let (status, final_old_path) = find_status_for_path(
-            &file_path,
-            &old_path,
-            status_entries,
-            additions,
-            deletions,
-        );
+        let (status, final_old_path) =
+            find_status_for_path(&file_path, &old_path, status_entries, additions, deletions);
 
         // Build a single hunk representing the whole-file change
         let hunks = if is_binary {
@@ -368,13 +370,17 @@ mod tests {
         let extractor = DiffExtractor::new(repo_path);
 
         // Most recent commit (index 0) modified file.txt
-        let diffs = extractor.extract(&commits[0]).expect("extract failed for second commit");
+        let diffs = extractor
+            .extract(&commits[0])
+            .expect("extract failed for second commit");
         assert_eq!(diffs.len(), 1, "second commit should touch 1 file");
         assert_eq!(diffs[0].file_path, "file.txt");
         assert_eq!(diffs[0].status, FileStatus::Modified);
 
         // First commit (index 1) added file.txt
-        let diffs = extractor.extract(&commits[1]).expect("extract failed for initial commit");
+        let diffs = extractor
+            .extract(&commits[1])
+            .expect("extract failed for initial commit");
         assert_eq!(diffs.len(), 1, "initial commit should touch 1 file");
         assert_eq!(diffs[0].file_path, "file.txt");
         assert_eq!(diffs[0].status, FileStatus::Added);
@@ -410,7 +416,13 @@ mod tests {
         // Verify hunk line counts are consistent with record totals
         let hunk_added: u32 = record.hunks.iter().map(|h| h.new_lines).sum();
         let hunk_deleted: u32 = record.hunks.iter().map(|h| h.old_lines).sum();
-        assert_eq!(hunk_added, total_added, "hunk additions should match record total");
-        assert_eq!(hunk_deleted, total_deleted, "hunk deletions should match record total");
+        assert_eq!(
+            hunk_added, total_added,
+            "hunk additions should match record total"
+        );
+        assert_eq!(
+            hunk_deleted, total_deleted,
+            "hunk deletions should match record total"
+        );
     }
 }

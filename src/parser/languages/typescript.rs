@@ -160,7 +160,10 @@ mod tests {
     fn test_function() {
         let source = "function greet(name: string): void { console.log(name); }";
         let constructs = parse_and_map(source);
-        let funcs: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "function").collect();
+        let funcs: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "function")
+            .collect();
         assert_eq!(funcs.len(), 1);
         assert_eq!(funcs[0].name(), "greet");
     }
@@ -179,11 +182,17 @@ class Animal {
 "#;
         let constructs = parse_and_map(source);
 
-        let classes: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "class").collect();
+        let classes: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "class")
+            .collect();
         assert_eq!(classes.len(), 1);
         assert_eq!(classes[0].name(), "Animal");
 
-        let methods: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "method").collect();
+        let methods: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "method")
+            .collect();
         assert!(methods.len() >= 2, "should find constructor and speak");
     }
 
@@ -191,7 +200,10 @@ class Animal {
     fn test_interface() {
         let source = "interface Shape { area(): number; perimeter(): number; }";
         let constructs = parse_and_map(source);
-        let interfaces: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "interface").collect();
+        let interfaces: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "interface")
+            .collect();
         assert_eq!(interfaces.len(), 1);
         assert_eq!(interfaces[0].name(), "Shape");
     }
@@ -200,7 +212,10 @@ class Animal {
     fn test_enum() {
         let source = "enum Direction { Up, Down, Left, Right }";
         let constructs = parse_and_map(source);
-        let enums: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "enum").collect();
+        let enums: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "enum")
+            .collect();
         assert_eq!(enums.len(), 1);
         assert_eq!(enums[0].name(), "Direction");
     }
@@ -209,7 +224,10 @@ class Animal {
     fn test_arrow_function() {
         let source = "const add = (a: number, b: number) => a + b;";
         let constructs = parse_and_map(source);
-        let closures: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "closure").collect();
+        let closures: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "closure")
+            .collect();
         assert_eq!(closures.len(), 1);
     }
 }

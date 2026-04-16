@@ -163,7 +163,10 @@ mod tests {
     fn test_function() {
         let source = "<?php\nfunction hello() {}";
         let constructs = parse_and_map(source);
-        let funcs: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "function").collect();
+        let funcs: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "function")
+            .collect();
         assert_eq!(funcs.len(), 1);
         assert_eq!(funcs[0].name(), "hello");
     }
@@ -178,11 +181,17 @@ class Greeter {
 }
 "#;
         let constructs = parse_and_map(source);
-        let classes: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "class").collect();
+        let classes: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "class")
+            .collect();
         assert_eq!(classes.len(), 1);
         assert_eq!(classes[0].name(), "Greeter");
 
-        let methods: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "method").collect();
+        let methods: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "method")
+            .collect();
         assert_eq!(methods.len(), 1);
         assert_eq!(methods[0].qualified_name(), "Greeter::greet");
     }
@@ -191,7 +200,10 @@ class Greeter {
     fn test_interface() {
         let source = "<?php\ninterface Loggable { public function log(); }";
         let constructs = parse_and_map(source);
-        let ifaces: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "interface").collect();
+        let ifaces: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "interface")
+            .collect();
         assert_eq!(ifaces.len(), 1);
         assert_eq!(ifaces[0].name(), "Loggable");
     }

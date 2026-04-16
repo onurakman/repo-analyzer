@@ -12,6 +12,12 @@ pub struct PatternsCollector {
     seen_commits: HashSet<String>,
 }
 
+impl Default for PatternsCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PatternsCollector {
     pub fn new() -> Self {
         Self {

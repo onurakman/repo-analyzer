@@ -25,23 +25,19 @@ fn node_text<'a>(node: &Node, source: &'a str) -> &'a str {
 }
 
 /// Recursively walks the AST, extracting constructs.
-fn walk_node(
-    node: &Node,
-    source: &str,
-    constructs: &mut Vec<CodeConstruct>,
-) {
-    if node.kind() == "function_definition" {
-        if let Some(name_node) = node.child_by_field_name("name") {
-            let name = node_text(&name_node, source).to_string();
-            let start_line = node.start_position().row as u32 + 1;
-            let end_line = node.end_position().row as u32 + 1;
-            constructs.push(CodeConstruct::Function {
-                name,
-                start_line,
-                end_line,
-                enclosing: None,
-            });
-        }
+fn walk_node(node: &Node, source: &str, constructs: &mut Vec<CodeConstruct>) {
+    if node.kind() == "function_definition"
+        && let Some(name_node) = node.child_by_field_name("name")
+    {
+        let name = node_text(&name_node, source).to_string();
+        let start_line = node.start_position().row as u32 + 1;
+        let end_line = node.end_position().row as u32 + 1;
+        constructs.push(CodeConstruct::Function {
+            name,
+            start_line,
+            end_line,
+            enclosing: None,
+        });
     }
 
     let mut cursor = node.walk();
@@ -68,7 +64,10 @@ mod tests {
     fn test_function() {
         let source = "hello() {\n  echo \"hi\"\n}";
         let constructs = parse_and_map(source);
-        let funcs: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "function").collect();
+        let funcs: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "function")
+            .collect();
         assert_eq!(funcs.len(), 1);
         assert_eq!(funcs[0].name(), "hello");
     }

@@ -58,9 +58,11 @@ impl ReportWriter for TerminalWriter {
             let mut table = Table::new();
 
             // Header row
-            let mut header_cells = vec![Cell::new("Name")
-                .fg(Color::Cyan)
-                .set_alignment(CellAlignment::Left)];
+            let mut header_cells = vec![
+                Cell::new("Name")
+                    .fg(Color::Cyan)
+                    .set_alignment(CellAlignment::Left),
+            ];
             for col in &columns {
                 header_cells.push(
                     Cell::new(col)
@@ -100,8 +102,8 @@ impl ReportWriter for TerminalWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use crate::types::{MetricEntry, OutputFormat};
+    use std::collections::HashMap;
 
     #[test]
     fn test_terminal_writer_no_panic() {

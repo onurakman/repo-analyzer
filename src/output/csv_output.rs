@@ -120,9 +120,9 @@ impl ReportWriter for CsvWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{MetricEntry, MetricValue, OutputFormat};
     use std::collections::HashMap;
     use std::fs;
-    use crate::types::{MetricEntry, MetricValue, OutputFormat};
     use tempfile::TempDir;
 
     fn sample_result(name: &str) -> MetricResult {

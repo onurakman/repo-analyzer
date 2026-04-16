@@ -29,8 +29,11 @@ fn create_test_repo() -> TempDir {
         .expect("git config name failed");
 
     // Create initial file and commit
-    fs::write(path.join("hello.rs"), "fn main() {\n    println!(\"hello\");\n}\n")
-        .expect("write file failed");
+    fs::write(
+        path.join("hello.rs"),
+        "fn main() {\n    println!(\"hello\");\n}\n",
+    )
+    .expect("write file failed");
 
     std::process::Command::new("git")
         .args(["add", "."])
@@ -177,10 +180,20 @@ fn test_cli_conflicting_time_args() {
     Command::cargo_bin("repo-analyzer")
         .unwrap()
         .arg(repo.path())
-        .args(["--since", "7d", "--from", "2024-01-01", "--to", "2024-12-31", "-q"])
+        .args([
+            "--since",
+            "7d",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-12-31",
+            "-q",
+        ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Cannot combine --since with --from/--to"));
+        .stderr(predicate::str::contains(
+            "Cannot combine --since with --from/--to",
+        ));
 }
 
 #[test]

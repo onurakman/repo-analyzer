@@ -101,7 +101,9 @@ fn walk_node(
             let start_line = node.start_position().row as u32 + 1;
             let end_line = node.end_position().row as u32 + 1;
 
-            let name = impl_name.clone().unwrap_or_else(|| "<anonymous>".to_string());
+            let name = impl_name
+                .clone()
+                .unwrap_or_else(|| "<anonymous>".to_string());
             constructs.push(CodeConstruct::Impl {
                 name: name.clone(),
                 start_line,
@@ -189,15 +191,24 @@ impl Foo {
         let constructs = parse_and_map(source);
 
         // Should have: struct Foo, impl Foo, method bar, method baz
-        let struct_c: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "struct").collect();
+        let struct_c: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "struct")
+            .collect();
         assert_eq!(struct_c.len(), 1);
         assert_eq!(struct_c[0].name(), "Foo");
 
-        let impl_c: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "impl").collect();
+        let impl_c: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "impl")
+            .collect();
         assert_eq!(impl_c.len(), 1);
         assert_eq!(impl_c[0].name(), "Foo");
 
-        let methods: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "method").collect();
+        let methods: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "method")
+            .collect();
         assert_eq!(methods.len(), 2);
 
         let method_names: Vec<String> = methods.iter().map(|m| m.qualified_name()).collect();
@@ -209,7 +220,10 @@ impl Foo {
     fn test_enum() {
         let source = "enum Color { Red, Green, Blue }";
         let constructs = parse_and_map(source);
-        let enums: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "enum").collect();
+        let enums: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "enum")
+            .collect();
         assert_eq!(enums.len(), 1);
         assert_eq!(enums[0].name(), "Color");
     }
@@ -218,7 +232,10 @@ impl Foo {
     fn test_trait() {
         let source = "trait Drawable { fn draw(&self); }";
         let constructs = parse_and_map(source);
-        let traits: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "trait").collect();
+        let traits: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "trait")
+            .collect();
         assert_eq!(traits.len(), 1);
         assert_eq!(traits[0].name(), "Drawable");
     }
@@ -227,7 +244,10 @@ impl Foo {
     fn test_module() {
         let source = "mod inner { fn foo() {} }";
         let constructs = parse_and_map(source);
-        let modules: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "module").collect();
+        let modules: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "module")
+            .collect();
         assert_eq!(modules.len(), 1);
         assert_eq!(modules[0].name(), "inner");
     }
@@ -236,7 +256,10 @@ impl Foo {
     fn test_closure() {
         let source = "fn main() { let f = |x| x + 1; }";
         let constructs = parse_and_map(source);
-        let closures: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "closure").collect();
+        let closures: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "closure")
+            .collect();
         assert_eq!(closures.len(), 1);
     }
 

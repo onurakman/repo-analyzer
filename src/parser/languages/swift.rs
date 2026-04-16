@@ -53,11 +53,7 @@ fn has_keyword_child(node: &Node, keyword: &str) -> bool {
 /// The type name is in a `type_identifier` child, not a `name` field.
 /// Functions use `function_declaration` with a `name` field of kind `simple_identifier`.
 /// Protocols use `protocol_declaration`.
-fn walk_node(
-    node: &Node,
-    source: &str,
-    constructs: &mut Vec<CodeConstruct>,
-) {
+fn walk_node(node: &Node, source: &str, constructs: &mut Vec<CodeConstruct>) {
     match node.kind() {
         "function_declaration" => {
             if let Some(name_node) = node.child_by_field_name("name") {
@@ -139,7 +135,10 @@ mod tests {
     fn test_function() {
         let source = "func hello() { print(\"hi\") }";
         let constructs = parse_and_map(source);
-        let funcs: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "function").collect();
+        let funcs: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "function")
+            .collect();
         assert_eq!(funcs.len(), 1);
         assert_eq!(funcs[0].name(), "hello");
     }
@@ -158,11 +157,17 @@ struct Point {
 }
 "#;
         let constructs = parse_and_map(source);
-        let classes: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "class").collect();
+        let classes: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "class")
+            .collect();
         assert_eq!(classes.len(), 1);
         assert_eq!(classes[0].name(), "Dog");
 
-        let structs: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "struct").collect();
+        let structs: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "struct")
+            .collect();
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].name(), "Point");
     }
@@ -171,9 +176,11 @@ struct Point {
     fn test_enum() {
         let source = "enum Direction { case north, south, east, west }";
         let constructs = parse_and_map(source);
-        let enums: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "enum").collect();
+        let enums: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "enum")
+            .collect();
         assert_eq!(enums.len(), 1);
         assert_eq!(enums[0].name(), "Direction");
     }
-
 }

@@ -8,6 +8,12 @@ pub struct OwnershipCollector {
     files: HashMap<String, HashMap<String, u64>>,
 }
 
+impl Default for OwnershipCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OwnershipCollector {
     pub fn new() -> Self {
         Self {

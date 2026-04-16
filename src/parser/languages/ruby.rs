@@ -131,7 +131,10 @@ mod tests {
     fn test_top_level_method() {
         let source = "def hello\n  puts 'hi'\nend";
         let constructs = parse_and_map(source);
-        let funcs: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "function").collect();
+        let funcs: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "function")
+            .collect();
         assert_eq!(funcs.len(), 1);
         assert_eq!(funcs[0].name(), "hello");
     }
@@ -146,11 +149,17 @@ class Dog
 end
 "#;
         let constructs = parse_and_map(source);
-        let classes: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "class").collect();
+        let classes: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "class")
+            .collect();
         assert_eq!(classes.len(), 1);
         assert_eq!(classes[0].name(), "Dog");
 
-        let methods: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "method").collect();
+        let methods: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "method")
+            .collect();
         assert_eq!(methods.len(), 1);
         assert_eq!(methods[0].qualified_name(), "Dog::bark");
     }
@@ -159,7 +168,10 @@ end
     fn test_module() {
         let source = "module Utils\n  def helper\n  end\nend";
         let constructs = parse_and_map(source);
-        let mods: Vec<_> = constructs.iter().filter(|c| c.kind_str() == "module").collect();
+        let mods: Vec<_> = constructs
+            .iter()
+            .filter(|c| c.kind_str() == "module")
+            .collect();
         assert_eq!(mods.len(), 1);
         assert_eq!(mods[0].name(), "Utils");
     }

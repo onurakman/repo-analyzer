@@ -32,9 +32,9 @@ impl GitWalker {
         let walk = head_commit
             .id()
             .ancestors()
-            .sorting(
-                gix::revision::walk::Sorting::ByCommitTime(CommitTimeOrder::NewestFirst),
-            )
+            .sorting(gix::revision::walk::Sorting::ByCommitTime(
+                CommitTimeOrder::NewestFirst,
+            ))
             .use_commit_graph(false)
             .all()?;
 
@@ -71,10 +71,7 @@ impl GitWalker {
             let message = commit.message_raw_sloppy().to_string();
 
             // Extract parent IDs
-            let parent_ids: Vec<String> = info
-                .parent_ids()
-                .map(|id| id.to_string())
-                .collect();
+            let parent_ids: Vec<String> = info.parent_ids().map(|id| id.to_string()).collect();
 
             let commit_info = CommitInfo {
                 oid: info.id().to_string(),
@@ -176,10 +173,7 @@ mod tests {
     #[test]
     fn test_walk_all_commits() {
         let dir = create_test_repo();
-        let walker = GitWalker::new(
-            dir.path().to_str().unwrap().to_string(),
-            TimeRange::All,
-        );
+        let walker = GitWalker::new(dir.path().to_str().unwrap().to_string(), TimeRange::All);
 
         let mut commits = Vec::new();
         let count = walker
@@ -206,14 +200,9 @@ mod tests {
         // Walk the current repo (repo-analyzer itself) and verify we get >0 commits.
         // This tests that the walker works on a real repo with history.
         let dir = create_test_repo();
-        let walker = GitWalker::new(
-            dir.path().to_str().unwrap().to_string(),
-            TimeRange::All,
-        );
+        let walker = GitWalker::new(dir.path().to_str().unwrap().to_string(), TimeRange::All);
 
-        let count = walker
-            .walk(|_| Ok(()))
-            .expect("walk should succeed");
+        let count = walker.walk(|_| Ok(())).expect("walk should succeed");
 
         assert!(count > 0, "should produce >0 commits");
     }
@@ -221,10 +210,7 @@ mod tests {
     #[test]
     fn test_commit_has_parent_ids() {
         let dir = create_test_repo();
-        let walker = GitWalker::new(
-            dir.path().to_str().unwrap().to_string(),
-            TimeRange::All,
-        );
+        let walker = GitWalker::new(dir.path().to_str().unwrap().to_string(), TimeRange::All);
 
         let mut commits = Vec::new();
         walker

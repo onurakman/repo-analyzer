@@ -13,6 +13,12 @@ pub struct CouplingCollector {
     file_changes: HashMap<String, u64>,
 }
 
+impl Default for CouplingCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CouplingCollector {
     pub fn new() -> Self {
         Self {

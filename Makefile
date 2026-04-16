@@ -1,8 +1,11 @@
-.PHONY: build release test test-unit test-integration lint fmt check clean install run help
+.PHONY: build release test test-unit test-integration lint fmt fmt-check check clean install run help ci setup pre-commit
 
 # Default target
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+
+setup: ## Install required toolchain components (rustfmt, clippy)
+	rustup component add rustfmt clippy
 
 build: ## Build debug binary
 	cargo build
@@ -50,4 +53,6 @@ run-html: build ## Run with HTML output
 run-csv: build ## Run with CSV output
 	cargo run -- -f csv --output report.csv
 
-ci: fmt-check lint test ## Run all CI checks (format + lint + test)
+ci: fmt-check lint test ## Run all CI checks (mirrors GitHub Actions)
+
+pre-commit: fmt lint test ## Format, lint, and test before committing

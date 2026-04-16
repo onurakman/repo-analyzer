@@ -4,6 +4,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::git::diff::DiffExtractor;
 use crate::git::walker::GitWalker;
+use crate::metrics::MetricCollector;
 use crate::metrics::age::AgeCollector;
 use crate::metrics::authors::AuthorsCollector;
 use crate::metrics::churn::ChurnCollector;
@@ -11,7 +12,6 @@ use crate::metrics::coupling::CouplingCollector;
 use crate::metrics::hotspots::HotspotsCollector;
 use crate::metrics::ownership::OwnershipCollector;
 use crate::metrics::patterns::PatternsCollector;
-use crate::metrics::MetricCollector;
 use crate::parser::registry::LanguageRegistry;
 use crate::types::{DiffRecord, MetricResult, ParsedChange, ReportKind, TimeRange};
 
@@ -37,7 +37,7 @@ const LOCK_FILE_NAMES: &[&str] = &[
 /// Returns `true` if the file path ends with a known lock file name.
 fn is_lock_file(path: &str) -> bool {
     let file_name = path.rsplit('/').next().unwrap_or(path);
-    LOCK_FILE_NAMES.iter().any(|&lock| lock == file_name)
+    LOCK_FILE_NAMES.contains(&file_name)
 }
 
 /// Configuration for a pipeline run.
@@ -269,8 +269,11 @@ mod tests {
         run(&["config", "user.email", "test@example.com"]);
 
         // First commit: add a Rust file
-        std::fs::write(path.join("main.rs"), "fn main() {\n    println!(\"hello\");\n}\n")
-            .expect("write failed");
+        std::fs::write(
+            path.join("main.rs"),
+            "fn main() {\n    println!(\"hello\");\n}\n",
+        )
+        .expect("write failed");
         run(&["add", "main.rs"]);
         run(&["commit", "-m", "Initial commit"]);
 
@@ -306,24 +309,22 @@ mod tests {
         let pipeline = Pipeline::new(config, registry);
         let results = pipeline.run().expect("pipeline should succeed");
 
-        assert_eq!(results.len(), 2, "should have 2 metric results (authors + churn)");
+        assert_eq!(
+            results.len(),
+            2,
+            "should have 2 metric results (authors + churn)"
+        );
 
         // First result should be authors
         assert_eq!(results[0].name, "authors");
         // Should have Test User as an author
-        let has_test_user = results[0]
-            .entries
-            .iter()
-            .any(|e| e.key == "Test User");
+        let has_test_user = results[0].entries.iter().any(|e| e.key == "Test User");
         assert!(has_test_user, "should have 'Test User' in authors report");
 
         // Second result should be churn
         assert_eq!(results[1].name, "churn");
         // Should have main.rs
-        let has_main_rs = results[1]
-            .entries
-            .iter()
-            .any(|e| e.key == "main.rs");
+        let has_main_rs = results[1].entries.iter().any(|e| e.key == "main.rs");
         assert!(has_main_rs, "should have 'main.rs' in churn report");
     }
 
@@ -377,10 +378,7 @@ mod tests {
         assert_eq!(results[0].name, "authors");
 
         // Should have Test User
-        let has_test_user = results[0]
-            .entries
-            .iter()
-            .any(|e| e.key == "Test User");
+        let has_test_user = results[0].entries.iter().any(|e| e.key == "Test User");
         assert!(has_test_user, "should have 'Test User' in authors report");
     }
 }
