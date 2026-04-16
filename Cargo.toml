@@ -1,0 +1,48 @@
+[package]
+name = "repo-analyzer"
+version = "0.1.0"
+edition = "2024"
+description = "Git repository analysis tool with code-construct-level granularity"
+
+[dependencies]
+# Git
+gix = { version = "0.81", features = ["blocking-network-client"] }
+
+# Parsing
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.25"
+tree-sitter-java = "0.23"
+tree-sitter-go = "0.25"
+tree-sitter-c-sharp = "0.23"
+tree-sitter-cpp = "0.23"
+tree-sitter-kotlin-ng = "1.1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+csv = "1"
+
+# Output
+comfy-table = "7"
+indicatif = "0.17"
+
+# Pipeline
+crossbeam-channel = "0.5"
+rayon = "1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
