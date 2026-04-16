@@ -54,7 +54,7 @@ jobs:
             artifact: repo-analyzer-windows-arm64.exe
             binary: repo-analyzer.exe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
