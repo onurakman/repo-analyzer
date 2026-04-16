@@ -97,6 +97,13 @@ impl LanguageRegistry {
         use super::languages::cpp;
         use super::languages::csharp;
         use super::languages::kotlin;
+        use super::languages::php;
+        use super::languages::ruby;
+        use super::languages::html_lang;
+        use super::languages::css;
+        use super::languages::bash;
+        use super::languages::scala;
+        use super::languages::swift;
 
         let mut registry = Self::new();
 
@@ -177,6 +184,76 @@ impl LanguageRegistry {
                 language: kotlin::language(),
                 query: kotlin::query(),
                 construct_mapper: kotlin::map_constructs,
+            },
+        );
+
+        registry.register(
+            &["php"],
+            LanguageConfig {
+                name: "PHP",
+                language: php::language(),
+                query: php::query(),
+                construct_mapper: php::map_constructs,
+            },
+        );
+
+        registry.register(
+            &["rb"],
+            LanguageConfig {
+                name: "Ruby",
+                language: ruby::language(),
+                query: ruby::query(),
+                construct_mapper: ruby::map_constructs,
+            },
+        );
+
+        registry.register(
+            &["html", "htm"],
+            LanguageConfig {
+                name: "HTML",
+                language: html_lang::language(),
+                query: html_lang::query(),
+                construct_mapper: html_lang::map_constructs,
+            },
+        );
+
+        registry.register(
+            &["css", "scss"],
+            LanguageConfig {
+                name: "CSS",
+                language: css::language(),
+                query: css::query(),
+                construct_mapper: css::map_constructs,
+            },
+        );
+
+        registry.register(
+            &["sh", "bash"],
+            LanguageConfig {
+                name: "Bash",
+                language: bash::language(),
+                query: bash::query(),
+                construct_mapper: bash::map_constructs,
+            },
+        );
+
+        registry.register(
+            &["scala", "sc"],
+            LanguageConfig {
+                name: "Scala",
+                language: scala::language(),
+                query: scala::query(),
+                construct_mapper: scala::map_constructs,
+            },
+        );
+
+        registry.register(
+            &["swift"],
+            LanguageConfig {
+                name: "Swift",
+                language: swift::language(),
+                query: swift::query(),
+                construct_mapper: swift::map_constructs,
             },
         );
 
