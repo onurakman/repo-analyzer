@@ -15,6 +15,31 @@ use crate::metrics::MetricCollector;
 use crate::parser::registry::LanguageRegistry;
 use crate::types::{DiffRecord, MetricResult, ParsedChange, ReportKind, TimeRange};
 
+/// Known lock file names that should be excluded from analysis.
+const LOCK_FILE_NAMES: &[&str] = &[
+    "Cargo.lock",
+    "package-lock.json",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb",
+    "uv.lock",
+    "pnpm-lock.yaml",
+    "Gemfile.lock",
+    "poetry.lock",
+    "composer.lock",
+    "go.sum",
+    "Pipfile.lock",
+    "flake.lock",
+    "packages.lock.json",
+    "pubspec.lock",
+];
+
+/// Returns `true` if the file path ends with a known lock file name.
+fn is_lock_file(path: &str) -> bool {
+    let file_name = path.rsplit('/').next().unwrap_or(path);
+    LOCK_FILE_NAMES.iter().any(|&lock| lock == file_name)
+}
+
 /// Configuration for a pipeline run.
 pub struct PipelineConfig {
     pub repo_path: String,
@@ -120,6 +145,10 @@ impl Pipeline {
 
             // For each diff record, create a ParsedChange and feed to collectors
             for record in diff_records {
+                if is_lock_file(&record.file_path) {
+                    continue;
+                }
+
                 let parsed_change = self.parse_diff_record(&record);
 
                 for collector in collectors.iter_mut() {

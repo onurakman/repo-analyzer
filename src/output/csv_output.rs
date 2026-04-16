@@ -11,6 +11,7 @@ impl CsvWriter {
     fn format_value(value: &MetricValue) -> String {
         match value {
             MetricValue::Count(n) => n.to_string(),
+            MetricValue::SignedCount(n) => n.to_string(),
             MetricValue::Float(v) => format!("{v:.2}"),
             MetricValue::Text(s) => s.clone(),
             MetricValue::Date(d) => d.to_string(),

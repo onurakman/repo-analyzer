@@ -206,6 +206,7 @@ pub struct ParsedChange {
 #[serde(untagged)]
 pub enum MetricValue {
     Count(u64),
+    SignedCount(i64),
     Float(f64),
     Text(String),
     Date(NaiveDate),
@@ -217,6 +218,7 @@ impl fmt::Display for MetricValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Count(n) => write!(f, "{n}"),
+            Self::SignedCount(n) => write!(f, "{n}"),
             Self::Float(v) => write!(f, "{v:.2}"),
             Self::Text(s) => write!(f, "{s}"),
             Self::Date(d) => write!(f, "{d}"),

@@ -44,33 +44,66 @@ impl MetricCollector for PatternsCollector {
     }
 
     fn finalize(&mut self) -> MetricResult {
-        let mut entries: Vec<MetricEntry> = Vec::new();
-
         // 24 hourly entries
-        for h in 0..24 {
-            let key = format!("{:02}:00", h);
-            let mut values = HashMap::new();
-            values.insert("type".into(), MetricValue::Text("hourly".into()));
-            values.insert("commits".into(), MetricValue::Count(self.hourly[h]));
-            entries.push(MetricEntry { key, values });
-        }
+        let mut hourly_entries: Vec<MetricEntry> = (0..24)
+            .map(|h| {
+                let key = format!("{:02}:00", h);
+                let mut values = HashMap::new();
+                values.insert("type".into(), MetricValue::Text("hourly".into()));
+                values.insert("order".into(), MetricValue::Count(h as u64));
+                values.insert("commits".into(), MetricValue::Count(self.hourly[h]));
+                MetricEntry { key, values }
+            })
+            .collect();
+
+        hourly_entries.sort_by(|a, b| {
+            let ca = match a.values.get("commits") {
+                Some(MetricValue::Count(n)) => *n,
+                _ => 0,
+            };
+            let cb = match b.values.get("commits") {
+                Some(MetricValue::Count(n)) => *n,
+                _ => 0,
+            };
+            cb.cmp(&ca)
+        });
 
         // 7 daily entries
         let day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-        for (i, &name) in day_names.iter().enumerate() {
-            let mut values = HashMap::new();
-            values.insert("type".into(), MetricValue::Text("daily".into()));
-            values.insert("commits".into(), MetricValue::Count(self.daily[i]));
-            entries.push(MetricEntry {
-                key: name.into(),
-                values,
-            });
-        }
+        let mut daily_entries: Vec<MetricEntry> = day_names
+            .iter()
+            .enumerate()
+            .map(|(i, &name)| {
+                let mut values = HashMap::new();
+                values.insert("type".into(), MetricValue::Text("daily".into()));
+                values.insert("order".into(), MetricValue::Count((i + 1) as u64));
+                values.insert("commits".into(), MetricValue::Count(self.daily[i]));
+                MetricEntry {
+                    key: name.into(),
+                    values,
+                }
+            })
+            .collect();
+
+        daily_entries.sort_by(|a, b| {
+            let ca = match a.values.get("commits") {
+                Some(MetricValue::Count(n)) => *n,
+                _ => 0,
+            };
+            let cb = match b.values.get("commits") {
+                Some(MetricValue::Count(n)) => *n,
+                _ => 0,
+            };
+            cb.cmp(&ca)
+        });
+
+        let mut entries = hourly_entries;
+        entries.append(&mut daily_entries);
 
         MetricResult {
             name: "patterns".into(),
             description: "Commit distribution by hour of day and day of week".into(),
-            columns: vec!["type".into(), "commits".into()],
+            columns: vec!["type".into(), "order".into(), "commits".into()],
             entries,
         }
     }

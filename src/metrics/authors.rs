@@ -6,7 +6,7 @@ use crate::metrics::MetricCollector;
 use crate::types::{MetricEntry, MetricResult, MetricValue, ParsedChange};
 
 struct AuthorStats {
-    email: String,
+    name: String,
     commits: u64,
     lines_added: u64,
     lines_deleted: u64,
@@ -34,12 +34,12 @@ impl MetricCollector for AuthorsCollector {
 
     fn process(&mut self, change: &ParsedChange) {
         let commit = &change.diff.commit;
-        let author = &commit.author;
+        let email = &commit.email;
         let date = commit.timestamp.date_naive();
         let day_str = date.format("%Y-%m-%d").to_string();
 
-        let stats = self.authors.entry(author.clone()).or_insert_with(|| AuthorStats {
-            email: commit.email.clone(),
+        let stats = self.authors.entry(email.clone()).or_insert_with(|| AuthorStats {
+            name: commit.author.clone(),
             commits: 0,
             lines_added: 0,
             lines_deleted: 0,
@@ -65,9 +65,9 @@ impl MetricCollector for AuthorsCollector {
         let mut entries: Vec<MetricEntry> = self
             .authors
             .drain()
-            .map(|(name, stats)| {
+            .map(|(email, stats)| {
                 let mut values = HashMap::new();
-                values.insert("email".into(), MetricValue::Text(stats.email));
+                values.insert("email".into(), MetricValue::Text(email));
                 values.insert("commits".into(), MetricValue::Count(stats.commits));
                 values.insert("lines_added".into(), MetricValue::Count(stats.lines_added));
                 values.insert("lines_deleted".into(), MetricValue::Count(stats.lines_deleted));
@@ -77,7 +77,7 @@ impl MetricCollector for AuthorsCollector {
                 );
                 values.insert("first_commit".into(), MetricValue::Date(stats.first_commit));
                 values.insert("last_commit".into(), MetricValue::Date(stats.last_commit));
-                MetricEntry { key: name, values }
+                MetricEntry { key: stats.name, values }
             })
             .collect();
 
@@ -166,6 +166,64 @@ mod tests {
         match bob.values.get("commits") {
             Some(MetricValue::Count(n)) => assert_eq!(*n, 1),
             other => panic!("Expected Count(1), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_groups_by_email() {
+        let mut collector = AuthorsCollector::new();
+
+        let ts = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2025, 1, 15, 12, 0, 0)
+            .unwrap();
+
+        // Same email, different author names
+        collector.process(&ParsedChange {
+            diff: DiffRecord {
+                commit: CommitInfo {
+                    oid: "c1".into(),
+                    author: "Alice".into(),
+                    email: "alice@test.com".into(),
+                    timestamp: ts,
+                    message: "test".into(),
+                    parent_ids: vec![],
+                },
+                file_path: "a.rs".into(),
+                old_path: None,
+                status: FileStatus::Modified,
+                hunks: vec![],
+                additions: 10,
+                deletions: 0,
+            },
+            constructs: vec![],
+        });
+        collector.process(&ParsedChange {
+            diff: DiffRecord {
+                commit: CommitInfo {
+                    oid: "c2".into(),
+                    author: "alice".into(),
+                    email: "alice@test.com".into(),
+                    timestamp: ts,
+                    message: "test".into(),
+                    parent_ids: vec![],
+                },
+                file_path: "b.rs".into(),
+                old_path: None,
+                status: FileStatus::Modified,
+                hunks: vec![],
+                additions: 5,
+                deletions: 0,
+            },
+            constructs: vec![],
+        });
+
+        let result = collector.finalize();
+        // Should be grouped into 1 entry (same email)
+        assert_eq!(result.entries.len(), 1);
+        match result.entries[0].values.get("commits") {
+            Some(MetricValue::Count(n)) => assert_eq!(*n, 2),
+            other => panic!("Expected Count(2), got {:?}", other),
         }
     }
 

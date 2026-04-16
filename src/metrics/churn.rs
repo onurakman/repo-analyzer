@@ -54,7 +54,7 @@ impl MetricCollector for ChurnCollector {
                 let mut values = HashMap::new();
                 values.insert("lines_added".into(), MetricValue::Count(data.lines_added));
                 values.insert("lines_deleted".into(), MetricValue::Count(data.lines_deleted));
-                values.insert("net_change".into(), MetricValue::Count(net_change as u64));
+                values.insert("net_change".into(), MetricValue::SignedCount(net_change));
                 values.insert("total_churn".into(), MetricValue::Count(total_churn));
                 values.insert("change_count".into(), MetricValue::Count(data.change_count));
                 values.insert("churn_rate".into(), MetricValue::Float(churn_rate));

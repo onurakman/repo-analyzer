@@ -12,6 +12,7 @@ impl JsonWriter {
     fn metric_value_to_json(value: &MetricValue) -> Value {
         match value {
             MetricValue::Count(n) => json!(*n),
+            MetricValue::SignedCount(n) => json!(*n),
             MetricValue::Float(v) => json!(*v),
             MetricValue::Text(s) => json!(s),
             MetricValue::Date(d) => json!(d.to_string()),

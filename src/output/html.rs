@@ -20,6 +20,7 @@ impl HtmlWriter {
     fn format_value(value: &MetricValue) -> String {
         match value {
             MetricValue::Count(n) => n.to_string(),
+            MetricValue::SignedCount(n) => n.to_string(),
             MetricValue::Float(v) => format!("{v:.2}"),
             MetricValue::Text(s) => s.clone(),
             MetricValue::Date(d) => d.to_string(),
@@ -50,7 +51,7 @@ impl HtmlWriter {
             for col in &columns {
                 if let Some(val) = first_entry.values.get(col) {
                     match val {
-                        MetricValue::Count(_) | MetricValue::Float(_) => {
+                        MetricValue::Count(_) | MetricValue::SignedCount(_) | MetricValue::Float(_) => {
                             return Some(col.clone());
                         }
                         _ => {}
@@ -65,6 +66,7 @@ impl HtmlWriter {
     fn numeric_value(value: &MetricValue) -> f64 {
         match value {
             MetricValue::Count(n) => *n as f64,
+            MetricValue::SignedCount(n) => *n as f64,
             MetricValue::Float(v) => *v,
             _ => 0.0,
         }
