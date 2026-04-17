@@ -1,298 +1,145 @@
-use std::process::Command;
+use std::sync::Arc;
+
+use gix::bstr::ByteSlice;
+use gix::object::tree::diff::Change;
 
 use crate::types::{CommitInfo, DiffRecord, FileStatus, Hunk};
 
-/// Extracts file-level diff information from git commits.
+/// Extracts file-level diff information from git commits using `gix` (native, no subprocess).
 pub struct DiffExtractor {
-    repo_path: String,
+    repo: Arc<gix::ThreadSafeRepository>,
 }
 
 impl DiffExtractor {
-    pub fn new(repo_path: String) -> Self {
-        Self { repo_path }
+    pub fn new(repo: Arc<gix::ThreadSafeRepository>) -> Self {
+        Self { repo }
     }
 
     /// Extract diff records for a single commit by comparing its tree to its parent's tree.
     /// For initial commits (no parent), compares against the empty tree.
     pub fn extract(&self, commit: &CommitInfo) -> anyhow::Result<Vec<DiffRecord>> {
-        let oid = &commit.oid;
+        let repo = self.repo.to_thread_local();
 
-        // Use git diff-tree to get file-level stats.
-        // For root commits (no parent), use --root flag which diffs against empty tree.
-        let numstat_output = if commit.parent_ids.is_empty() {
-            let output = Command::new("git")
-                .args(["diff-tree", "--root", "--numstat", "-r", "-z", "-M", oid])
-                .current_dir(&self.repo_path)
-                .output()?;
-            if !output.status.success() {
-                anyhow::bail!(
-                    "git diff-tree failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            String::from_utf8_lossy(&output.stdout).to_string()
+        let new_commit_id = gix::ObjectId::from_hex(commit.oid.as_bytes())?;
+        let new_tree = repo.find_object(new_commit_id)?.try_into_commit()?.tree()?;
+
+        let old_tree = if let Some(parent_str) = commit.parent_ids.first() {
+            let parent_id = gix::ObjectId::from_hex(parent_str.as_bytes())?;
+            repo.find_object(parent_id)?.try_into_commit()?.tree()?
         } else {
-            let parent = &commit.parent_ids[0];
-            let output = Command::new("git")
-                .args(["diff-tree", "--numstat", "-r", "-z", "-M", parent, oid])
-                .current_dir(&self.repo_path)
-                .output()?;
-            if !output.status.success() {
-                anyhow::bail!(
-                    "git diff-tree failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            String::from_utf8_lossy(&output.stdout).to_string()
+            repo.empty_tree()
         };
 
-        // Also get the raw status output for detecting renames/adds/deletes/modifies.
-        let raw_output = if commit.parent_ids.is_empty() {
-            let output = Command::new("git")
-                .args([
-                    "diff-tree",
-                    "--root",
-                    "-r",
-                    "-z",
-                    "-M",
-                    "--diff-filter=AMDRT",
-                    "--name-status",
-                    oid,
-                ])
-                .current_dir(&self.repo_path)
-                .output()?;
-            if !output.status.success() {
-                anyhow::bail!(
-                    "git diff-tree (name-status) failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            String::from_utf8_lossy(&output.stdout).to_string()
-        } else {
-            let parent = &commit.parent_ids[0];
-            let output = Command::new("git")
-                .args([
-                    "diff-tree",
-                    "-r",
-                    "-z",
-                    "-M",
-                    "--diff-filter=AMDRT",
-                    "--name-status",
-                    parent,
-                    oid,
-                ])
-                .current_dir(&self.repo_path)
-                .output()?;
-            if !output.status.success() {
-                anyhow::bail!(
-                    "git diff-tree (name-status) failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            String::from_utf8_lossy(&output.stdout).to_string()
-        };
+        let mut records: Vec<DiffRecord> = Vec::new();
+        let mut resource_cache = repo.diff_resource_cache_for_tree_diff()?;
 
-        // Parse name-status output into a map of file_path -> (status, old_path)
-        let status_map = parse_name_status(&raw_output);
+        let mut platform = old_tree.changes()?;
 
-        // Parse numstat output into diff records
-        let records = parse_numstat(&numstat_output, commit, &status_map);
+        platform.for_each_to_obtain_tree(&new_tree, |change| {
+            // Extract path + status. Skip non-blob entries (e.g., tree-to-tree changes).
+            let parsed = match &change {
+                Change::Addition {
+                    location,
+                    entry_mode,
+                    ..
+                } => {
+                    if !entry_mode.is_blob() {
+                        return Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Continue(
+                            (),
+                        ));
+                    }
+                    Some((bstr_to_string(location), None, FileStatus::Added))
+                }
+                Change::Deletion {
+                    location,
+                    entry_mode,
+                    ..
+                } => {
+                    if !entry_mode.is_blob() {
+                        return Ok(std::ops::ControlFlow::Continue(()));
+                    }
+                    Some((bstr_to_string(location), None, FileStatus::Deleted))
+                }
+                Change::Modification {
+                    location,
+                    entry_mode,
+                    ..
+                } => {
+                    if !entry_mode.is_blob() {
+                        return Ok(std::ops::ControlFlow::Continue(()));
+                    }
+                    Some((bstr_to_string(location), None, FileStatus::Modified))
+                }
+                Change::Rewrite {
+                    location,
+                    source_location,
+                    copy,
+                    entry_mode,
+                    ..
+                } => {
+                    if !entry_mode.is_blob() {
+                        return Ok(std::ops::ControlFlow::Continue(()));
+                    }
+                    let st = if *copy {
+                        FileStatus::Modified
+                    } else {
+                        FileStatus::Renamed
+                    };
+                    Some((
+                        bstr_to_string(location),
+                        Some(bstr_to_string(source_location)),
+                        st,
+                    ))
+                }
+            };
+
+            let Some((file_path, old_path, status)) = parsed else {
+                return Ok(std::ops::ControlFlow::Continue(()));
+            };
+
+            let (additions, deletions, is_binary) = match change
+                .diff(&mut resource_cache)
+                .ok()
+                .and_then(|mut p| p.line_counts().ok())
+                .flatten()
+            {
+                Some(c) => (c.insertions, c.removals, false),
+                None => (0, 0, true),
+            };
+
+            resource_cache.clear_resource_cache_keep_allocation();
+
+            let hunks = if is_binary {
+                vec![]
+            } else {
+                vec![Hunk {
+                    old_start: 1,
+                    old_lines: deletions,
+                    new_start: 1,
+                    new_lines: additions,
+                    content: String::new(),
+                }]
+            };
+
+            records.push(DiffRecord {
+                commit: commit.clone(),
+                file_path,
+                old_path,
+                status,
+                hunks,
+                additions,
+                deletions,
+            });
+
+            Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Continue(()))
+        })?;
 
         Ok(records)
     }
 }
 
-/// Parsed file status entry from --name-status output.
-struct FileEntry {
-    status: FileStatus,
-    file_path: String,
-    old_path: Option<String>,
-}
-
-/// Parse NUL-delimited --name-status output.
-/// Format for non-renames: status\0path\0
-/// Format for renames: Rxx\0old_path\0new_path\0
-/// The first field for --root diffs may include the commit hash, skip it.
-fn parse_name_status(raw: &str) -> Vec<FileEntry> {
-    let mut entries = Vec::new();
-    // Split on NUL, filter empty
-    let parts: Vec<&str> = raw.split('\0').filter(|s| !s.is_empty()).collect();
-
-    let mut i = 0;
-    while i < parts.len() {
-        let field = parts[i].trim();
-
-        // Skip commit hash lines (40-char hex)
-        if field.len() == 40 && field.chars().all(|c| c.is_ascii_hexdigit()) {
-            i += 1;
-            continue;
-        }
-
-        // Determine status character
-        let status_char = field.chars().next().unwrap_or('M');
-
-        match status_char {
-            'A' => {
-                if i + 1 < parts.len() {
-                    entries.push(FileEntry {
-                        status: FileStatus::Added,
-                        file_path: parts[i + 1].to_string(),
-                        old_path: None,
-                    });
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            'D' => {
-                if i + 1 < parts.len() {
-                    entries.push(FileEntry {
-                        status: FileStatus::Deleted,
-                        file_path: parts[i + 1].to_string(),
-                        old_path: None,
-                    });
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            'R' => {
-                // Rename: Rxx\0old_path\0new_path
-                if i + 2 < parts.len() {
-                    entries.push(FileEntry {
-                        status: FileStatus::Renamed,
-                        file_path: parts[i + 2].to_string(),
-                        old_path: Some(parts[i + 1].to_string()),
-                    });
-                    i += 3;
-                } else {
-                    i += 1;
-                }
-            }
-            _ => {
-                if i + 1 < parts.len() {
-                    entries.push(FileEntry {
-                        status: FileStatus::Modified,
-                        file_path: parts[i + 1].to_string(),
-                        old_path: None,
-                    });
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-        }
-    }
-
-    entries
-}
-
-/// Parse NUL-delimited --numstat output and combine with status info.
-/// numstat format: added\tdeleted\tpath (or for renames: added\tdeleted\told\0new)
-fn parse_numstat(raw: &str, commit: &CommitInfo, status_entries: &[FileEntry]) -> Vec<DiffRecord> {
-    let mut records = Vec::new();
-
-    // Split on NUL
-    let parts: Vec<&str> = raw.split('\0').filter(|s| !s.is_empty()).collect();
-
-    let mut i = 0;
-    while i < parts.len() {
-        let line = parts[i].trim();
-
-        // Skip commit hash lines
-        if line.len() == 40 && line.chars().all(|c| c.is_ascii_hexdigit()) {
-            i += 1;
-            continue;
-        }
-
-        // Each numstat line: "added\tdeleted\tpath"
-        // For binary files: "-\t-\tpath"
-        // For renames: "added\tdeleted\t" followed by old_path\0new_path
-        let tab_parts: Vec<&str> = line.splitn(3, '\t').collect();
-        if tab_parts.len() < 3 {
-            i += 1;
-            continue;
-        }
-
-        let additions_str = tab_parts[0];
-        let deletions_str = tab_parts[1];
-        let path_part = tab_parts[2];
-
-        let is_binary = additions_str == "-" && deletions_str == "-";
-        let additions: u32 = additions_str.parse().unwrap_or(0);
-        let deletions: u32 = deletions_str.parse().unwrap_or(0);
-
-        // Determine file path — for renames, path_part is empty and next two NUL parts are old/new
-        let (file_path, old_path, consumed_extra) = if path_part.is_empty() && i + 2 < parts.len() {
-            // Rename case: numstat gives empty path, then old\0new
-            let old = parts[i + 1].to_string();
-            let new = parts[i + 2].to_string();
-            (new, Some(old), 2)
-        } else {
-            (path_part.to_string(), None, 0)
-        };
-
-        // Look up status from name-status parsing
-        let (status, final_old_path) =
-            find_status_for_path(&file_path, &old_path, status_entries, additions, deletions);
-
-        // Build a single hunk representing the whole-file change
-        let hunks = if is_binary {
-            vec![]
-        } else {
-            vec![Hunk {
-                old_start: 1,
-                old_lines: deletions,
-                new_start: 1,
-                new_lines: additions,
-                content: String::new(),
-            }]
-        };
-
-        records.push(DiffRecord {
-            commit: commit.clone(),
-            file_path,
-            old_path: final_old_path,
-            status,
-            hunks,
-            additions,
-            deletions,
-        });
-
-        i += 1 + consumed_extra;
-    }
-
-    records
-}
-
-/// Find the file status from the name-status entries, falling back to heuristic.
-fn find_status_for_path(
-    file_path: &str,
-    numstat_old_path: &Option<String>,
-    status_entries: &[FileEntry],
-    additions: u32,
-    deletions: u32,
-) -> (FileStatus, Option<String>) {
-    // Try to find exact match in status entries
-    for entry in status_entries {
-        if entry.file_path == file_path {
-            return (entry.status, entry.old_path.clone());
-        }
-    }
-
-    // If numstat gave us an old_path (rename), use that
-    if let Some(old) = numstat_old_path {
-        return (FileStatus::Renamed, Some(old.clone()));
-    }
-
-    // Fallback heuristic based on line counts
-    if deletions == 0 && additions > 0 {
-        (FileStatus::Added, None)
-    } else if additions == 0 && deletions > 0 {
-        (FileStatus::Deleted, None)
-    } else {
-        (FileStatus::Modified, None)
-    }
+fn bstr_to_string(b: &gix::bstr::BStr) -> String {
+    b.to_str_lossy().into_owned()
 }
 
 #[cfg(test)]
@@ -359,6 +206,11 @@ mod tests {
         commits
     }
 
+    fn make_extractor(repo_path: &str) -> DiffExtractor {
+        let repo = Arc::new(gix::ThreadSafeRepository::open(repo_path).expect("open repo"));
+        DiffExtractor::new(repo)
+    }
+
     #[test]
     fn test_extract_diff_records() {
         let dir = create_test_repo();
@@ -367,7 +219,7 @@ mod tests {
 
         assert_eq!(commits.len(), 2);
 
-        let extractor = DiffExtractor::new(repo_path);
+        let extractor = make_extractor(&repo_path);
 
         // Most recent commit (index 0) modified file.txt
         let diffs = extractor
@@ -392,7 +244,7 @@ mod tests {
         let repo_path = dir.path().to_str().unwrap().to_string();
         let commits = collect_commits(&repo_path);
 
-        let extractor = DiffExtractor::new(repo_path);
+        let extractor = make_extractor(&repo_path);
 
         // Second commit modifies file.txt: should have non-zero additions and/or deletions
         let diffs = extractor.extract(&commits[0]).expect("extract failed");

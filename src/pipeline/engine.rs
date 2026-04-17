@@ -1,17 +1,22 @@
-use std::process::Command;
+use std::sync::Arc;
 
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{HumanDuration, ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 
 use crate::git::diff::DiffExtractor;
 use crate::git::walker::GitWalker;
 use crate::metrics::MetricCollector;
 use crate::metrics::age::AgeCollector;
 use crate::metrics::authors::AuthorsCollector;
+use crate::metrics::bloat::BloatCollector;
+use crate::metrics::branches::BranchesCollector;
 use crate::metrics::churn::ChurnCollector;
 use crate::metrics::coupling::CouplingCollector;
 use crate::metrics::hotspots::HotspotsCollector;
+use crate::metrics::outliers::OutliersCollector;
 use crate::metrics::ownership::OwnershipCollector;
 use crate::metrics::patterns::PatternsCollector;
+use crate::metrics::quality::QualityCollector;
 use crate::parser::registry::LanguageRegistry;
 use crate::types::{DiffRecord, MetricResult, ParsedChange, ReportKind, TimeRange};
 
@@ -64,6 +69,8 @@ impl Pipeline {
 
     /// Run the full analysis pipeline and return metric results.
     pub fn run(&self) -> anyhow::Result<Vec<MetricResult>> {
+        let start = std::time::Instant::now();
+
         // 1. Configure rayon thread pool if threads specified
         if let Some(threads) = self.config.threads {
             rayon::ThreadPoolBuilder::new()
@@ -106,32 +113,53 @@ impl Pipeline {
             return Ok(collectors.iter_mut().map(|c| c.finalize()).collect());
         }
 
-        // 3. Set up progress bar
-        let pb = if self.config.quiet {
+        // 3. Set up progress bar (shared across threads — indicatif uses Arc internally)
+        let pb = Arc::new(if self.config.quiet {
             ProgressBar::hidden()
         } else {
             let bar = ProgressBar::new(total as u64);
             bar.set_style(
                 ProgressStyle::default_bar()
-                    .template("{pos}/{len} commits [{bar:40.cyan/blue}] {msg}")
+                    .template(
+                        "{pos}/{len} commits [{bar:40.cyan/blue}] {elapsed_precise} ETA {eta} {msg}",
+                    )
                     .unwrap()
                     .progress_chars("=> "),
             );
             bar
-        };
+        });
 
         // 4. Create collectors
         let mut collectors = self.create_collectors();
 
-        // 5. Process each commit
-        let diff_extractor = DiffExtractor::new(self.config.repo_path.clone());
+        // 5. Open gix repo once (thread-safe handle, cheap to clone into workers)
+        let thread_safe_repo = Arc::new(gix::ThreadSafeRepository::open(&self.config.repo_path)?);
+        let diff_extractor = Arc::new(DiffExtractor::new(thread_safe_repo.clone()));
 
-        for commit in &commits {
-            // Extract diffs for this commit
+        // 6. Spawn a collector thread that drains ParsedChanges from a channel.
+        //    Parallel workers produce; this thread consumes — collectors stay single-owner.
+        let (tx, rx) = crossbeam_channel::bounded::<Vec<ParsedChange>>(256);
+
+        let collector_handle = std::thread::spawn(move || {
+            for batch in rx {
+                for change in &batch {
+                    for c in collectors.iter_mut() {
+                        c.process(change);
+                    }
+                }
+            }
+            collectors
+        });
+
+        // 7. Process commits in parallel
+        let quiet = self.config.quiet;
+        let registry = &self.registry;
+
+        commits.par_iter().for_each_with(tx.clone(), |tx, commit| {
             let diff_records = match diff_extractor.extract(commit) {
                 Ok(records) => records,
                 Err(e) => {
-                    if !self.config.quiet {
+                    if !quiet {
                         pb.println(format!(
                             "Warning: skipping commit {}: {}",
                             &commit.oid[..8.min(commit.oid.len())],
@@ -139,29 +167,56 @@ impl Pipeline {
                         ));
                     }
                     pb.inc(1);
-                    continue;
+                    return;
                 }
             };
 
-            // For each diff record, create a ParsedChange and feed to collectors
+            let thread_repo = thread_safe_repo.to_thread_local();
+
+            let mut changes = Vec::with_capacity(diff_records.len());
             for record in diff_records {
                 if is_lock_file(&record.file_path) {
                     continue;
                 }
-
-                let parsed_change = self.parse_diff_record(&record);
-
-                for collector in collectors.iter_mut() {
-                    collector.process(&parsed_change);
-                }
+                changes.push(parse_diff_record(registry, &thread_repo, &record));
             }
 
+            if !changes.is_empty() {
+                let _ = tx.send(changes);
+            }
             pb.inc(1);
+        });
+
+        // Close the channel by dropping the original sender (workers dropped their clones).
+        drop(tx);
+
+        let mut collectors = collector_handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("collector thread panicked"))?;
+
+        // 8. Repo-level inspection (branches, bloat) — runs after commit walk.
+        {
+            let repo = thread_safe_repo.to_thread_local();
+            for collector in collectors.iter_mut() {
+                if let Err(e) = collector.inspect_repo(&repo)
+                    && !self.config.quiet
+                {
+                    pb.println(format!(
+                        "Warning: {} inspect_repo failed: {}",
+                        collector.name(),
+                        e
+                    ));
+                }
+            }
         }
 
-        pb.finish_with_message(format!("Analyzed {} commits", total));
+        pb.finish_with_message(format!(
+            "Analyzed {} commits in {}",
+            total,
+            HumanDuration(start.elapsed())
+        ));
 
-        // 6. Finalize all collectors
+        // 9. Finalize all collectors
         let results = collectors.iter_mut().map(|c| c.finalize()).collect();
 
         Ok(results)
@@ -180,59 +235,63 @@ impl Pipeline {
                 ReportKind::Coupling => Box::new(CouplingCollector::new()),
                 ReportKind::Patterns => Box::new(PatternsCollector::new()),
                 ReportKind::Age => Box::new(AgeCollector::new()),
+                ReportKind::Branches => Box::new(BranchesCollector::new()),
+                ReportKind::Bloat => Box::new(BloatCollector::new()),
+                ReportKind::Outliers => Box::new(OutliersCollector::new()),
+                ReportKind::Quality => Box::new(QualityCollector::new()),
             };
             collectors.push(collector);
         }
 
         collectors
     }
+}
 
-    /// Convert a DiffRecord into a ParsedChange, optionally enriched with tree-sitter constructs.
-    fn parse_diff_record(&self, record: &DiffRecord) -> ParsedChange {
-        // Try to get file content at the commit and parse constructs
-        let constructs = self
-            .get_file_content_at_commit(&record.commit.oid, &record.file_path)
-            .ok()
-            .and_then(|content| {
-                // Build line ranges from hunks for tree-sitter filtering
-                let line_ranges: Vec<(u32, u32)> = record
-                    .hunks
-                    .iter()
-                    .map(|h| (h.new_start, h.new_start + h.new_lines.saturating_sub(1)))
-                    .filter(|(s, e)| *s > 0 && *e >= *s)
-                    .collect();
+/// Convert a DiffRecord into a ParsedChange, optionally enriched with tree-sitter constructs.
+/// Free function so it can be called from rayon worker threads without borrowing Pipeline.
+fn parse_diff_record(
+    registry: &LanguageRegistry,
+    repo: &gix::Repository,
+    record: &DiffRecord,
+) -> ParsedChange {
+    let constructs = get_file_content_at_commit(repo, &record.commit.oid, &record.file_path)
+        .ok()
+        .and_then(|content| {
+            let line_ranges: Vec<(u32, u32)> = record
+                .hunks
+                .iter()
+                .map(|h| (h.new_start, h.new_start + h.new_lines.saturating_sub(1)))
+                .filter(|(s, e)| *s > 0 && *e >= *s)
+                .collect();
 
-                if line_ranges.is_empty() {
-                    return None;
-                }
+            if line_ranges.is_empty() {
+                return None;
+            }
 
-                self.registry
-                    .parse_constructs_in_ranges(&record.file_path, &content, &line_ranges)
-            })
-            .unwrap_or_default();
+            registry.parse_constructs_in_ranges(&record.file_path, &content, &line_ranges)
+        })
+        .unwrap_or_default();
 
-        ParsedChange {
-            diff: record.clone(),
-            constructs,
-        }
+    ParsedChange {
+        diff: record.clone(),
+        constructs,
     }
+}
 
-    /// Retrieve file content at a specific commit using `git show <oid>:<path>`.
-    fn get_file_content_at_commit(&self, oid: &str, file_path: &str) -> anyhow::Result<String> {
-        let output = Command::new("git")
-            .args(["show", &format!("{oid}:{file_path}")])
-            .current_dir(&self.config.repo_path)
-            .output()?;
-
-        if !output.status.success() {
-            anyhow::bail!(
-                "git show failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    }
+/// Retrieve file content at a specific commit via gix (no subprocess).
+fn get_file_content_at_commit(
+    repo: &gix::Repository,
+    oid: &str,
+    file_path: &str,
+) -> anyhow::Result<String> {
+    let object_id = gix::ObjectId::from_hex(oid.as_bytes())?;
+    let commit = repo.find_object(object_id)?.try_into_commit()?;
+    let tree = commit.tree()?;
+    let entry = tree
+        .lookup_entry_by_path(file_path)?
+        .ok_or_else(|| anyhow::anyhow!("path not found in tree: {}", file_path))?;
+    let object = entry.object()?;
+    Ok(String::from_utf8_lossy(&object.data).to_string())
 }
 
 #[cfg(test)]

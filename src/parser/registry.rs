@@ -1,7 +1,14 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use tree_sitter::{Language, Node, Parser, Query};
 
 use crate::types::CodeConstruct;
+
+thread_local! {
+    /// Per-thread cache of tree-sitter Parsers, keyed by language name.
+    /// Avoids reallocating Parser on every call in hot paths.
+    static PARSER_CACHE: RefCell<HashMap<&'static str, Parser>> = RefCell::new(HashMap::new());
+}
 
 /// Configuration for a supported language.
 pub struct LanguageConfig {
@@ -53,11 +60,18 @@ impl LanguageRegistry {
     /// Parses the source and extracts code constructs for the given file.
     pub fn parse_constructs(&self, file_path: &str, source: &str) -> Option<Vec<CodeConstruct>> {
         let config = self.get_for_file(file_path)?;
-        let mut parser = Parser::new();
-        parser.set_language(&config.language).ok()?;
-        let tree = parser.parse(source, None)?;
-        let root = tree.root_node();
-        Some((config.construct_mapper)(&root, source))
+        PARSER_CACHE.with(|cache| -> Option<Vec<CodeConstruct>> {
+            let mut cache = cache.borrow_mut();
+            if !cache.contains_key(config.name) {
+                let mut p = Parser::new();
+                p.set_language(&config.language).ok()?;
+                cache.insert(config.name, p);
+            }
+            let parser = cache.get_mut(config.name)?;
+            let tree = parser.parse(source, None)?;
+            let root = tree.root_node();
+            Some((config.construct_mapper)(&root, source))
+        })
     }
 
     /// Parses the source and extracts only constructs that overlap with the given line ranges.

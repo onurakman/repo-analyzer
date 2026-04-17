@@ -326,6 +326,10 @@ pub enum ReportKind {
     Coupling,
     Patterns,
     Age,
+    Branches,
+    Bloat,
+    Outliers,
+    Quality,
 }
 
 impl ReportKind {
@@ -339,6 +343,10 @@ impl ReportKind {
             Self::Coupling,
             Self::Patterns,
             Self::Age,
+            Self::Branches,
+            Self::Bloat,
+            Self::Outliers,
+            Self::Quality,
         ]
     }
 
@@ -352,6 +360,10 @@ impl ReportKind {
             "coupling" => Some(Self::Coupling),
             "patterns" => Some(Self::Patterns),
             "age" => Some(Self::Age),
+            "branches" => Some(Self::Branches),
+            "bloat" => Some(Self::Bloat),
+            "outliers" => Some(Self::Outliers),
+            "quality" => Some(Self::Quality),
             _ => None,
         }
     }
@@ -367,6 +379,10 @@ impl fmt::Display for ReportKind {
             Self::Coupling => "coupling",
             Self::Patterns => "patterns",
             Self::Age => "age",
+            Self::Branches => "branches",
+            Self::Bloat => "bloat",
+            Self::Outliers => "outliers",
+            Self::Quality => "quality",
         };
         write!(f, "{s}")
     }

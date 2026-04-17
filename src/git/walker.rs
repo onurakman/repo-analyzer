@@ -35,7 +35,7 @@ impl GitWalker {
             .sorting(gix::revision::walk::Sorting::ByCommitTime(
                 CommitTimeOrder::NewestFirst,
             ))
-            .use_commit_graph(false)
+            .use_commit_graph(true)
             .all()?;
 
         let mut count = 0u64;
