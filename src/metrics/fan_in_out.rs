@@ -106,11 +106,11 @@ impl MetricCollector for FanInOutCollector {
             .filter(|(_, c)| c.fan_in + c.fan_out > 0)
             .map(|(path, c)| {
                 let total = c.fan_in + c.fan_out;
-                let instability = if total == 0 {
-                    0
-                } else {
-                    c.fan_out * 100 / total
-                };
+                let instability = c
+                    .fan_out
+                    .saturating_mul(100)
+                    .checked_div(total)
+                    .unwrap_or(0);
                 let role = classify(c.fan_in, c.fan_out);
                 let mut values = HashMap::new();
                 values.insert("fan_in".into(), MetricValue::Count(c.fan_in));

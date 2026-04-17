@@ -142,11 +142,12 @@ impl MetricCollector for HalfLifeCollector {
             .files
             .drain()
             .map(|(path, f)| {
-                let pct = if f.total_lines == 0 {
-                    0
-                } else {
-                    (f.ancient_lines * 100 / f.total_lines).min(100)
-                };
+                let pct = f
+                    .ancient_lines
+                    .saturating_mul(100)
+                    .checked_div(f.total_lines)
+                    .unwrap_or(0)
+                    .min(100);
                 let recommendation = classify(pct);
                 let mut values = HashMap::new();
                 values.insert("total_lines".into(), MetricValue::Count(f.total_lines));

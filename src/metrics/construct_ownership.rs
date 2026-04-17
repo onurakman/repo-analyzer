@@ -107,11 +107,11 @@ impl MetricCollector for ConstructOwnershipCollector {
                             .max_by_key(|(_, n)| **n)
                             .map(|(e, n)| (e.clone(), *n))
                             .unwrap_or_else(|| ("<unknown>".into(), 0));
-                        let top_pct = if total == 0 {
-                            0
-                        } else {
-                            (top_lines * 100 / total).min(100)
-                        };
+                        let top_pct = top_lines
+                            .saturating_mul(100)
+                            .checked_div(total)
+                            .unwrap_or(0)
+                            .min(100);
                         let bus_factor = compute_bus_factor(&a.by_author, total);
 
                         let mut values = HashMap::new();

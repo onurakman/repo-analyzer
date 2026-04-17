@@ -136,7 +136,7 @@ fn files_to_reach_pct(sorted: &[(String, u64)], total: u64, target_pct: u64) -> 
 }
 
 fn pct(part: u64, whole: u64) -> u64 {
-    if whole == 0 { 0 } else { part * 100 / whole }
+    part.saturating_mul(100).checked_div(whole).unwrap_or(0)
 }
 
 fn empty_result() -> MetricResult {

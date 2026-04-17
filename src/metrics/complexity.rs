@@ -227,7 +227,7 @@ impl MetricCollector for ComplexityCollector {
     fn finalize(&mut self) -> MetricResult {
         // Drain the min-heap and sort descending by cyclomatic.
         let mut list: Vec<FunctionMetric> = self.metrics.drain().map(|r| r.0.metric).collect();
-        list.sort_by(|a, b| b.cyclomatic.cmp(&a.cyclomatic));
+        list.sort_by_key(|m| std::cmp::Reverse(m.cyclomatic));
 
         let entries: Vec<MetricEntry> = list
             .into_iter()
