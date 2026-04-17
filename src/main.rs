@@ -2,10 +2,12 @@ use clap::Parser;
 
 mod cli;
 mod git;
+mod interner;
 mod metrics;
 mod output;
 mod parser;
 mod pipeline;
+mod store;
 mod types;
 
 use output::ReportWriter;
@@ -41,7 +43,16 @@ fn main() -> anyhow::Result<()> {
     };
 
     let pipeline = pipeline::engine::Pipeline::new(pipeline_config, registry);
-    let results = pipeline.run()?;
+    let mut results = pipeline.run()?;
+
+    // Apply --top: truncate every report's entries to the requested count.
+    // entry_groups (e.g. patterns hourly/daily buckets) are left intact since
+    // they represent fixed dimensions, not a ranked list.
+    if let Some(n) = cli.top {
+        for r in results.iter_mut() {
+            r.entries.truncate(n);
+        }
+    }
 
     let output_config = OutputConfig {
         format: cli.format.clone(),

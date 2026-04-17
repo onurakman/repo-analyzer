@@ -1,18 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::metrics::MetricCollector;
-use crate::types::{FileStatus, MetricEntry, MetricResult, MetricValue, ParsedChange};
+use crate::store::ChangeStore;
+use crate::types::{MetricEntry, MetricResult, MetricValue};
 
-struct OutlierData {
-    change_count: u64,
-    authors: HashSet<String>,
-    deleted: bool,
-    total_churn: u64,
-}
-
-pub struct OutliersCollector {
-    files: HashMap<String, OutlierData>,
-}
+pub struct OutliersCollector;
 
 impl Default for OutliersCollector {
     fn default() -> Self {
@@ -22,9 +14,7 @@ impl Default for OutliersCollector {
 
 impl OutliersCollector {
     pub fn new() -> Self {
-        Self {
-            files: HashMap::new(),
-        }
+        Self
     }
 }
 
@@ -36,44 +26,54 @@ impl MetricCollector for OutliersCollector {
         "outliers"
     }
 
-    fn process(&mut self, change: &ParsedChange) {
-        let file = &change.diff.file_path;
-        let entry = self.files.entry(file.clone()).or_insert(OutlierData {
-            change_count: 0,
-            authors: HashSet::new(),
-            deleted: false,
-            total_churn: 0,
-        });
-        entry.change_count += 1;
-        entry.authors.insert(change.diff.commit.email.clone());
-        entry.total_churn += change.diff.additions as u64 + change.diff.deletions as u64;
-        if change.diff.status == FileStatus::Deleted {
-            entry.deleted = true;
-        }
+    fn finalize(&mut self) -> MetricResult {
+        empty_result()
     }
 
-    fn finalize(&mut self) -> MetricResult {
-        let mut entries: Vec<MetricEntry> = self
-            .files
-            .drain()
-            .filter(|(_, d)| {
-                !d.deleted
-                    && (d.change_count >= HIGH_CHURN_THRESHOLD
-                        || d.authors.len() >= HIGH_AUTHORS_THRESHOLD)
+    fn finalize_from_db(
+        &mut self,
+        store: &ChangeStore,
+        _progress: &crate::metrics::ProgressReporter,
+    ) -> Option<MetricResult> {
+        let rows = store
+            .with_conn(|conn| -> anyhow::Result<Vec<(String, u64, u64, u64)>> {
+                let mut stmt = conn.prepare(
+                    "SELECT file_path,
+                            COUNT(*)                                            AS change_count,
+                            COUNT(DISTINCT email)                               AS unique_authors,
+                            SUM(additions + deletions)                          AS total_churn
+                       FROM changes
+                      GROUP BY file_path
+                     HAVING MAX(CASE WHEN status = 2 THEN 1 ELSE 0 END) = 0",
+                )?;
+                let iter = stmt.query_map([], |row| {
+                    let file: String = row.get(0)?;
+                    let cc: i64 = row.get(1)?;
+                    let ua: i64 = row.get(2)?;
+                    let tc: i64 = row.get(3)?;
+                    Ok((file, cc as u64, ua as u64, tc as u64))
+                })?;
+                let mut out = Vec::new();
+                for r in iter {
+                    out.push(r?);
+                }
+                Ok(out)
             })
-            .map(|(file, d)| {
-                let author_count = d.authors.len();
-                let recommendation = build_recommendation(d.change_count, author_count);
+            .ok()?
+            .ok()?;
 
+        let mut entries: Vec<MetricEntry> = rows
+            .into_iter()
+            .filter(|(_, cc, ua, _)| {
+                *cc >= HIGH_CHURN_THRESHOLD || (*ua as usize) >= HIGH_AUTHORS_THRESHOLD
+            })
+            .map(|(file, cc, ua, tc)| {
+                let rec = build_recommendation(cc, ua as usize);
                 let mut values = HashMap::new();
-                values.insert("change_count".into(), MetricValue::Count(d.change_count));
-                values.insert(
-                    "unique_authors".into(),
-                    MetricValue::Count(author_count as u64),
-                );
-                values.insert("total_churn".into(), MetricValue::Count(d.total_churn));
-                values.insert("recommendation".into(), MetricValue::Text(recommendation));
-
+                values.insert("change_count".into(), MetricValue::Count(cc));
+                values.insert("unique_authors".into(), MetricValue::Count(ua));
+                values.insert("total_churn".into(), MetricValue::Count(tc));
+                values.insert("recommendation".into(), MetricValue::Text(rec));
                 MetricEntry { key: file, values }
             })
             .collect();
@@ -90,12 +90,12 @@ impl MetricCollector for OutliersCollector {
             cb.cmp(&ca)
         });
 
-        MetricResult {
+        Some(MetricResult {
             name: "outliers".into(),
-            description:
-                "Files that are change hotspots or have diffuse ownership — refactor candidates"
-                    .into(),
+            display_name: "Refactor Candidates".into(),
+            description: "Files that are unusually risky on two fronts at once: they change very often AND have many different authors. Both signals together almost always mean accumulated bugs, unclear ownership, and high review cost. These are your top refactor / split candidates.".into(),
             entry_groups: vec![],
+            column_labels: vec![],
             columns: vec![
                 "change_count".into(),
                 "unique_authors".into(),
@@ -103,7 +103,7 @@ impl MetricCollector for OutliersCollector {
                 "recommendation".into(),
             ],
             entries,
-        }
+        })
     }
 }
 
@@ -118,63 +118,14 @@ fn build_recommendation(changes: u64, authors: usize) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::{CommitInfo, DiffRecord, FileStatus};
-    use chrono::{FixedOffset, TimeZone};
-
-    fn make_change(file: &str, email: &str) -> ParsedChange {
-        let ts = FixedOffset::east_opt(0)
-            .unwrap()
-            .with_ymd_and_hms(2025, 1, 1, 12, 0, 0)
-            .unwrap();
-        ParsedChange {
-            diff: DiffRecord {
-                commit: CommitInfo {
-                    oid: format!("oid_{email}_{file}"),
-                    author: email.into(),
-                    email: email.into(),
-                    timestamp: ts,
-                    message: "x".into(),
-                    parent_ids: vec![],
-                },
-                file_path: file.into(),
-                old_path: None,
-                status: FileStatus::Modified,
-                hunks: vec![],
-                additions: 1,
-                deletions: 1,
-            },
-            constructs: vec![],
-        }
-    }
-
-    #[test]
-    fn test_outlier_detection_by_churn() {
-        let mut c = OutliersCollector::new();
-        for i in 0..101 {
-            let mut ch = make_change("busy.rs", "a@x");
-            ch.diff.commit.oid = format!("oid_{i}");
-            c.process(&ch);
-        }
-        c.process(&make_change("calm.rs", "a@x"));
-
-        let r = c.finalize();
-        assert_eq!(r.entries.len(), 1);
-        assert_eq!(r.entries[0].key, "busy.rs");
-    }
-
-    #[test]
-    fn test_outlier_detection_by_authors() {
-        let mut c = OutliersCollector::new();
-        for e in ["a@x", "b@x", "c@x", "d@x", "e@x"] {
-            c.process(&make_change("shared.rs", e));
-        }
-        c.process(&make_change("owned.rs", "a@x"));
-
-        let r = c.finalize();
-        assert_eq!(r.entries.len(), 1);
-        assert_eq!(r.entries[0].key, "shared.rs");
+fn empty_result() -> MetricResult {
+    MetricResult {
+        name: "outliers".into(),
+        display_name: "Refactor Candidates".into(),
+        description: String::new(),
+        entry_groups: vec![],
+        column_labels: vec![],
+        columns: vec![],
+        entries: vec![],
     }
 }

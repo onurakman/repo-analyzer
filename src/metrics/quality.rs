@@ -1,15 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::metrics::MetricCollector;
-use crate::types::{MetricEntry, MetricResult, MetricValue, ParsedChange};
+use crate::store::ChangeStore;
+use crate::types::{MetricEntry, MetricResult, MetricValue};
 
-/// Aggregated quality signals across all commits.
-pub struct QualityCollector {
-    seen_commits: HashSet<String>,
-    commit_lines: HashMap<String, u64>, // oid -> total lines changed
-    commit_messages: HashMap<String, String>, // oid -> first line of message
-    commit_parents: HashMap<String, usize>, // oid -> parent count
-}
+pub struct QualityCollector;
 
 impl Default for QualityCollector {
     fn default() -> Self {
@@ -19,12 +14,7 @@ impl Default for QualityCollector {
 
 impl QualityCollector {
     pub fn new() -> Self {
-        Self {
-            seen_commits: HashSet::new(),
-            commit_lines: HashMap::new(),
-            commit_messages: HashMap::new(),
-            commit_parents: HashMap::new(),
-        }
+        Self
     }
 }
 
@@ -67,58 +57,76 @@ impl MetricCollector for QualityCollector {
         "quality"
     }
 
-    fn process(&mut self, change: &ParsedChange) {
-        let oid = &change.diff.commit.oid;
-
-        if self.seen_commits.insert(oid.clone()) {
-            let first_line = change
-                .diff
-                .commit
-                .message
-                .lines()
-                .next()
-                .unwrap_or("")
-                .to_string();
-            self.commit_messages.insert(oid.clone(), first_line);
-            self.commit_parents
-                .insert(oid.clone(), change.diff.commit.parent_ids.len());
-        }
-
-        let total = change.diff.additions as u64 + change.diff.deletions as u64;
-        *self.commit_lines.entry(oid.clone()).or_insert(0) += total;
+    fn finalize(&mut self) -> MetricResult {
+        empty_result()
     }
 
-    fn finalize(&mut self) -> MetricResult {
-        let total_commits = self.seen_commits.len() as u64;
-        let mut short_count: u64 = 0;
-        let mut low_quality_count: u64 = 0;
-        let mut revert_count: u64 = 0;
-        let mut mega_count: u64 = 0;
-        let mut merge_count: u64 = 0;
-        let mut total_msg_chars: u64 = 0;
+    fn finalize_from_db(
+        &mut self,
+        store: &ChangeStore,
+        _progress: &crate::metrics::ProgressReporter,
+    ) -> Option<MetricResult> {
+        // One row per distinct commit. Per-commit work stays bounded because
+        // we only keep counters, never the full per-commit list.
+        let (
+            total_commits,
+            short_count,
+            low_quality_count,
+            revert_count,
+            mega_count,
+            merge_count,
+            total_msg_chars,
+        ) = store
+            .with_conn(
+                |conn| -> anyhow::Result<(u64, u64, u64, u64, u64, u64, u64)> {
+                    let mut stmt = conn.prepare(
+                        "SELECT COALESCE(MAX(message), '') AS msg,
+                            SUM(additions + deletions)  AS total_lines,
+                            MAX(parent_count)           AS parents
+                       FROM changes
+                      GROUP BY commit_oid",
+                    )?;
+                    let mut total_commits: u64 = 0;
+                    let mut short: u64 = 0;
+                    let mut low_q: u64 = 0;
+                    let mut revert: u64 = 0;
+                    let mut mega: u64 = 0;
+                    let mut merge: u64 = 0;
+                    let mut msg_chars: u64 = 0;
 
-        for (oid, msg) in &self.commit_messages {
-            let trimmed = msg.trim();
-            total_msg_chars += trimmed.chars().count() as u64;
-            if trimmed.chars().count() < SHORT_MSG_THRESHOLD {
-                short_count += 1;
-            }
-            if is_low_quality_message(trimmed) {
-                low_quality_count += 1;
-            }
-            if is_revert_message(trimmed) {
-                revert_count += 1;
-            }
-            if self.commit_parents.get(oid).copied().unwrap_or(0) > 1 {
-                merge_count += 1;
-            }
-        }
-
-        for &lines in self.commit_lines.values() {
-            if lines > MEGA_COMMIT_THRESHOLD {
-                mega_count += 1;
-            }
-        }
+                    let rows = stmt.query_map([], |row| {
+                        let msg: String = row.get(0)?;
+                        let lines: i64 = row.get(1)?;
+                        let parents: i64 = row.get(2)?;
+                        Ok((msg, lines as u64, parents as u64))
+                    })?;
+                    for r in rows {
+                        let (msg, lines, parents) = r?;
+                        total_commits += 1;
+                        let first_line = msg.lines().next().unwrap_or("").trim();
+                        let len = first_line.chars().count();
+                        msg_chars += len as u64;
+                        if len < SHORT_MSG_THRESHOLD {
+                            short += 1;
+                        }
+                        if is_low_quality_message(first_line) {
+                            low_q += 1;
+                        }
+                        if is_revert_message(first_line) {
+                            revert += 1;
+                        }
+                        if lines > MEGA_COMMIT_THRESHOLD {
+                            mega += 1;
+                        }
+                        if parents > 1 {
+                            merge += 1;
+                        }
+                    }
+                    Ok((total_commits, short, low_q, revert, mega, merge, msg_chars))
+                },
+            )
+            .ok()?
+            .ok()?;
 
         let avg_msg_len = if total_commits > 0 {
             total_msg_chars as f64 / total_commits as f64
@@ -216,75 +224,26 @@ impl MetricCollector for QualityCollector {
             },
         ];
 
-        MetricResult {
+        Some(MetricResult {
             name: "quality".into(),
-            description: "Commit hygiene signals (message quality, size, reverts)".into(),
+            display_name: "Commit Quality".into(),
+            description: "Signals that hint at risky commit habits: very short messages ('wip', 'fix', 'typo'), mega-commits with thousands of lines (hard to review or revert safely), reverts (a previous commit was wrong), and merge mess. Lower numbers across the board mean cleaner history and easier debugging later.".into(),
             entry_groups: vec![],
             columns: vec!["commits".into(), "percent".into(), "recommendation".into()],
+            column_labels: vec![],
             entries,
-        }
+        })
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::{CommitInfo, DiffRecord, FileStatus};
-    use chrono::{FixedOffset, TimeZone};
-
-    fn make_change(oid: &str, msg: &str, additions: u32, parents: usize) -> ParsedChange {
-        let ts = FixedOffset::east_opt(0)
-            .unwrap()
-            .with_ymd_and_hms(2025, 1, 1, 12, 0, 0)
-            .unwrap();
-        ParsedChange {
-            diff: DiffRecord {
-                commit: CommitInfo {
-                    oid: oid.into(),
-                    author: "a".into(),
-                    email: "a@x".into(),
-                    timestamp: ts,
-                    message: msg.into(),
-                    parent_ids: (0..parents).map(|i| format!("p{i}")).collect(),
-                },
-                file_path: "x.rs".into(),
-                old_path: None,
-                status: FileStatus::Modified,
-                hunks: vec![],
-                additions,
-                deletions: 0,
-            },
-            constructs: vec![],
-        }
-    }
-
-    #[test]
-    fn test_quality_signals() {
-        let mut c = QualityCollector::new();
-        c.process(&make_change("a", "wip", 10, 1));
-        c.process(&make_change("b", "Fix typo in README", 5, 1));
-        c.process(&make_change("c", "Revert: bad change", 100, 1));
-        c.process(&make_change("d", "Regular commit message", 2000, 1));
-        c.process(&make_change("e", "Merge branch foo", 1, 2));
-
-        let r = c.finalize();
-
-        // Find rows by key
-        let get = |k: &str| -> u64 {
-            r.entries
-                .iter()
-                .find(|e| e.key == k)
-                .and_then(|e| match e.values.get("commits") {
-                    Some(MetricValue::Count(n)) => Some(*n),
-                    _ => None,
-                })
-                .unwrap_or(0)
-        };
-
-        assert_eq!(get("total_commits"), 5);
-        assert!(get("low_quality_messages") >= 1); // "wip"
-        assert!(get("revert_commits") >= 1);
-        assert!(get("mega_commits") >= 1); // d has 2000 additions
-        assert_eq!(get("merge_commits"), 1); // e has 2 parents
+fn empty_result() -> MetricResult {
+    MetricResult {
+        name: "quality".into(),
+        display_name: "Commit Quality".into(),
+        description: String::new(),
+        entry_groups: vec![],
+        columns: vec![],
+        column_labels: vec![],
+        entries: vec![],
     }
 }

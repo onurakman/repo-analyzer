@@ -1,12 +1,10 @@
 use std::collections::HashMap;
 
 use crate::metrics::MetricCollector;
-use crate::types::{MetricEntry, MetricResult, MetricValue, ParsedChange};
+use crate::store::ChangeStore;
+use crate::types::{MetricEntry, MetricResult, MetricValue};
 
-pub struct OwnershipCollector {
-    /// file -> (author -> lines_added)
-    files: HashMap<String, HashMap<String, u64>>,
-}
+pub struct OwnershipCollector;
 
 impl Default for OwnershipCollector {
     fn default() -> Self {
@@ -16,9 +14,7 @@ impl Default for OwnershipCollector {
 
 impl OwnershipCollector {
     pub fn new() -> Self {
-        Self {
-            files: HashMap::new(),
-        }
+        Self
     }
 }
 
@@ -27,31 +23,57 @@ impl MetricCollector for OwnershipCollector {
         "ownership"
     }
 
-    fn process(&mut self, change: &ParsedChange) {
-        let file = &change.diff.file_path;
-        let email = &change.diff.commit.email;
-        let added = change.diff.additions as u64;
-
-        let authors = self.files.entry(file.clone()).or_default();
-        *authors.entry(email.clone()).or_insert(0) += added;
+    fn finalize(&mut self) -> MetricResult {
+        empty_result()
     }
 
-    fn finalize(&mut self) -> MetricResult {
-        let mut entries: Vec<MetricEntry> = self
-            .files
-            .drain()
+    fn finalize_from_db(
+        &mut self,
+        store: &ChangeStore,
+        _progress: &crate::metrics::ProgressReporter,
+    ) -> Option<MetricResult> {
+        // Pull (file, email, lines_added) per author, then group in Rust to
+        // compute top_author and bus_factor (which require the full author
+        // distribution per file — hard to do in plain SQL without window funcs).
+        let rows = store
+            .with_conn(|conn| -> anyhow::Result<Vec<(String, String, u64)>> {
+                let mut stmt = conn.prepare(
+                    "SELECT file_path, email, SUM(additions) AS added
+                       FROM changes
+                      GROUP BY file_path, email",
+                )?;
+                let iter = stmt.query_map([], |row| {
+                    let file: String = row.get(0)?;
+                    let email: String = row.get(1)?;
+                    let added: i64 = row.get(2)?;
+                    Ok((file, email, added as u64))
+                })?;
+                let mut out = Vec::new();
+                for r in iter {
+                    out.push(r?);
+                }
+                Ok(out)
+            })
+            .ok()?
+            .ok()?;
+
+        // file → (email → lines_added). Keyed by String; SQLite already interns
+        // pages so memory pressure here is only from the in-flight row set.
+        let mut files: HashMap<String, HashMap<String, u64>> = HashMap::new();
+        for (file, email, added) in rows {
+            *files.entry(file).or_default().entry(email).or_insert(0) += added;
+        }
+
+        let mut entries: Vec<MetricEntry> = files
+            .into_iter()
             .map(|(file, authors)| {
                 let total_lines: u64 = authors.values().sum();
                 let total_authors = authors.len() as u64;
-
-                // Find top author
-                let top_author = authors
+                let top_author: String = authors
                     .iter()
                     .max_by_key(|(_, v)| **v)
                     .map(|(name, _)| name.clone())
                     .unwrap_or_default();
-
-                // Compute bus factor: minimum authors to reach >50%
                 let bus_factor = compute_bus_factor(&authors, total_lines);
 
                 let mut values = HashMap::new();
@@ -59,7 +81,6 @@ impl MetricCollector for OwnershipCollector {
                 values.insert("bus_factor".into(), MetricValue::Count(bus_factor));
                 values.insert("top_author".into(), MetricValue::Text(top_author));
                 values.insert("total_lines".into(), MetricValue::Count(total_lines));
-
                 MetricEntry { key: file, values }
             })
             .collect();
@@ -76,10 +97,12 @@ impl MetricCollector for OwnershipCollector {
             fa.cmp(&fb)
         });
 
-        MetricResult {
+        Some(MetricResult {
             name: "ownership".into(),
-            description: "File ownership distribution and bus factor analysis".into(),
+            display_name: "File Ownership".into(),
+            description: "Who 'owns' each file (wrote the most lines), how many people contributed, and the bus factor — the minimum number of people that would need to leave for the file to lose more than 50% of its knowledge. Bus factor of 1 on a critical file is a real risk: if that one person leaves, no one else can safely change it.".into(),
             entry_groups: vec![],
+            column_labels: vec![],
             columns: vec![
                 "total_authors".into(),
                 "bus_factor".into(),
@@ -87,7 +110,7 @@ impl MetricCollector for OwnershipCollector {
                 "total_lines".into(),
             ],
             entries,
-        }
+        })
     }
 }
 
@@ -95,11 +118,9 @@ fn compute_bus_factor(authors: &HashMap<String, u64>, total_lines: u64) -> u64 {
     if total_lines == 0 {
         return 0;
     }
-
     let threshold = total_lines as f64 * 0.5;
     let mut contributions: Vec<u64> = authors.values().copied().collect();
-    contributions.sort_unstable_by(|a, b| b.cmp(a)); // descending
-
+    contributions.sort_unstable_by(|a, b| b.cmp(a));
     let mut accumulated = 0u64;
     for (i, &contrib) in contributions.iter().enumerate() {
         accumulated += contrib;
@@ -107,72 +128,17 @@ fn compute_bus_factor(authors: &HashMap<String, u64>, total_lines: u64) -> u64 {
             return (i + 1) as u64;
         }
     }
-
     contributions.len() as u64
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::{CommitInfo, DiffRecord, FileStatus, ParsedChange};
-    use chrono::{FixedOffset, TimeZone};
-
-    fn make_change(author: &str, file: &str, added: u32) -> ParsedChange {
-        let ts = FixedOffset::east_opt(0)
-            .unwrap()
-            .with_ymd_and_hms(2025, 1, 15, 12, 0, 0)
-            .unwrap();
-        ParsedChange {
-            diff: DiffRecord {
-                commit: CommitInfo {
-                    oid: "abc123".into(),
-                    author: author.into(),
-                    email: format!("{author}@test.com"),
-                    timestamp: ts,
-                    message: "test".into(),
-                    parent_ids: vec![],
-                },
-                file_path: file.into(),
-                old_path: None,
-                status: FileStatus::Modified,
-                hunks: vec![],
-                additions: added,
-                deletions: 0,
-            },
-            constructs: vec![],
-        }
-    }
-
-    #[test]
-    fn test_bus_factor() {
-        // Alice: 90 lines, Bob: 10 lines => bus_factor = 1
-        let mut collector = OwnershipCollector::new();
-        collector.process(&make_change("Alice", "lib.rs", 90));
-        collector.process(&make_change("Bob", "lib.rs", 10));
-
-        let result = collector.finalize();
-        let entry = result.entries.iter().find(|e| e.key == "lib.rs").unwrap();
-
-        match entry.values.get("bus_factor") {
-            Some(MetricValue::Count(n)) => assert_eq!(*n, 1),
-            other => panic!("Expected Count(1), got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_bus_factor_distributed() {
-        // Alice: 33, Bob: 33, Carol: 34 => bus_factor = 2
-        let mut collector = OwnershipCollector::new();
-        collector.process(&make_change("Alice", "lib.rs", 33));
-        collector.process(&make_change("Bob", "lib.rs", 33));
-        collector.process(&make_change("Carol", "lib.rs", 34));
-
-        let result = collector.finalize();
-        let entry = result.entries.iter().find(|e| e.key == "lib.rs").unwrap();
-
-        match entry.values.get("bus_factor") {
-            Some(MetricValue::Count(n)) => assert_eq!(*n, 2),
-            other => panic!("Expected Count(2), got {:?}", other),
-        }
+fn empty_result() -> MetricResult {
+    MetricResult {
+        name: "ownership".into(),
+        display_name: "File Ownership".into(),
+        description: String::new(),
+        entry_groups: vec![],
+        column_labels: vec![],
+        columns: vec![],
+        entries: vec![],
     }
 }

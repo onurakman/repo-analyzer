@@ -39,7 +39,11 @@ impl MetricCollector for BranchesCollector {
         // No per-commit work — we operate on repo state via inspect_repo.
     }
 
-    fn inspect_repo(&mut self, repo: &gix::Repository) -> anyhow::Result<()> {
+    fn inspect_repo(
+        &mut self,
+        repo: &gix::Repository,
+        _progress: &crate::metrics::ProgressReporter,
+    ) -> anyhow::Result<()> {
         let head_commit = match repo.head_commit() {
             Ok(c) => c,
             Err(_) => return Ok(()), // empty repo or detached HEAD without commit
@@ -79,9 +83,9 @@ impl MetricCollector for BranchesCollector {
             };
             let commit_id = commit.id;
 
-            let (author_name, time_secs) = match commit.author() {
+            let (author_email, time_secs) = match commit.author() {
                 Ok(sig) => (
-                    sig.name.to_string(),
+                    sig.email.to_string(),
                     sig.time().map(|t| t.seconds).unwrap_or(0),
                 ),
                 Err(_) => ("<unknown>".into(), 0),
@@ -106,7 +110,7 @@ impl MetricCollector for BranchesCollector {
                 name: short_name,
                 last_commit_date,
                 days_since,
-                author: author_name,
+                author: author_email,
                 merged,
                 is_head,
             });
@@ -152,8 +156,10 @@ impl MetricCollector for BranchesCollector {
 
         MetricResult {
             name: "branches".into(),
-            description: "Branch hygiene — merged/stale/active".into(),
+            display_name: "Branches".into(),
+            description: "Health of every branch in the repository. Flags merged-but-not-deleted branches (safe to clean up) and stale unmerged branches (in-progress or abandoned work). A tidy branch list makes the project easier to navigate and reduces accidental work on dead branches.".into(),
             entry_groups: vec![],
+            column_labels: vec![],
             columns: vec![
                 "last_commit".into(),
                 "days_since".into(),

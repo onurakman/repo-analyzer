@@ -2,17 +2,21 @@ use chrono::{DateTime, FixedOffset, NaiveDate};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Git-level types
 // ---------------------------------------------------------------------------
 
 /// Information about a single commit.
+///
+/// `author` and `email` use `Arc<str>` because they repeat heavily across commits
+/// — interning saves substantial memory in large repos.
 #[derive(Debug, Clone, Serialize)]
 pub struct CommitInfo {
     pub oid: String,
-    pub author: String,
-    pub email: String,
+    pub author: Arc<str>,
+    pub email: Arc<str>,
     pub timestamp: DateTime<FixedOffset>,
     pub message: String,
     pub parent_ids: Vec<String>,
@@ -38,11 +42,16 @@ pub struct Hunk {
 }
 
 /// One file's diff within a commit.
+///
+/// `commit` is wrapped in `Arc` so all DiffRecords from the same commit share
+/// one CommitInfo allocation (especially the long commit message string).
+/// `file_path` and `old_path` use `Arc<str>` because the same paths recur
+/// across many commits and are stored in many collectors at once.
 #[derive(Debug, Clone, Serialize)]
 pub struct DiffRecord {
-    pub commit: CommitInfo,
-    pub file_path: String,
-    pub old_path: Option<String>,
+    pub commit: Arc<CommitInfo>,
+    pub file_path: Arc<str>,
+    pub old_path: Option<Arc<str>>,
     pub status: FileStatus,
     pub hunks: Vec<Hunk>,
     pub additions: u32,
@@ -251,9 +260,14 @@ impl CodeConstruct {
 }
 
 /// A diff record enriched with parsed code constructs.
+///
+/// `diff` is wrapped in `Arc` so all per-file `ParsedChange` instances within a
+/// single commit share the same underlying `DiffRecord` allocation (including its
+/// big commit message). For 32k commits × ~5 files this avoids hundreds of MB of
+/// duplicated commit-info clones.
 #[derive(Debug, Clone, Serialize)]
 pub struct ParsedChange {
-    pub diff: DiffRecord,
+    pub diff: Arc<DiffRecord>,
     pub constructs: Vec<CodeConstruct>,
 }
 
@@ -302,14 +316,39 @@ pub struct MetricEntry {
 /// When `entry_groups` is non-empty, entries are organized into named groups
 /// (e.g., "hourly" and "daily" for patterns). Output writers should render
 /// each group separately. The flat `entries` field is ignored in this case.
+///
+/// `name` is the snake_case identifier used in code and CLI flags;
+/// `display_name` is the human-friendly title shown in reports.
+/// `columns` holds snake_case keys (used to look up `MetricEntry.values`);
+/// `column_labels` holds the human-friendly column headers, parallel to `columns`.
+/// If a collector leaves `column_labels` empty, the pipeline auto-fills it from
+/// `columns` via [`humanize`].
 #[derive(Debug, Clone, Serialize)]
 pub struct MetricResult {
     pub name: String,
+    pub display_name: String,
     pub description: String,
     pub columns: Vec<String>,
+    pub column_labels: Vec<String>,
     pub entries: Vec<MetricEntry>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub entry_groups: Vec<(String, Vec<MetricEntry>)>,
+}
+
+/// Convert a snake_case identifier into a human-friendly Title Case label.
+/// "lines_added" → "Lines Added", "fan_in" → "Fan In".
+pub fn humanize(s: &str) -> String {
+    s.split('_')
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ---------------------------------------------------------------------------
@@ -330,9 +369,32 @@ pub enum ReportKind {
     Bloat,
     Outliers,
     Quality,
+    Complexity,
+    ConstructChurn,
+    HalfLife,
+    Succession,
+    KnowledgeSilos,
+    FanInOut,
+    ModuleCoupling,
+    ChurnPareto,
+    ConstructOwnership,
 }
 
 impl ReportKind {
+    /// Returns `true` for reports that are memory-hungry on large repos and
+    /// should be opt-in only. Currently: `half_life` (gix blame on long
+    /// histories can allocate multi-GB per file).
+    pub fn is_heavy(&self) -> bool {
+        matches!(self, Self::HalfLife)
+    }
+
+    /// Default report set for the CLI when `--only` is not specified.
+    /// Excludes [`is_heavy`](Self::is_heavy) reports — users must request them
+    /// explicitly via `--only half_life,...`.
+    pub fn default_set() -> Vec<ReportKind> {
+        Self::all().into_iter().filter(|k| !k.is_heavy()).collect()
+    }
+
     /// All known report kinds.
     pub fn all() -> Vec<ReportKind> {
         vec![
@@ -347,6 +409,15 @@ impl ReportKind {
             Self::Bloat,
             Self::Outliers,
             Self::Quality,
+            Self::Complexity,
+            Self::ConstructChurn,
+            Self::HalfLife,
+            Self::Succession,
+            Self::KnowledgeSilos,
+            Self::FanInOut,
+            Self::ModuleCoupling,
+            Self::ChurnPareto,
+            Self::ConstructOwnership,
         ]
     }
 
@@ -364,6 +435,15 @@ impl ReportKind {
             "bloat" => Some(Self::Bloat),
             "outliers" => Some(Self::Outliers),
             "quality" => Some(Self::Quality),
+            "complexity" => Some(Self::Complexity),
+            "construct_churn" | "construct-churn" => Some(Self::ConstructChurn),
+            "half_life" | "half-life" | "halflife" => Some(Self::HalfLife),
+            "succession" => Some(Self::Succession),
+            "knowledge_silos" | "knowledge-silos" | "silos" => Some(Self::KnowledgeSilos),
+            "fan_in_out" | "fan-in-out" | "fanio" | "fan" => Some(Self::FanInOut),
+            "module_coupling" | "module-coupling" => Some(Self::ModuleCoupling),
+            "churn_pareto" | "churn-pareto" | "pareto" => Some(Self::ChurnPareto),
+            "construct_ownership" | "construct-ownership" => Some(Self::ConstructOwnership),
             _ => None,
         }
     }
@@ -383,6 +463,15 @@ impl fmt::Display for ReportKind {
             Self::Bloat => "bloat",
             Self::Outliers => "outliers",
             Self::Quality => "quality",
+            Self::Complexity => "complexity",
+            Self::ConstructChurn => "construct_churn",
+            Self::HalfLife => "half_life",
+            Self::Succession => "succession",
+            Self::KnowledgeSilos => "knowledge_silos",
+            Self::FanInOut => "fan_in_out",
+            Self::ModuleCoupling => "module_coupling",
+            Self::ChurnPareto => "churn_pareto",
+            Self::ConstructOwnership => "construct_ownership",
         };
         write!(f, "{s}")
     }
@@ -415,4 +504,40 @@ pub struct OutputConfig {
     pub top: Option<usize>,
     #[allow(dead_code)]
     pub quiet: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every variant in `ReportKind::all()` must round-trip through Display + parse.
+    /// This catches new variants that forgot to add a `parse()` arm or `Display` arm.
+    #[test]
+    fn report_kind_round_trip_all_variants() {
+        for kind in ReportKind::all() {
+            let s = kind.to_string();
+            let parsed = ReportKind::parse(&s)
+                .unwrap_or_else(|| panic!("ReportKind::parse({s:?}) returned None"));
+            assert_eq!(parsed, kind, "round-trip mismatch for {kind:?}");
+        }
+    }
+
+    #[test]
+    fn report_kind_parse_is_case_insensitive() {
+        assert_eq!(ReportKind::parse("AUTHORS"), Some(ReportKind::Authors));
+        assert_eq!(
+            ReportKind::parse("Construct_Churn"),
+            Some(ReportKind::ConstructChurn)
+        );
+        assert_eq!(
+            ReportKind::parse("Knowledge-Silos"),
+            Some(ReportKind::KnowledgeSilos)
+        );
+    }
+
+    #[test]
+    fn report_kind_parse_unknown_returns_none() {
+        assert!(ReportKind::parse("not_a_real_metric").is_none());
+        assert!(ReportKind::parse("").is_none());
+    }
 }

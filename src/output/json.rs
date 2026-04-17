@@ -41,8 +41,10 @@ impl JsonWriter {
     fn result_to_json(result: &MetricResult) -> Value {
         let mut obj = Map::new();
         obj.insert("name".to_string(), json!(result.name));
+        obj.insert("display_name".to_string(), json!(result.display_name));
         obj.insert("description".to_string(), json!(result.description));
         obj.insert("columns".to_string(), json!(result.columns));
+        obj.insert("column_labels".to_string(), json!(result.column_labels));
 
         if result.entry_groups.is_empty() {
             obj.insert(
@@ -98,9 +100,11 @@ mod tests {
     #[test]
     fn test_json_output_valid() {
         let result = MetricResult {
-            name: "Authors".to_string(),
+            name: "authors".to_string(),
+            display_name: "Authors".to_string(),
             description: "Top authors".to_string(),
             columns: vec!["commits".to_string()],
+            column_labels: vec!["Commits".to_string()],
             entry_groups: vec![],
             entries: vec![
                 MetricEntry {
@@ -138,7 +142,17 @@ mod tests {
         assert!(reports.contains_key("authors"));
 
         let authors = reports.get("authors").unwrap();
-        assert_eq!(authors.get("name").unwrap().as_str().unwrap(), "Authors");
+        assert_eq!(authors.get("name").unwrap().as_str().unwrap(), "authors");
+        assert_eq!(
+            authors.get("display_name").unwrap().as_str().unwrap(),
+            "Authors"
+        );
+        assert_eq!(
+            authors.get("column_labels").unwrap().as_array().unwrap()[0]
+                .as_str()
+                .unwrap(),
+            "Commits"
+        );
 
         let entries = authors.get("entries").unwrap().as_array().unwrap();
         assert_eq!(entries.len(), 2);

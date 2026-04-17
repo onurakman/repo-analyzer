@@ -158,8 +158,10 @@ mod tests {
     fn sample_result(name: &str) -> MetricResult {
         MetricResult {
             name: name.to_string(),
+            display_name: name.to_string(),
             description: format!("{name} description"),
             columns: vec!["commits".to_string(), "lines".to_string()],
+            column_labels: vec!["Commits".to_string(), "Lines".to_string()],
             entry_groups: vec![],
             entries: vec![
                 MetricEntry {

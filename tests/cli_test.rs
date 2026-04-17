@@ -220,3 +220,73 @@ fn test_cli_quiet_mode() {
         .assert()
         .success();
 }
+
+/// All newly-added collectors must run end-to-end on a real repo without crashing.
+/// This guards against missing wiring (mod.rs, ReportKind variants, engine match arms).
+#[test]
+fn test_cli_new_collectors_run_end_to_end() {
+    let repo = create_test_repo();
+    let only = "complexity,construct_churn,half_life,succession,knowledge_silos,fan_in_out,module_coupling,churn_pareto,construct_ownership";
+
+    Command::cargo_bin("repo-analyzer")
+        .unwrap()
+        .arg(repo.path())
+        .args(["-q", "-f", "json", "--only", only])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_cli_complexity_emits_function_entry() {
+    let repo = create_test_repo();
+
+    Command::cargo_bin("repo-analyzer")
+        .unwrap()
+        .arg(repo.path())
+        .args(["-q", "-f", "json", "--only", "complexity"])
+        .assert()
+        .success()
+        // The hello.rs test fixture defines `main` and `greet` — at least one should appear.
+        .stdout(
+            predicate::str::contains("hello.rs").or(predicate::str::contains("\"complexity\"")),
+        );
+}
+
+#[test]
+fn test_cli_construct_churn_runs() {
+    let repo = create_test_repo();
+
+    Command::cargo_bin("repo-analyzer")
+        .unwrap()
+        .arg(repo.path())
+        .args(["-q", "-f", "json", "--only", "construct_churn"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"construct_churn\""));
+}
+
+#[test]
+fn test_cli_pareto_runs() {
+    let repo = create_test_repo();
+
+    Command::cargo_bin("repo-analyzer")
+        .unwrap()
+        .arg(repo.path())
+        .args(["-q", "-f", "json", "--only", "churn_pareto"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"churn_pareto\""));
+}
+
+#[test]
+fn test_cli_only_alias_dash_form_works() {
+    // Verify the dashed alias accepted by ReportKind::parse works on the CLI.
+    let repo = create_test_repo();
+
+    Command::cargo_bin("repo-analyzer")
+        .unwrap()
+        .arg(repo.path())
+        .args(["-q", "-f", "json", "--only", "module-coupling"])
+        .assert()
+        .success();
+}

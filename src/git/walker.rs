@@ -1,20 +1,26 @@
+use std::sync::Arc;
+
 use chrono::{DateTime, FixedOffset, Utc};
+use gix::bstr::ByteSlice;
 use gix::traverse::commit::simple::CommitTimeOrder;
 
+use crate::interner::Interner;
 use crate::types::{CommitInfo, TimeRange};
 
 /// Walks git history and yields `CommitInfo` records.
 pub struct GitWalker {
     repo_path: String,
     time_range: TimeRange,
+    interner: Arc<Interner>,
 }
 
 impl GitWalker {
     /// Create a new walker for the given repository path and time range.
-    pub fn new(repo_path: String, time_range: TimeRange) -> Self {
+    pub fn new(repo_path: String, time_range: TimeRange, interner: Arc<Interner>) -> Self {
         Self {
             repo_path,
             time_range,
+            interner,
         }
     }
 
@@ -44,10 +50,10 @@ impl GitWalker {
             let info = info_result?;
             let commit = info.object()?;
 
-            // Extract author info
+            // Extract author info — interned because authors recur heavily across commits.
             let author = commit.author()?;
-            let author_name = author.name.to_string();
-            let author_email = author.email.to_string();
+            let author_name = self.interner.intern(&author.name.to_str_lossy());
+            let author_email = self.interner.intern(&author.email.to_str_lossy());
 
             // Extract timestamp from author signature
             let time = author.time()?;
@@ -173,7 +179,11 @@ mod tests {
     #[test]
     fn test_walk_all_commits() {
         let dir = create_test_repo();
-        let walker = GitWalker::new(dir.path().to_str().unwrap().to_string(), TimeRange::All);
+        let walker = GitWalker::new(
+            dir.path().to_str().unwrap().to_string(),
+            TimeRange::All,
+            Arc::new(Interner::new()),
+        );
 
         let mut commits = Vec::new();
         let count = walker
@@ -191,8 +201,8 @@ mod tests {
         assert_eq!(commits[1].message.trim(), "Initial commit");
 
         // Author info
-        assert_eq!(commits[0].author, "Test User");
-        assert_eq!(commits[0].email, "test@example.com");
+        assert_eq!(&*commits[0].author, "Test User");
+        assert_eq!(&*commits[0].email, "test@example.com");
     }
 
     #[test]
@@ -200,7 +210,11 @@ mod tests {
         // Walk the current repo (repo-analyzer itself) and verify we get >0 commits.
         // This tests that the walker works on a real repo with history.
         let dir = create_test_repo();
-        let walker = GitWalker::new(dir.path().to_str().unwrap().to_string(), TimeRange::All);
+        let walker = GitWalker::new(
+            dir.path().to_str().unwrap().to_string(),
+            TimeRange::All,
+            Arc::new(Interner::new()),
+        );
 
         let count = walker.walk(|_| Ok(())).expect("walk should succeed");
 
@@ -210,7 +224,11 @@ mod tests {
     #[test]
     fn test_commit_has_parent_ids() {
         let dir = create_test_repo();
-        let walker = GitWalker::new(dir.path().to_str().unwrap().to_string(), TimeRange::All);
+        let walker = GitWalker::new(
+            dir.path().to_str().unwrap().to_string(),
+            TimeRange::All,
+            Arc::new(Interner::new()),
+        );
 
         let mut commits = Vec::new();
         walker

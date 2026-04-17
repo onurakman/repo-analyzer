@@ -36,25 +36,27 @@ impl TerminalWriter {
 }
 
 impl TerminalWriter {
-    fn render_table(entries: &[MetricEntry], columns: &[String], top_n: usize) {
+    fn render_table(entries: &[MetricEntry], columns: &[String], labels: &[String], top_n: usize) {
         let mut table = Table::new();
 
-        // Header row
+        // Header row uses human-friendly labels (parallel to `columns`).
+        // Falls back to the raw column key if a label is missing.
         let mut header_cells = vec![
             Cell::new("Name")
                 .fg(Color::Cyan)
                 .set_alignment(CellAlignment::Left),
         ];
-        for col in columns {
+        for (i, col) in columns.iter().enumerate() {
+            let label = labels.get(i).map(String::as_str).unwrap_or(col);
             header_cells.push(
-                Cell::new(col)
+                Cell::new(label)
                     .fg(Color::Cyan)
                     .set_alignment(CellAlignment::Left),
             );
         }
         table.set_header(header_cells);
 
-        // Data rows
+        // Data rows — value lookup still uses the snake_case column key.
         let display_count = entries.len().min(top_n);
         for entry in entries.iter().take(display_count) {
             let mut row = vec![entry.key.clone()];
@@ -85,7 +87,12 @@ impl ReportWriter for TerminalWriter {
         for result in results {
             // Print header
             println!("\n{}", "=".repeat(60));
-            println!("  {}", result.name);
+            let title = if result.display_name.is_empty() {
+                &result.name
+            } else {
+                &result.display_name
+            };
+            println!("  {title}");
             println!("{}", "=".repeat(60));
 
             if !result.description.is_empty() {
@@ -93,17 +100,22 @@ impl ReportWriter for TerminalWriter {
             }
 
             let columns = Self::get_columns(result);
+            let labels = if result.column_labels.is_empty() {
+                columns.clone()
+            } else {
+                result.column_labels.clone()
+            };
 
             if result.entry_groups.is_empty() {
                 if columns.is_empty() && result.entries.is_empty() {
                     println!("  (no data)");
                     continue;
                 }
-                Self::render_table(&result.entries, &columns, top_n);
+                Self::render_table(&result.entries, &columns, &labels, top_n);
             } else {
                 for (group_name, group_entries) in &result.entry_groups {
                     println!("\n  -- {} ({} entries) --", group_name, group_entries.len());
-                    Self::render_table(group_entries, &columns, top_n);
+                    Self::render_table(group_entries, &columns, &labels, top_n);
                 }
             }
         }
@@ -121,9 +133,11 @@ mod tests {
     #[test]
     fn test_terminal_writer_no_panic() {
         let result = MetricResult {
-            name: "Test Metric".to_string(),
+            name: "test_metric".to_string(),
+            display_name: "Test Metric".to_string(),
             description: "A test metric".to_string(),
             columns: vec!["commits".to_string(), "lines".to_string()],
+            column_labels: vec!["Commits".to_string(), "Lines".to_string()],
             entry_groups: vec![],
             entries: vec![MetricEntry {
                 key: "alice".to_string(),

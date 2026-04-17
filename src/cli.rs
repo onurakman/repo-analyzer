@@ -14,7 +14,7 @@ pub struct Cli {
     #[arg(short, long, value_enum, default_value_t = OutputFormat::Table)]
     pub format: OutputFormat,
 
-    /// Run only these reports (comma-separated: authors,hotspots,churn,ownership,coupling,patterns,age,branches,bloat,outliers,quality)
+    /// Run only these reports (comma-separated: authors,hotspots,churn,ownership,coupling,patterns,age,branches,bloat,outliers,quality,complexity,construct_churn,half_life,succession,knowledge_silos,fan_in_out,module_coupling,churn_pareto,construct_ownership)
     #[arg(long)]
     pub only: Option<String>,
 
@@ -83,10 +83,11 @@ impl Cli {
 
     /// Parse the `--only` flag into a list of `ReportKind`.
     ///
-    /// If `--only` is not provided, returns all report kinds.
+    /// If `--only` is not provided, returns the default (non-heavy) report set.
+    /// Heavy reports (e.g. `half_life`) must be requested explicitly via `--only`.
     pub fn parse_report_kinds(&self) -> anyhow::Result<Vec<ReportKind>> {
         match &self.only {
-            None => Ok(ReportKind::all()),
+            None => Ok(ReportKind::default_set()),
             Some(s) => {
                 let mut kinds = Vec::new();
                 for part in s.split(',') {

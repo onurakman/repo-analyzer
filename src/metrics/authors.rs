@@ -1,22 +1,12 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 
 use crate::metrics::MetricCollector;
-use crate::types::{MetricEntry, MetricResult, MetricValue, ParsedChange};
+use crate::store::ChangeStore;
+use crate::types::{MetricEntry, MetricResult, MetricValue};
 
-struct AuthorStats {
-    commits: u64,
-    lines_added: u64,
-    lines_deleted: u64,
-    active_days: HashSet<String>,
-    first_commit: NaiveDate,
-    last_commit: NaiveDate,
-}
-
-pub struct AuthorsCollector {
-    authors: HashMap<String, AuthorStats>,
-}
+pub struct AuthorsCollector;
 
 impl Default for AuthorsCollector {
     fn default() -> Self {
@@ -26,9 +16,7 @@ impl Default for AuthorsCollector {
 
 impl AuthorsCollector {
     pub fn new() -> Self {
-        Self {
-            authors: HashMap::new(),
-        }
+        Self
     }
 }
 
@@ -37,74 +25,72 @@ impl MetricCollector for AuthorsCollector {
         "authors"
     }
 
-    fn process(&mut self, change: &ParsedChange) {
-        let commit = &change.diff.commit;
-        let email = &commit.email;
-        let date = commit.timestamp.date_naive();
-        let day_str = date.format("%Y-%m-%d").to_string();
-
-        let stats = self
-            .authors
-            .entry(email.clone())
-            .or_insert_with(|| AuthorStats {
-                commits: 0,
-                lines_added: 0,
-                lines_deleted: 0,
-                active_days: HashSet::new(),
-                first_commit: date,
-                last_commit: date,
-            });
-
-        stats.commits += 1;
-        stats.lines_added += change.diff.additions as u64;
-        stats.lines_deleted += change.diff.deletions as u64;
-        stats.active_days.insert(day_str);
-
-        if date < stats.first_commit {
-            stats.first_commit = date;
-        }
-        if date > stats.last_commit {
-            stats.last_commit = date;
-        }
+    fn finalize(&mut self) -> MetricResult {
+        empty_result()
     }
 
-    fn finalize(&mut self) -> MetricResult {
-        let mut entries: Vec<MetricEntry> = self
-            .authors
-            .drain()
-            .map(|(email, stats)| {
-                let mut values = HashMap::new();
-                values.insert("commits".into(), MetricValue::Count(stats.commits));
-                values.insert("lines_added".into(), MetricValue::Count(stats.lines_added));
-                values.insert(
-                    "lines_deleted".into(),
-                    MetricValue::Count(stats.lines_deleted),
-                );
-                values.insert(
-                    "active_days".into(),
-                    MetricValue::Count(stats.active_days.len() as u64),
-                );
-                values.insert("first_commit".into(), MetricValue::Date(stats.first_commit));
-                values.insert("last_commit".into(), MetricValue::Date(stats.last_commit));
-                MetricEntry { key: email, values }
+    fn finalize_from_db(
+        &mut self,
+        store: &ChangeStore,
+        _progress: &crate::metrics::ProgressReporter,
+    ) -> Option<MetricResult> {
+        let entries = store
+            .with_conn(|conn| -> anyhow::Result<Vec<MetricEntry>> {
+                let mut stmt = conn.prepare(
+                    "SELECT email,
+                            COUNT(DISTINCT commit_oid)                          AS commits,
+                            SUM(additions)                                      AS lines_added,
+                            SUM(deletions)                                      AS lines_deleted,
+                            COUNT(DISTINCT date(commit_ts, 'unixepoch'))        AS active_days,
+                            MIN(commit_ts)                                      AS first_ts,
+                            MAX(commit_ts)                                      AS last_ts
+                       FROM changes
+                      GROUP BY email
+                      ORDER BY commits DESC",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    let email: String = row.get(0)?;
+                    let commits: i64 = row.get(1)?;
+                    let added: i64 = row.get(2)?;
+                    let deleted: i64 = row.get(3)?;
+                    let active_days: i64 = row.get(4)?;
+                    let first_ts: i64 = row.get(5)?;
+                    let last_ts: i64 = row.get(6)?;
+                    Ok((
+                        email,
+                        commits as u64,
+                        added as u64,
+                        deleted as u64,
+                        active_days as u64,
+                        first_ts,
+                        last_ts,
+                    ))
+                })?;
+
+                let mut out = Vec::new();
+                for r in rows {
+                    let (email, commits, added, deleted, active_days, first_ts, last_ts) = r?;
+                    let first: NaiveDate = ts_to_date(first_ts);
+                    let last: NaiveDate = ts_to_date(last_ts);
+                    let mut values = HashMap::new();
+                    values.insert("commits".into(), MetricValue::Count(commits));
+                    values.insert("lines_added".into(), MetricValue::Count(added));
+                    values.insert("lines_deleted".into(), MetricValue::Count(deleted));
+                    values.insert("active_days".into(), MetricValue::Count(active_days));
+                    values.insert("first_commit".into(), MetricValue::Date(first));
+                    values.insert("last_commit".into(), MetricValue::Date(last));
+                    out.push(MetricEntry { key: email, values });
+                }
+                Ok(out)
             })
-            .collect();
+            .ok()?
+            .ok()?;
 
-        entries.sort_by(|a, b| {
-            let ca = match a.values.get("commits") {
-                Some(MetricValue::Count(n)) => *n,
-                _ => 0,
-            };
-            let cb = match b.values.get("commits") {
-                Some(MetricValue::Count(n)) => *n,
-                _ => 0,
-            };
-            cb.cmp(&ca)
-        });
-
-        MetricResult {
+        Some(MetricResult {
             name: "authors".into(),
-            description: "Per-author contribution statistics".into(),
+            display_name: "Authors".into(),
+            description: "Who has contributed to this repository, how much each person wrote, and when they were active. Use this to spot the most active people, identify newcomers, or find authors who haven't touched the project in a long time.".into(),
+            column_labels: vec![],
             columns: vec![
                 "commits".into(),
                 "lines_added".into(),
@@ -115,7 +101,24 @@ impl MetricCollector for AuthorsCollector {
             ],
             entries,
             entry_groups: vec![],
-        }
+        })
+    }
+}
+
+fn ts_to_date(ts: i64) -> NaiveDate {
+    let dt: DateTime<Utc> = Utc.timestamp_opt(ts, 0).single().unwrap_or_default();
+    dt.date_naive()
+}
+
+fn empty_result() -> MetricResult {
+    MetricResult {
+        name: "authors".into(),
+        display_name: "Authors".into(),
+        description: String::new(),
+        column_labels: vec![],
+        columns: vec![],
+        entries: vec![],
+        entry_groups: vec![],
     }
 }
 
@@ -124,136 +127,68 @@ mod tests {
     use super::*;
     use crate::types::{CommitInfo, DiffRecord, FileStatus, ParsedChange};
     use chrono::{FixedOffset, TimeZone};
+    use std::sync::Arc;
 
-    fn make_change(author: &str, file: &str, added: u32, deleted: u32) -> ParsedChange {
+    fn mk(oid: &str, email: &str, file: &str, added: u32, deleted: u32) -> ParsedChange {
         let ts = FixedOffset::east_opt(0)
             .unwrap()
             .with_ymd_and_hms(2025, 1, 15, 12, 0, 0)
             .unwrap();
         ParsedChange {
-            diff: DiffRecord {
-                commit: CommitInfo {
-                    oid: "abc123".into(),
-                    author: author.into(),
-                    email: format!("{author}@test.com"),
+            diff: Arc::new(DiffRecord {
+                commit: Arc::new(CommitInfo {
+                    oid: oid.into(),
+                    author: email.into(),
+                    email: email.into(),
                     timestamp: ts,
                     message: "test".into(),
                     parent_ids: vec![],
-                },
+                }),
                 file_path: file.into(),
                 old_path: None,
                 status: FileStatus::Modified,
                 hunks: vec![],
                 additions: added,
                 deletions: deleted,
-            },
+            }),
             constructs: vec![],
         }
     }
 
+    fn store_with(changes: &[ParsedChange]) -> ChangeStore {
+        let store = ChangeStore::open_temp().unwrap();
+        store.insert_batch(changes).unwrap();
+        store.finalize_indexes().unwrap();
+        store
+    }
+
     #[test]
-    fn test_author_commit_count() {
-        let mut collector = AuthorsCollector::new();
-        collector.process(&make_change("Alice", "a.rs", 10, 2));
-        collector.process(&make_change("Alice", "b.rs", 5, 1));
-        collector.process(&make_change("Bob", "a.rs", 3, 0));
+    fn groups_by_email_counts_distinct_commits() {
+        let store = store_with(&[
+            mk("c1", "Alice@x", "a.rs", 10, 2),
+            mk("c1", "Alice@x", "b.rs", 5, 1), // same commit, another file
+            mk("c2", "Alice@x", "a.rs", 3, 0),
+            mk("c3", "Bob@x", "a.rs", 1, 0),
+        ]);
 
-        let result = collector.finalize();
-        assert_eq!(result.entries.len(), 2);
+        let mut c = AuthorsCollector::new();
+        let r = c
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db");
+        assert_eq!(r.entries.len(), 2);
 
-        let alice = result
+        let alice = r
             .entries
             .iter()
-            .find(|e| e.key == "Alice@test.com")
-            .unwrap();
-        match alice.values.get("commits") {
-            Some(MetricValue::Count(n)) => assert_eq!(*n, 2),
-            other => panic!("Expected Count(2), got {:?}", other),
-        }
-        match alice.values.get("lines_added") {
-            Some(MetricValue::Count(n)) => assert_eq!(*n, 15),
-            other => panic!("Expected Count(15), got {:?}", other),
-        }
-
-        let bob = result
-            .entries
-            .iter()
-            .find(|e| e.key == "Bob@test.com")
-            .unwrap();
-        match bob.values.get("commits") {
-            Some(MetricValue::Count(n)) => assert_eq!(*n, 1),
-            other => panic!("Expected Count(1), got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_groups_by_email() {
-        let mut collector = AuthorsCollector::new();
-
-        let ts = FixedOffset::east_opt(0)
-            .unwrap()
-            .with_ymd_and_hms(2025, 1, 15, 12, 0, 0)
-            .unwrap();
-
-        // Same email, different author names
-        collector.process(&ParsedChange {
-            diff: DiffRecord {
-                commit: CommitInfo {
-                    oid: "c1".into(),
-                    author: "Alice".into(),
-                    email: "alice@test.com".into(),
-                    timestamp: ts,
-                    message: "test".into(),
-                    parent_ids: vec![],
-                },
-                file_path: "a.rs".into(),
-                old_path: None,
-                status: FileStatus::Modified,
-                hunks: vec![],
-                additions: 10,
-                deletions: 0,
-            },
-            constructs: vec![],
-        });
-        collector.process(&ParsedChange {
-            diff: DiffRecord {
-                commit: CommitInfo {
-                    oid: "c2".into(),
-                    author: "alice".into(),
-                    email: "alice@test.com".into(),
-                    timestamp: ts,
-                    message: "test".into(),
-                    parent_ids: vec![],
-                },
-                file_path: "b.rs".into(),
-                old_path: None,
-                status: FileStatus::Modified,
-                hunks: vec![],
-                additions: 5,
-                deletions: 0,
-            },
-            constructs: vec![],
-        });
-
-        let result = collector.finalize();
-        // Should be grouped into 1 entry (same email)
-        assert_eq!(result.entries.len(), 1);
-        match result.entries[0].values.get("commits") {
-            Some(MetricValue::Count(n)) => assert_eq!(*n, 2),
-            other => panic!("Expected Count(2), got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_sorted_by_commits_desc() {
-        let mut collector = AuthorsCollector::new();
-        collector.process(&make_change("Alice", "a.rs", 1, 0));
-        collector.process(&make_change("Alice", "b.rs", 1, 0));
-        collector.process(&make_change("Alice", "c.rs", 1, 0));
-        collector.process(&make_change("Bob", "a.rs", 1, 0));
-
-        let result = collector.finalize();
-        assert_eq!(result.entries[0].key, "Alice@test.com");
-        assert_eq!(result.entries[1].key, "Bob@test.com");
+            .find(|e| e.key == "Alice@x")
+            .expect("alice");
+        assert!(matches!(
+            alice.values.get("commits"),
+            Some(MetricValue::Count(2))
+        ));
+        assert!(matches!(
+            alice.values.get("lines_added"),
+            Some(MetricValue::Count(18))
+        ));
     }
 }

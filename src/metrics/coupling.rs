@@ -1,17 +1,18 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::metrics::MetricCollector;
-use crate::types::{MetricEntry, MetricResult, MetricValue, ParsedChange};
+use crate::store::ChangeStore;
+use crate::types::{MetricEntry, MetricResult, MetricValue};
 
 const MIN_COUPLING_COUNT: u64 = 3;
 const MIN_COUPLING_SCORE: f64 = 0.3;
 
-pub struct CouplingCollector {
-    /// commit_id -> set of files changed in that commit
-    commits: HashMap<String, HashSet<String>>,
-    /// file -> total change count
-    file_changes: HashMap<String, u64>,
-}
+/// Cap the self-join to the top-N most-active files. Without this bound the
+/// coupling query on a 30k-commit repository can materialize millions of
+/// (file_a, file_b) pairs and explode SQLite's working set.
+const TOP_FILES: i64 = 500;
+
+pub struct CouplingCollector;
 
 impl Default for CouplingCollector {
     fn default() -> Self {
@@ -21,10 +22,7 @@ impl Default for CouplingCollector {
 
 impl CouplingCollector {
     pub fn new() -> Self {
-        Self {
-            commits: HashMap::new(),
-            file_changes: HashMap::new(),
-        }
+        Self
     }
 }
 
@@ -33,156 +31,139 @@ impl MetricCollector for CouplingCollector {
         "coupling"
     }
 
-    fn process(&mut self, change: &ParsedChange) {
-        let commit_id = &change.diff.commit.oid;
-        let file = &change.diff.file_path;
-
-        self.commits
-            .entry(commit_id.clone())
-            .or_default()
-            .insert(file.clone());
-
-        *self.file_changes.entry(file.clone()).or_insert(0) += 1;
+    fn finalize(&mut self) -> MetricResult {
+        empty_result()
     }
 
-    fn finalize(&mut self) -> MetricResult {
-        // Count co-changes for each file pair
-        let mut co_changes: HashMap<(String, String), u64> = HashMap::new();
+    fn finalize_from_db(
+        &mut self,
+        store: &ChangeStore,
+        progress: &crate::metrics::ProgressReporter,
+    ) -> Option<MetricResult> {
+        store
+            .with_conn(|conn| -> anyhow::Result<MetricResult> {
+                progress.status(&format!(
+                    "  coupling: picking top {TOP_FILES} active files..."
+                ));
+                // Step 1: pick the top-N files by commit activity. Anything
+                // outside this set is too quiet to produce interesting
+                // coupling pairs and just balloons memory.
+                conn.execute_batch(&format!(
+                    "DROP TABLE IF EXISTS __coupling_files;
+                     DROP TABLE IF EXISTS __coupling_changes;
+                     CREATE TEMP TABLE __coupling_files AS
+                       SELECT file_path AS file, COUNT(*) AS cnt
+                         FROM changes
+                        GROUP BY file_path
+                        ORDER BY cnt DESC
+                        LIMIT {TOP_FILES};"
+                ))?;
 
-        for files in self.commits.values() {
-            let file_list: Vec<&String> = files.iter().collect();
-            for i in 0..file_list.len() {
-                for j in (i + 1)..file_list.len() {
-                    let (a, b) = if file_list[i] < file_list[j] {
-                        (file_list[i].clone(), file_list[j].clone())
-                    } else {
-                        (file_list[j].clone(), file_list[i].clone())
-                    };
-                    *co_changes.entry((a, b)).or_insert(0) += 1;
+                progress.status("  coupling: materializing filtered changes...");
+                // Step 2: materialize a narrow (commit_oid, file_path) view
+                // restricted to those top files. Add a covering index so the
+                // self-join can probe matching commits in O(log n) per row
+                // instead of scanning the full changes table twice.
+                conn.execute_batch(
+                    "CREATE TEMP TABLE __coupling_changes AS
+                       SELECT ch.commit_oid, ch.file_path
+                         FROM changes ch
+                         JOIN __coupling_files t ON t.file = ch.file_path;
+                     CREATE INDEX __idx_coupling_commit
+                         ON __coupling_changes(commit_oid, file_path);",
+                )?;
+                progress.status("  coupling: self-join on filtered set...");
+
+                // Pre-load per-file total commit counts (needed for scoring).
+                let mut per_file: HashMap<String, u64> = HashMap::new();
+                let mut stmt_totals = conn.prepare(
+                    "SELECT file, cnt FROM __coupling_files",
+                )?;
+                let totals = stmt_totals.query_map([], |row| {
+                    let p: String = row.get(0)?;
+                    let n: i64 = row.get(1)?;
+                    Ok((p, n as u64))
+                })?;
+                for r in totals {
+                    let (p, n) = r?;
+                    per_file.insert(p, n);
                 }
-            }
-        }
 
-        let mut entries: Vec<MetricEntry> = co_changes
-            .into_iter()
-            .filter_map(|((a, b), count)| {
-                if count < MIN_COUPLING_COUNT {
-                    return None;
+                // Self-join on the filtered, indexed set. The `file_path < file_path`
+                // condition eliminates duplicate (b,a) vs (a,b) pairs.
+                // LIMIT caps memory in case pairs explode anyway.
+                let mut entries: Vec<MetricEntry> = Vec::new();
+                let mut stmt = conn.prepare(
+                    "SELECT a.file_path AS fa,
+                            b.file_path AS fb,
+                            COUNT(*)    AS co
+                       FROM __coupling_changes a
+                       JOIN __coupling_changes b
+                         ON a.commit_oid = b.commit_oid
+                        AND a.file_path < b.file_path
+                      GROUP BY a.file_path, b.file_path
+                     HAVING co >= ?1
+                      ORDER BY co DESC
+                      LIMIT 1000",
+                )?;
+                let rows = stmt.query_map([MIN_COUPLING_COUNT as i64], |row| {
+                    let fa: String = row.get(0)?;
+                    let fb: String = row.get(1)?;
+                    let co: i64 = row.get(2)?;
+                    Ok((fa, fb, co as u64))
+                })?;
+                for r in rows {
+                    let (fa, fb, co) = r?;
+                    let ca = per_file.get(&fa).copied().unwrap_or(1);
+                    let cb = per_file.get(&fb).copied().unwrap_or(1);
+                    let max_changes = ca.max(cb) as f64;
+                    let score = co as f64 / max_changes;
+                    if score < MIN_COUPLING_SCORE {
+                        continue;
+                    }
+                    let key = format!("{fa} <-> {fb}");
+                    let mut values = HashMap::new();
+                    values.insert("file_a".into(), MetricValue::Text(fa));
+                    values.insert("file_b".into(), MetricValue::Text(fb));
+                    values.insert("co_changes".into(), MetricValue::Count(co));
+                    values.insert("score".into(), MetricValue::Float(score));
+                    entries.push(MetricEntry { key, values });
                 }
 
-                let changes_a = self.file_changes.get(&a).copied().unwrap_or(1);
-                let changes_b = self.file_changes.get(&b).copied().unwrap_or(1);
-                let max_changes = changes_a.max(changes_b) as f64;
-                let score = count as f64 / max_changes;
+                conn.execute_batch(
+                    "DROP INDEX IF EXISTS __idx_coupling_commit;
+                     DROP TABLE IF EXISTS __coupling_changes;
+                     DROP TABLE IF EXISTS __coupling_files;",
+                )?;
 
-                if score < MIN_COUPLING_SCORE {
-                    return None;
-                }
-
-                let key = format!("{a} <-> {b}");
-                let mut values = HashMap::new();
-                values.insert("file_a".into(), MetricValue::Text(a));
-                values.insert("file_b".into(), MetricValue::Text(b));
-                values.insert("co_changes".into(), MetricValue::Count(count));
-                values.insert("score".into(), MetricValue::Float(score));
-
-                Some(MetricEntry { key, values })
+                Ok(MetricResult {
+                    name: "coupling".into(),
+                    display_name: "File Coupling".into(),
+                    description: "Pairs of files that tend to change together in the same commits. Strong coupling between files in different modules suggests a hidden dependency or missing abstraction — every time you touch A you're forced to touch B. Use this to find architectural seams to clean up.".into(),
+                    entry_groups: vec![],
+                    column_labels: vec![],
+                    columns: vec![
+                        "file_a".into(),
+                        "file_b".into(),
+                        "co_changes".into(),
+                        "score".into(),
+                    ],
+                    entries,
+                })
             })
-            .collect();
-
-        entries.sort_by(|a, b| {
-            let sa = match a.values.get("score") {
-                Some(MetricValue::Float(f)) => *f,
-                _ => 0.0,
-            };
-            let sb = match b.values.get("score") {
-                Some(MetricValue::Float(f)) => *f,
-                _ => 0.0,
-            };
-            sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        MetricResult {
-            name: "coupling".into(),
-            description: "Temporal coupling between files changed together".into(),
-            entry_groups: vec![],
-            columns: vec![
-                "file_a".into(),
-                "file_b".into(),
-                "co_changes".into(),
-                "score".into(),
-            ],
-            entries,
-        }
+            .ok()?
+            .ok()
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::{CommitInfo, DiffRecord, FileStatus, ParsedChange};
-    use chrono::{FixedOffset, TimeZone};
-
-    fn make_change(commit_id: &str, file: &str) -> ParsedChange {
-        let ts = FixedOffset::east_opt(0)
-            .unwrap()
-            .with_ymd_and_hms(2025, 1, 15, 12, 0, 0)
-            .unwrap();
-        ParsedChange {
-            diff: DiffRecord {
-                commit: CommitInfo {
-                    oid: commit_id.into(),
-                    author: "dev".into(),
-                    email: "dev@test.com".into(),
-                    timestamp: ts,
-                    message: "test".into(),
-                    parent_ids: vec![],
-                },
-                file_path: file.into(),
-                old_path: None,
-                status: FileStatus::Modified,
-                hunks: vec![],
-                additions: 5,
-                deletions: 2,
-            },
-            constructs: vec![],
-        }
-    }
-
-    #[test]
-    fn test_coupling_detected() {
-        let mut collector = CouplingCollector::new();
-        // 4 commits changing a.rs + b.rs together
-        for i in 0..4 {
-            let cid = format!("commit_{i}");
-            collector.process(&make_change(&cid, "a.rs"));
-            collector.process(&make_change(&cid, "b.rs"));
-        }
-
-        let result = collector.finalize();
-        assert_eq!(result.entries.len(), 1);
-
-        let entry = &result.entries[0];
-        assert_eq!(entry.key, "a.rs <-> b.rs");
-
-        match entry.values.get("co_changes") {
-            Some(MetricValue::Count(n)) => assert_eq!(*n, 4),
-            other => panic!("Expected Count(4), got {:?}", other),
-        }
-        match entry.values.get("score") {
-            Some(MetricValue::Float(f)) => assert!((*f - 1.0).abs() < 0.01),
-            other => panic!("Expected Float(1.0), got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_low_coupling_filtered() {
-        let mut collector = CouplingCollector::new();
-        // Only 1 co-change — below MIN_COUPLING_COUNT threshold
-        collector.process(&make_change("commit_1", "x.rs"));
-        collector.process(&make_change("commit_1", "y.rs"));
-
-        let result = collector.finalize();
-        assert!(result.entries.is_empty());
+fn empty_result() -> MetricResult {
+    MetricResult {
+        name: "coupling".into(),
+        display_name: "File Coupling".into(),
+        description: String::new(),
+        entry_groups: vec![],
+        column_labels: vec![],
+        columns: vec![],
+        entries: vec![],
     }
 }

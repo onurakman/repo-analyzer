@@ -47,7 +47,11 @@ impl MetricCollector for BloatCollector {
 
     fn process(&mut self, _change: &ParsedChange) {}
 
-    fn inspect_repo(&mut self, repo: &gix::Repository) -> anyhow::Result<()> {
+    fn inspect_repo(
+        &mut self,
+        repo: &gix::Repository,
+        _progress: &crate::metrics::ProgressReporter,
+    ) -> anyhow::Result<()> {
         let head_commit = match repo.head_commit() {
             Ok(c) => c,
             Err(_) => return Ok(()),
@@ -115,8 +119,10 @@ impl MetricCollector for BloatCollector {
 
         MetricResult {
             name: "bloat".into(),
-            description: "Large files and suspicious committed artifacts in HEAD".into(),
+            display_name: "Repository Bloat".into(),
+            description: "Large files and committed artifacts that probably shouldn't be in git — minified bundles, build outputs, vendored dependencies, IDE configs, OS metadata. Removing or git-ignoring these (and rewriting history) shrinks the repository for everyone who clones it.".into(),
             entry_groups: vec![],
+            column_labels: vec![],
             columns: vec![
                 "size_bytes".into(),
                 "size_human".into(),

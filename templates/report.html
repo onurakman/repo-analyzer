@@ -1,59 +1,587 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
-    <meta charset="UTF-8">
-    <title>repo-analyzer Report</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; padding: 2rem; max-width: 1200px; margin: 0 auto; }
-        h1 { color: #58a6ff; margin-bottom: 0.5rem; }
-        .meta { color: #8b949e; margin-bottom: 2rem; font-size: 0.9rem; }
-        .report-section { margin-bottom: 2rem; border: 1px solid #30363d; border-radius: 6px; overflow: hidden; }
-        .section-header { background: #161b22; padding: 1rem; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
-        .section-header h2 { color: #58a6ff; font-size: 1.1rem; }
-        .section-header .toggle { color: #8b949e; font-size: 1.2rem; }
-        .section-header .entry-count { color: #8b949e; font-size: 0.8rem; margin-left: 0.75rem; }
-        .section-body { padding: 1rem; }
-        .section-body.collapsed { display: none; }
-        .section-desc { color: #8b949e; font-size: 0.85rem; margin-bottom: 1rem; font-style: italic; }
-        table { width: 100%; border-collapse: collapse; }
-        th { text-align: left; padding: 0.5rem; border-bottom: 2px solid #30363d; color: #58a6ff; font-size: 0.85rem; }
-        td { padding: 0.5rem; border-bottom: 1px solid #21262d; font-size: 0.85rem; }
-        tr:hover { background: #161b22; }
-        tr.extra-row { display: none; }
-        tr.extra-row.visible { display: table-row; }
-        .bar { display: inline-block; height: 20px; background: #238636; border-radius: 3px; margin-right: 0.5rem; min-width: 2px; }
-        .bar-row.extra-row { display: none; }
-        .bar-row.extra-row.visible { display: block; }
-        .show-more-btn { display: inline-block; margin-top: 0.75rem; padding: 0.4rem 1rem; background: #21262d; color: #58a6ff; border: 1px solid #30363d; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
-        .show-more-btn:hover { background: #30363d; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>repo-analyzer · report</title>
+
+<!-- Tailwind v4 browser build -->
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<!-- Lucide icons -->
+<script src="https://cdn.jsdelivr.net/npm/lucide@latest/dist/umd/lucide.min.js"></script>
+<!-- Inter font -->
+<link rel="preconnect" href="https://rsms.me/">
+<link rel="stylesheet" href="https://rsms.me/inter/inter.css">
+
+<style type="text/tailwindcss">
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+}
+
+@layer base {
+  html { font-feature-settings: "cv11", "ss01"; }
+  body { @apply font-sans text-sm antialiased bg-slate-50 text-slate-900; }
+  html.dark body { @apply bg-[#0b0e14] text-slate-100; }
+}
+
+@layer components {
+  .card { @apply rounded-xl border shadow-sm bg-white border-slate-200; }
+  html.dark .card { @apply bg-[#11151c] border-slate-800; }
+
+  .stat-card {
+    @apply rounded-xl border shadow-sm p-4 flex flex-col gap-1;
+    @apply bg-white border-slate-200;
+  }
+  html.dark .stat-card { @apply bg-[#11151c] border-slate-800; }
+
+  .nav-link {
+    @apply flex items-center justify-between gap-2 rounded-md px-3 py-2 text-[13px] transition-colors;
+    @apply text-slate-600 hover:bg-slate-100 hover:text-slate-900;
+  }
+  html.dark .nav-link { @apply text-slate-400 hover:bg-slate-800/60 hover:text-slate-100; }
+  .nav-link.active { @apply bg-indigo-50 text-indigo-700; }
+  html.dark .nav-link.active { @apply bg-indigo-500/10 text-indigo-300; }
+  .nav-badge {
+    @apply text-[10px] px-1.5 py-0.5 rounded-full tabular-nums bg-slate-200 text-slate-600;
+  }
+  html.dark .nav-badge { @apply bg-slate-800 text-slate-400; }
+
+  .report-section {
+    @apply rounded-xl border shadow-sm overflow-hidden scroll-mt-4;
+    @apply bg-white border-slate-200;
+  }
+  html.dark .report-section { @apply bg-[#11151c] border-slate-800; }
+  .section-header {
+    @apply flex items-center justify-between gap-3 cursor-pointer select-none px-5 py-4 transition-colors;
+  }
+  .section-header:hover { @apply bg-slate-50; }
+  html.dark .section-header:hover { @apply bg-slate-800/40; }
+  .section-header h2 { @apply flex items-center gap-2 text-base font-semibold; }
+  .section-header h2 svg { @apply text-indigo-500; }
+  .entry-count {
+    @apply text-xs font-normal px-2 py-0.5 rounded-full tabular-nums bg-slate-100 text-slate-600;
+  }
+  html.dark .entry-count { @apply bg-slate-800 text-slate-400; }
+  .toggle-chevron { @apply text-slate-400 transition-transform; }
+  .section-body { @apply px-5 pb-5 border-t border-slate-200; }
+  html.dark .section-body { @apply border-slate-800; }
+  .section-body.collapsed { @apply hidden; }
+  .section-desc {
+    @apply text-[13px] leading-6 py-3 text-slate-600 border-b border-dashed border-slate-200 mb-4;
+  }
+  html.dark .section-desc { @apply text-slate-400 border-slate-800; }
+
+  .filter-input {
+    @apply w-52 rounded-md border px-2.5 py-1.5 text-xs outline-none transition-all;
+    @apply bg-white border-slate-300 text-slate-800;
+    @apply focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20;
+  }
+  html.dark .filter-input {
+    @apply bg-slate-900 border-slate-700 text-slate-100;
+    @apply focus:border-indigo-400 focus:ring-indigo-400/20;
+  }
+
+  .bars { @apply flex flex-col gap-1 mb-4; }
+  .bar-row { @apply grid grid-cols-[1fr_auto] gap-3 items-center py-0.5; }
+  .bar-row.extra-row { @apply hidden; }
+  .bar-row.extra-row.visible { @apply grid; }
+  .bar-track { @apply relative h-6 rounded overflow-hidden flex items-center bg-slate-100; }
+  html.dark .bar-track { @apply bg-slate-800/60; }
+  .bar {
+    @apply h-full min-w-[2px] transition-[width] duration-300;
+    background: linear-gradient(90deg, #6366f1 0%, #a855f7 100%);
+  }
+  .bar-label {
+    @apply absolute left-2 text-[11.5px] whitespace-nowrap overflow-hidden text-ellipsis max-w-[calc(100%-1rem)] z-10 font-mono text-slate-900;
+    text-shadow: 0 0 4px rgba(255, 255, 255, 0.65);
+  }
+  html.dark .bar-label { @apply text-slate-100; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6); }
+  .bar-value { @apply font-mono text-[11.5px] tabular-nums text-slate-500; }
+  html.dark .bar-value { @apply text-slate-400; }
+
+  table { @apply w-full border-collapse tabular-nums; }
+  thead th {
+    @apply text-left px-3 py-2 text-[10.5px] font-semibold tracking-wider uppercase;
+    @apply border-b text-slate-500 bg-white sticky top-0;
+  }
+  html.dark thead th { @apply border-slate-700 text-slate-500 bg-[#11151c]; }
+  tbody td { @apply px-3 py-2 text-[12.5px] border-b border-slate-100; }
+  html.dark tbody td { @apply border-slate-800; }
+  tbody td:first-child { @apply font-mono text-indigo-600 break-all; }
+  html.dark tbody td:first-child { @apply text-indigo-300; }
+  tbody tr:hover { @apply bg-slate-50; }
+  html.dark tbody tr:hover { @apply bg-slate-800/40; }
+  tbody tr.extra-row { @apply hidden; }
+  tbody tr.extra-row.visible { display: table-row; }
+  .num { @apply text-right font-mono; }
+
+  .pill { @apply inline-block px-2 py-0.5 rounded-full text-[11px] font-medium; }
+  .pill-good { @apply bg-emerald-100 text-emerald-700; }
+  html.dark .pill-good { @apply bg-emerald-500/10 text-emerald-400; }
+  .pill-warn { @apply bg-amber-100 text-amber-700; }
+  html.dark .pill-warn { @apply bg-amber-500/10 text-amber-300; }
+  .pill-bad { @apply bg-rose-100 text-rose-700; }
+  html.dark .pill-bad { @apply bg-rose-500/10 text-rose-400; }
+
+  .show-more-btn {
+    @apply inline-flex items-center gap-1.5 mt-3 rounded-md border px-3 py-1.5 text-[12px] cursor-pointer transition-colors;
+    @apply border-slate-300 text-indigo-600 hover:bg-slate-100;
+  }
+  html.dark .show-more-btn {
+    @apply border-slate-700 text-indigo-300 hover:bg-slate-800;
+  }
+
+  .group-header {
+    @apply flex items-center gap-2 mt-4 mb-2 pt-4 text-sm font-semibold capitalize;
+    @apply text-indigo-600 border-t border-dashed border-slate-200;
+  }
+  html.dark .group-header { @apply text-indigo-300 border-slate-800; }
+  .group-header:first-child { @apply border-t-0 pt-0; }
+  .group-count { @apply text-xs font-normal ml-1.5 text-slate-500; }
+  html.dark .group-count { @apply text-slate-400; }
+
+  .icon-btn {
+    @apply inline-flex items-center justify-center w-8 h-8 rounded-md transition-colors;
+    @apply text-slate-500 hover:bg-slate-200 hover:text-slate-800;
+  }
+  html.dark .icon-btn { @apply text-slate-400 hover:bg-slate-800 hover:text-slate-100; }
+}
+</style>
 </head>
 <body>
-    <h1>repo-analyzer Report</h1>
-    <div class="meta">Generated: {{GENERATED_AT}}</div>
-    {{REPORT_SECTIONS}}
-    <script>
-        // Section expand/collapse
-        document.querySelectorAll('.section-header').forEach(h => {
-            h.addEventListener('click', () => {
-                const body = h.nextElementSibling;
-                body.classList.toggle('collapsed');
-                h.querySelector('.toggle').textContent = body.classList.contains('collapsed') ? '\u25b8' : '\u25be';
-            });
+
+<!-- Embedded report payload. All rendering below reads from this. -->
+<script id="report-data" type="application/json">{{REPORT_DATA_JSON}}</script>
+
+<!-- Centered wrapper: sidebar sits right next to the cards, both travel
+     together within the same max-width so the sidebar always hugs the
+     content's left edge instead of pinning to the viewport. -->
+<div class="min-h-screen max-w-[1400px] mx-auto flex gap-6 px-6 py-6 max-lg:flex-col max-lg:px-4 max-lg:py-4">
+
+  <!-- Sidebar — sticky card next to the main content -->
+  <aside class="w-64 flex-shrink-0 sticky top-6 self-start max-h-[calc(100vh-3rem)] overflow-y-auto rounded-xl border shadow-sm bg-white border-slate-200 px-3 py-4 max-lg:static max-lg:w-full max-lg:max-h-none dark:bg-[#11151c] dark:border-slate-800">
+    <div class="flex items-center justify-between px-2 mb-1">
+      <h1 class="flex items-center gap-2 text-indigo-600 dark:text-indigo-300 font-semibold text-[15px]">
+        <i data-lucide="git-branch" class="w-4 h-4"></i> repo-analyzer
+      </h1>
+      <button id="theme-toggle" class="icon-btn" title="Toggle theme">
+        <i data-lucide="sun" class="w-4 h-4 hidden dark:inline"></i>
+        <i data-lucide="moon" class="w-4 h-4 inline dark:hidden"></i>
+      </button>
+    </div>
+    <div class="text-[11px] px-2 text-slate-500 mb-5">Generated <span id="generated-at" data-iso="{{GENERATED_AT}}">{{GENERATED_AT}}</span></div>
+    <nav id="toc" class="flex flex-col gap-0.5"></nav>
+
+    <div class="mt-4 pt-3 border-t border-slate-200 dark:border-slate-800 flex gap-1.5 px-1">
+      <button id="expand-all" class="flex-1 inline-flex items-center justify-center gap-1 text-[11px] rounded-md py-1.5 border border-slate-300 text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors">
+        <i data-lucide="chevrons-down" class="w-3 h-3"></i> Expand all
+      </button>
+      <button id="collapse-all" class="flex-1 inline-flex items-center justify-center gap-1 text-[11px] rounded-md py-1.5 border border-slate-300 text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors">
+        <i data-lucide="chevrons-up" class="w-3 h-3"></i> Collapse all
+      </button>
+    </div>
+  </aside>
+
+  <!-- Main — takes the remaining width inside the centered wrapper -->
+  <main class="flex-1 min-w-0">
+
+    <!-- Hero -->
+    <section class="mb-8">
+      <h2 class="text-2xl font-semibold tracking-tight mb-1">Repository analysis</h2>
+      <p class="text-slate-500 dark:text-slate-400">Commit-history metrics, refactor candidates, and ownership insights.</p>
+      <div id="stats" class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-5"></div>
+    </section>
+
+    <!-- All report sections render here -->
+    <div id="sections" class="space-y-5"></div>
+
+  </main>
+</div>
+
+<script>
+(() => {
+  // ------------------------------------------------------------------
+  // Theme (persist in localStorage; default from system setting)
+  // ------------------------------------------------------------------
+  const root = document.documentElement;
+  const stored = localStorage.getItem('theme');
+  const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  if (stored === 'light' || (!stored && !systemDark)) root.classList.remove('dark');
+  else root.classList.add('dark');
+  document.getElementById('theme-toggle').addEventListener('click', () => {
+    root.classList.toggle('dark');
+    localStorage.setItem('theme', root.classList.contains('dark') ? 'dark' : 'light');
+  });
+
+  // ------------------------------------------------------------------
+  // Humanize the "generated at" timestamp using the viewer's locale.
+  // ------------------------------------------------------------------
+  (() => {
+    const span = document.getElementById('generated-at');
+    if (!span) return;
+    const iso = span.dataset.iso;
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return;
+    try {
+      span.textContent = new Intl.DateTimeFormat(undefined, {
+        year: 'numeric', month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit',
+      }).format(d);
+      span.title = iso;
+    } catch (_) {}
+  })();
+
+  // ------------------------------------------------------------------
+  // Read embedded data
+  // ------------------------------------------------------------------
+  const raw = document.getElementById('report-data').textContent;
+  let DATA = [];
+  try { DATA = JSON.parse(raw); } catch (e) { console.error('Bad report JSON', e); }
+
+  // Order reports from "most actionable / risk" at the top to plain descriptive
+  // stats at the bottom. Readers typically care about problems first.
+  const REPORT_ORDER = [
+    // Immediate risk / refactor candidates
+    'outliers', 'knowledge_silos', 'succession', 'hotspots',
+    'complexity', 'construct_ownership', 'construct_churn',
+    // Codebase health / hygiene
+    'bloat', 'quality', 'branches', 'half_life',
+    // Architecture / relationships
+    'coupling', 'module_coupling', 'fan_in_out', 'churn_pareto',
+    // Plain history / descriptive
+    'churn', 'age', 'ownership', 'authors', 'patterns',
+  ];
+  const ORDER_INDEX = new Map(REPORT_ORDER.map((n, i) => [n, i]));
+  DATA.sort((a, b) => {
+    const ai = ORDER_INDEX.has(a.name) ? ORDER_INDEX.get(a.name) : 1000;
+    const bi = ORDER_INDEX.has(b.name) ? ORDER_INDEX.get(b.name) : 1000;
+    return ai - bi;
+  });
+
+  // ------------------------------------------------------------------
+  // Small DOM helpers
+  // ------------------------------------------------------------------
+  const el = (tag, attrs, ...children) => {
+    const n = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (k === 'class') n.className = v;
+      else if (k === 'html') n.innerHTML = v;
+      else if (k.startsWith('data-')) n.setAttribute(k, v);
+      else if (k === 'text') n.textContent = v;
+      else n[k] = v;
+    }
+    for (const c of children) {
+      if (c == null) continue;
+      n.append(c.nodeType ? c : document.createTextNode(String(c)));
+    }
+    return n;
+  };
+  const fmt = v => {
+    if (v == null) return '';
+    if (typeof v === 'number') return Number.isInteger(v) ? v.toString() : v.toFixed(2);
+    return String(v);
+  };
+  const isNum = v => typeof v === 'number';
+
+  const ICON_MAP = {
+    authors: 'users', hotspots: 'flame', churn: 'activity',
+    ownership: 'shield', coupling: 'link', patterns: 'clock',
+    age: 'calendar', branches: 'git-branch', bloat: 'hard-drive',
+    outliers: 'triangle-alert', quality: 'check-circle', complexity: 'git-merge',
+    construct_churn: 'code-2', construct_ownership: 'user-check',
+    half_life: 'hourglass', succession: 'user-plus', knowledge_silos: 'lock',
+    fan_in_out: 'share-2', module_coupling: 'boxes', churn_pareto: 'bar-chart-3'
+  };
+  const ICON_DEFAULT = 'file-text';
+
+  // ------------------------------------------------------------------
+  // Pill classification
+  // ------------------------------------------------------------------
+  const BAD  = /risk|god|urgent|orphaned|very high|hot zone|chaos/i;
+  const WARN = /high|transfer needed|refactor|consider|stale|large|unmerged|diffuse|single-owner|minified|aging|bus factor 1/i;
+  const GOOD = /\bok\b|healthy|simple|stable|safe to delete|handed off|mostly stable|distributed/i;
+  const pillFor = s => {
+    if (!s || s.length > 60) return null;
+    if (BAD.test(s))  return 'pill-bad';
+    if (WARN.test(s)) return 'pill-warn';
+    if (GOOD.test(s)) return 'pill-good';
+    return null;
+  };
+
+  // ------------------------------------------------------------------
+  // Per-table rendering
+  // ------------------------------------------------------------------
+  const TOP_N = 10;
+
+  function renderEntries(entries, columns, labels) {
+    const container = el('div');
+    if (!entries || entries.length === 0) {
+      container.append(el('p', { class: 'text-slate-500 italic text-[12px]', text: '(no entries)' }));
+      return container;
+    }
+
+    // Pick first numeric column for bar chart, skipping bookkeeping columns
+    // like `order` or `rank` that index rows rather than measure them.
+    const SKIP_COLS = new Set(['order', 'rank', 'id']);
+    const barCol = columns.find(c => {
+      if (SKIP_COLS.has(c.toLowerCase())) return false;
+      const e = entries.find(x => x.values && x.values[c] != null);
+      return e && isNum(e.values[c]);
+    });
+
+    if (barCol) {
+      const bars = el('div', { class: 'bars' });
+      let max = 0;
+      for (const e of entries) {
+        const v = e.values[barCol];
+        if (isNum(v) && v > max) max = v;
+      }
+      entries.forEach((e, i) => {
+        const v = e.values[barCol];
+        const num = isNum(v) ? v : 0;
+        const pct = max > 0 ? Math.round((num / max) * 100) : 0;
+        const row = el('div', { class: 'bar-row' + (i >= TOP_N ? ' extra-row' : '') },
+          el('div', { class: 'bar-track' },
+            el('span', { class: 'bar', style: `width:${pct}%` }),
+            el('span', { class: 'bar-label', text: e.key })
+          ),
+          el('span', { class: 'bar-value', text: fmt(v) })
+        );
+        bars.append(row);
+      });
+      container.append(bars);
+    }
+
+    // Filter input for larger tables
+    if (entries.length >= 5) {
+      const toolbar = el('div', { class: 'flex justify-end mb-2' });
+      const input = el('input', { class: 'filter-input', type: 'text', placeholder: 'Filter rows…' });
+      toolbar.append(input);
+      container.append(toolbar);
+      input.addEventListener('input', () => {
+        const q = input.value.toLowerCase();
+        Array.from(tbody.children).forEach(tr => {
+          const match = !q || tr.textContent.toLowerCase().includes(q);
+          tr.style.display = match ? '' : 'none';
         });
-        // Show more / show less toggle
-        document.querySelectorAll('.show-more-btn').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const section = btn.closest('.section-body');
-                const extras = section.querySelectorAll('.extra-row');
-                const expanded = btn.dataset.expanded === 'true';
-                extras.forEach(r => r.classList.toggle('visible', !expanded));
-                btn.dataset.expanded = String(!expanded);
-                btn.textContent = expanded ? btn.dataset.showText : btn.dataset.hideText;
-            });
-        });
-    </script>
+      });
+    }
+
+    const table = el('table');
+    const thead = el('thead');
+    const headRow = el('tr', null, el('th', { text: 'Name' }));
+    columns.forEach((col, i) => {
+      headRow.append(el('th', { text: labels[i] || col }));
+    });
+    thead.append(headRow);
+    table.append(thead);
+
+    const tbody = el('tbody');
+    entries.forEach((e, i) => {
+      const tr = el('tr');
+      if (i >= TOP_N) tr.className = 'extra-row';
+      tr.append(el('td', { text: e.key }));
+      for (const col of columns) {
+        const v = e.values ? e.values[col] : undefined;
+        const td = el('td');
+        if (isNum(v)) td.className = 'num';
+        const txt = fmt(v);
+        const pcls = pillFor(txt);
+        if (pcls) td.append(el('span', { class: 'pill ' + pcls, text: txt }));
+        else td.textContent = txt;
+        tr.append(td);
+      }
+      tbody.append(tr);
+    });
+    table.append(tbody);
+    container.append(table);
+
+    if (entries.length > TOP_N) {
+      const remaining = entries.length - TOP_N;
+      const btn = el('button', {
+        class: 'show-more-btn',
+        'data-expanded': 'false',
+        text: `Show ${remaining} more entries`,
+      });
+      btn.addEventListener('click', ev => {
+        ev.stopPropagation();
+        const expanded = btn.dataset.expanded === 'true';
+        container.querySelectorAll('.extra-row').forEach(r => r.classList.toggle('visible', !expanded));
+        btn.dataset.expanded = String(!expanded);
+        btn.textContent = expanded ? `Show ${remaining} more entries` : `Show top ${TOP_N} only`;
+      });
+      container.append(btn);
+    }
+
+    return container;
+  }
+
+  // ------------------------------------------------------------------
+  // Per-report section
+  // ------------------------------------------------------------------
+  function renderSection(report, index) {
+    const iconName = ICON_MAP[report.name] || ICON_DEFAULT;
+    const totalRows = (report.entry_groups && report.entry_groups.length)
+      ? report.entry_groups.reduce((s, g) => s + (g[1] ? g[1].length : 0), 0)
+      : (report.entries ? report.entries.length : 0);
+
+    const section = el('section', {
+      class: 'report-section',
+      id: 'sec-' + index,
+      'data-report-name': report.name,
+    });
+
+    const header = el('header', { class: 'section-header' });
+    const h2 = el('h2', null,
+      (() => { const i = el('i'); i.setAttribute('data-lucide', iconName); i.className = 'w-4 h-4'; return i; })(),
+      document.createTextNode(report.display_name || report.name),
+      el('span', { class: 'entry-count', text: totalRows + ' entries' })
+    );
+    const chevWrap = el('span', { class: 'toggle-chevron', html: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>' });
+    header.append(h2, chevWrap);
+    section.append(header);
+
+    // Sections start collapsed — readers expand only the ones they care about,
+    // either by clicking the header or the sidebar link.
+    const body = el('div', { class: 'section-body collapsed' });
+    chevWrap.style.transform = 'rotate(-90deg)';
+    if (report.description) {
+      body.append(el('p', { class: 'section-desc', text: report.description }));
+    }
+
+    const columns = report.columns || [];
+    const labels = (report.column_labels && report.column_labels.length)
+      ? report.column_labels : columns;
+
+    if (report.entry_groups && report.entry_groups.length) {
+      report.entry_groups.forEach(([groupName, groupEntries]) => {
+        body.append(el('h3', { class: 'group-header' },
+          groupName,
+          el('span', { class: 'group-count', text: '(' + groupEntries.length + ' entries)' })
+        ));
+        body.append(renderEntries(groupEntries, columns, labels));
+      });
+    } else {
+      body.append(renderEntries(report.entries || [], columns, labels));
+    }
+
+    section.append(body);
+
+    // Collapse/expand on header click
+    header.addEventListener('click', () => {
+      body.classList.toggle('collapsed');
+      chevWrap.style.transform = body.classList.contains('collapsed') ? 'rotate(-90deg)' : 'rotate(0)';
+    });
+
+    return section;
+  }
+
+  // ------------------------------------------------------------------
+  // Sidebar + stat cards
+  // ------------------------------------------------------------------
+  const sectionsRoot = document.getElementById('sections');
+  const tocRoot = document.getElementById('toc');
+
+  DATA.forEach((r, i) => {
+    sectionsRoot.append(renderSection(r, i));
+    const totalRows = (r.entry_groups && r.entry_groups.length)
+      ? r.entry_groups.reduce((s, g) => s + (g[1] ? g[1].length : 0), 0)
+      : (r.entries ? r.entries.length : 0);
+    const iconName = ICON_MAP[r.name] || ICON_DEFAULT;
+    const a = el('a', { href: '#sec-' + i, class: 'nav-link' },
+      el('span', { class: 'flex items-center gap-2 min-w-0 truncate' },
+        (() => { const ic = el('i'); ic.setAttribute('data-lucide', iconName); ic.className = 'w-3.5 h-3.5 flex-shrink-0'; return ic; })(),
+        el('span', { class: 'truncate', text: r.display_name || r.name })
+      ),
+      el('span', { class: 'nav-badge', text: String(totalRows) })
+    );
+    // Sidebar click expands the target section so the user actually sees it.
+    a.addEventListener('click', () => {
+      const target = document.getElementById('sec-' + i);
+      if (!target) return;
+      const body = target.querySelector('.section-body');
+      const chev = target.querySelector('.toggle-chevron');
+      if (body && body.classList.contains('collapsed')) {
+        body.classList.remove('collapsed');
+        if (chev) chev.style.transform = 'rotate(0)';
+      }
+    });
+    tocRoot.append(a);
+  });
+
+  // Stat cards
+  const totalReports = DATA.length;
+  const totalRows = DATA.reduce((s, r) => {
+    if (r.entry_groups && r.entry_groups.length) {
+      return s + r.entry_groups.reduce((x, g) => x + (g[1] ? g[1].length : 0), 0);
+    }
+    return s + (r.entries ? r.entries.length : 0);
+  }, 0);
+  const totalGroups = DATA.reduce((s, r) => s + ((r.entry_groups && r.entry_groups.length) || 0), 0);
+  const riskCount = (() => {
+    let n = 0;
+    for (const r of DATA) {
+      const all = (r.entries || []).concat(...(r.entry_groups || []).map(g => g[1] || []));
+      for (const e of all) {
+        for (const v of Object.values(e.values || {})) {
+          if (typeof v === 'string' && BAD.test(v)) n++;
+        }
+      }
+    }
+    return n;
+  })();
+
+  const statCard = (icon, color, label, value) => {
+    const c = el('div', { class: 'stat-card' });
+    const header = el('div', { class: 'flex items-center gap-2' });
+    const ic = el('i'); ic.setAttribute('data-lucide', icon); ic.className = 'w-3.5 h-3.5 ' + color;
+    header.append(ic, el('span', { class: 'text-[10.5px] uppercase tracking-wider text-slate-500 dark:text-slate-400', text: label }));
+    c.append(header, el('div', { class: 'text-2xl font-semibold tabular-nums mt-0.5', text: String(value) }));
+    return c;
+  };
+  const stats = document.getElementById('stats');
+  stats.append(
+    statCard('layers', 'text-indigo-500', 'Reports', totalReports),
+    statCard('list', 'text-indigo-500', 'Rows', totalRows.toLocaleString()),
+    statCard('folder-tree', 'text-indigo-500', 'Groups', totalGroups),
+    statCard('triangle-alert', 'text-rose-500', 'Risk flags', riskCount),
+  );
+
+  // ------------------------------------------------------------------
+  // Expand all / collapse all
+  // ------------------------------------------------------------------
+  const setAll = (collapsed) => {
+    document.querySelectorAll('.section-body').forEach(body => {
+      body.classList.toggle('collapsed', collapsed);
+    });
+    document.querySelectorAll('.toggle-chevron').forEach(chev => {
+      chev.style.transform = collapsed ? 'rotate(-90deg)' : 'rotate(0)';
+    });
+  };
+  document.getElementById('expand-all').addEventListener('click', () => setAll(false));
+  document.getElementById('collapse-all').addEventListener('click', () => setAll(true));
+
+  // ------------------------------------------------------------------
+  // Scrollspy
+  // ------------------------------------------------------------------
+  const links = Array.from(tocRoot.querySelectorAll('a'));
+  const sections = Array.from(sectionsRoot.querySelectorAll('.report-section'));
+  const setActive = () => {
+    let current = null;
+    for (const sec of sections) {
+      if (sec.getBoundingClientRect().top < 140) current = sec.id;
+    }
+    links.forEach(a => a.classList.toggle('active', a.hash === '#' + current));
+  };
+  window.addEventListener('scroll', setActive, { passive: true });
+  setActive();
+
+  // Render all icons last (after DOM is built)
+  if (window.lucide) window.lucide.createIcons();
+})();
+</script>
 </body>
 </html>

@@ -1,3 +1,5 @@
+use std::io::{BufRead, Write};
+use std::process::Command;
 use std::sync::Arc;
 
 use indicatif::{HumanDuration, ProgressBar, ProgressStyle};
@@ -11,14 +13,23 @@ use crate::metrics::authors::AuthorsCollector;
 use crate::metrics::bloat::BloatCollector;
 use crate::metrics::branches::BranchesCollector;
 use crate::metrics::churn::ChurnCollector;
+use crate::metrics::churn_pareto::ChurnParetoCollector;
+use crate::metrics::complexity::ComplexityCollector;
+use crate::metrics::construct_churn::ConstructChurnCollector;
+use crate::metrics::construct_ownership::ConstructOwnershipCollector;
 use crate::metrics::coupling::CouplingCollector;
+use crate::metrics::fan_in_out::FanInOutCollector;
+use crate::metrics::half_life::HalfLifeCollector;
 use crate::metrics::hotspots::HotspotsCollector;
+use crate::metrics::knowledge_silos::KnowledgeSilosCollector;
+use crate::metrics::module_coupling::ModuleCouplingCollector;
 use crate::metrics::outliers::OutliersCollector;
 use crate::metrics::ownership::OwnershipCollector;
 use crate::metrics::patterns::PatternsCollector;
 use crate::metrics::quality::QualityCollector;
+use crate::metrics::succession::SuccessionCollector;
 use crate::parser::registry::LanguageRegistry;
-use crate::types::{DiffRecord, MetricResult, ParsedChange, ReportKind, TimeRange};
+use crate::types::{DiffRecord, MetricResult, ParsedChange, ReportKind, TimeRange, humanize};
 
 /// Known lock file names that should be excluded from analysis.
 const LOCK_FILE_NAMES: &[&str] = &[
@@ -79,11 +90,27 @@ impl Pipeline {
                 .ok(); // Ignore error if pool already initialized
         }
 
-        // 2. Walk all commits
-        let walker = GitWalker::new(
-            self.config.repo_path.clone(),
-            self.config.time_range.clone(),
-        );
+        // Shallow repos break every history-based metric. Prompt to unshallow when interactive;
+        // otherwise abort with a clear error.
+        if gix::open(&self.config.repo_path)?.is_shallow() {
+            if self.config.quiet {
+                anyhow::bail!(
+                    "repository at {} is a shallow clone; all metrics depend on full history. \
+                     Run `git fetch --unshallow` (or re-clone without --depth) and retry.",
+                    self.config.repo_path
+                );
+            }
+            if !prompt_unshallow(&self.config.repo_path)? {
+                anyhow::bail!("aborted: shallow repository, user declined to unshallow");
+            }
+            run_unshallow(&self.config.repo_path)?;
+        }
+
+        // 2. Count commits up front with a cheap walk (just traverses oids).
+        //    We do NOT buffer CommitInfo in memory — the second pass below
+        //    streams them through a bounded channel so peak RAM stays flat
+        //    regardless of history length.
+        let interner = Arc::new(crate::interner::Interner::new());
 
         let spinner = if self.config.quiet {
             ProgressBar::hidden()
@@ -94,23 +121,30 @@ impl Pipeline {
                     .template("{spinner:.green} {msg}")
                     .unwrap(),
             );
-            sp.set_message("Walking commits...");
+            sp.set_message("Counting commits...");
             sp
         };
 
-        let mut commits = Vec::new();
-        walker.walk(|ci| {
-            commits.push(ci);
+        let count_walker = GitWalker::new(
+            self.config.repo_path.clone(),
+            self.config.time_range.clone(),
+            interner.clone(),
+        );
+        let mut total: usize = 0;
+        count_walker.walk(|_| {
+            total += 1;
             spinner.tick();
             Ok(())
         })?;
         spinner.finish_and_clear();
 
-        let total = commits.len();
         if total == 0 {
             // No commits to analyze; return empty results from collectors
             let mut collectors = self.create_collectors();
-            return Ok(collectors.iter_mut().map(|c| c.finalize()).collect());
+            let mut empty_results: Vec<MetricResult> =
+                collectors.iter_mut().map(|c| c.finalize()).collect();
+            fill_column_labels(&mut empty_results);
+            return Ok(empty_results);
         }
 
         // 3. Set up progress bar (shared across threads — indicatif uses Arc internally)
@@ -121,7 +155,7 @@ impl Pipeline {
             bar.set_style(
                 ProgressStyle::default_bar()
                     .template(
-                        "{pos}/{len} commits [{bar:40.cyan/blue}] {elapsed_precise} ETA {eta} {msg}",
+                        "{pos}/{len} ({percent:>3}%) commits [{bar:40.cyan/blue}] {elapsed_precise} ETA {eta} {msg}",
                     )
                     .unwrap()
                     .progress_chars("=> "),
@@ -134,71 +168,131 @@ impl Pipeline {
 
         // 5. Open gix repo once (thread-safe handle, cheap to clone into workers)
         let thread_safe_repo = Arc::new(gix::ThreadSafeRepository::open(&self.config.repo_path)?);
-        let diff_extractor = Arc::new(DiffExtractor::new(thread_safe_repo.clone()));
+        let diff_extractor = Arc::new(DiffExtractor::new(
+            thread_safe_repo.clone(),
+            interner.clone(),
+        ));
 
-        // 6. Spawn a collector thread that drains ParsedChanges from a channel.
-        //    Parallel workers produce; this thread consumes — collectors stay single-owner.
-        let (tx, rx) = crossbeam_channel::bounded::<Vec<ParsedChange>>(256);
+        // 6. Open the disk-backed change store and spawn a writer thread that
+        //    drains ParsedChange batches from the channel into SQLite. All
+        //    process-based collectors read from the DB at finalize time.
+        let store = Arc::new(crate::store::ChangeStore::open_temp()?);
+        // Small channel + small per-batch cap so a single giant merge commit
+        // cannot queue hundreds of MB of parsed constructs in flight.
+        let (changes_tx, changes_rx) = crossbeam_channel::bounded::<Vec<ParsedChange>>(4);
+        const MAX_CHANGES_PER_BATCH: usize = 64;
 
-        let collector_handle = std::thread::spawn(move || {
-            for batch in rx {
-                for change in &batch {
-                    for c in collectors.iter_mut() {
-                        c.process(change);
-                    }
-                }
+        let writer_store = store.clone();
+        let writer_handle = std::thread::spawn(move || -> anyhow::Result<()> {
+            for batch in changes_rx {
+                writer_store.insert_batch(&batch)?;
             }
-            collectors
+            Ok(())
         });
 
-        // 7. Process commits in parallel
+        // 7. Stream commits: a producer thread walks the history and pushes
+        //    each CommitInfo into a bounded channel. rayon workers pull from
+        //    the channel via `par_bridge` and do the expensive extract + parse
+        //    work in parallel. Because nothing is collected into a Vec, peak
+        //    RAM stays constant regardless of history length.
         let quiet = self.config.quiet;
         let registry = &self.registry;
 
-        commits.par_iter().for_each_with(tx.clone(), |tx, commit| {
-            let diff_records = match diff_extractor.extract(commit) {
-                Ok(records) => records,
-                Err(e) => {
-                    if !quiet {
-                        pb.println(format!(
-                            "Warning: skipping commit {}: {}",
-                            &commit.oid[..8.min(commit.oid.len())],
-                            e
-                        ));
-                    }
-                    pb.inc(1);
-                    return;
-                }
-            };
-
-            let thread_repo = thread_safe_repo.to_thread_local();
-
-            let mut changes = Vec::with_capacity(diff_records.len());
-            for record in diff_records {
-                if is_lock_file(&record.file_path) {
-                    continue;
-                }
-                changes.push(parse_diff_record(registry, &thread_repo, &record));
-            }
-
-            if !changes.is_empty() {
-                let _ = tx.send(changes);
-            }
-            pb.inc(1);
+        let (commit_tx, commit_rx) = crossbeam_channel::bounded::<Arc<crate::types::CommitInfo>>(4);
+        let producer_interner = interner.clone();
+        let producer_repo_path = self.config.repo_path.clone();
+        let producer_time_range = self.config.time_range.clone();
+        let producer_handle = std::thread::spawn(move || -> anyhow::Result<()> {
+            let walker = GitWalker::new(producer_repo_path, producer_time_range, producer_interner);
+            walker.walk(|ci| {
+                // Send blocks when the channel is full — that's the backpressure
+                // that keeps commits from piling up in memory.
+                let _ = commit_tx.send(Arc::new(ci));
+                Ok(())
+            })?;
+            drop(commit_tx);
+            Ok(())
         });
 
+        commit_rx
+            .into_iter()
+            .par_bridge()
+            .for_each_with(changes_tx.clone(), |tx, commit| {
+                let diff_records = match diff_extractor.extract(&commit) {
+                    Ok(records) => records,
+                    Err(e) => {
+                        if !quiet {
+                            pb.println(format!(
+                                "Warning: skipping commit {}: {}",
+                                &commit.oid[..8.min(commit.oid.len())],
+                                e
+                            ));
+                        }
+                        pb.inc(1);
+                        return;
+                    }
+                };
+
+                // Cap the per-thread object cache to a small constant. gix's
+                // default keeps decompressed blobs in memory — fine for a
+                // short-lived CLI call on a small repo, but on a 32k-commit
+                // monorepo the cumulative working set balloons into GBs.
+                let mut thread_repo = thread_safe_repo.to_thread_local();
+                thread_repo.object_cache_size_if_unset(4 * 1024 * 1024);
+
+                // Split the commit's diff records into capped batches so a
+                // single big merge commit doesn't queue hundreds of MBs of
+                // parsed constructs in the channel all at once.
+                let mut changes: Vec<ParsedChange> = Vec::with_capacity(MAX_CHANGES_PER_BATCH);
+                for record in diff_records {
+                    if is_lock_file(&record.file_path) {
+                        continue;
+                    }
+                    changes.push(parse_diff_record(registry, &thread_repo, record));
+                    if changes.len() >= MAX_CHANGES_PER_BATCH {
+                        let _ = tx.send(std::mem::take(&mut changes));
+                        changes = Vec::with_capacity(MAX_CHANGES_PER_BATCH);
+                    }
+                }
+                if !changes.is_empty() {
+                    let _ = tx.send(changes);
+                }
+                pb.inc(1);
+            });
+
         // Close the channel by dropping the original sender (workers dropped their clones).
-        drop(tx);
+        drop(changes_tx);
 
-        let mut collectors = collector_handle
+        producer_handle
             .join()
-            .map_err(|_| anyhow::anyhow!("collector thread panicked"))?;
+            .map_err(|_| anyhow::anyhow!("commit producer thread panicked"))??;
 
-        // 8. Repo-level inspection (branches, bloat) — runs after commit walk.
+        writer_handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("store writer thread panicked"))??;
+
+        // All changes are now in the DB. Build indexes for the query phase.
+        if !self.config.quiet {
+            pb.println("Indexing change store...");
+        }
+        store.finalize_indexes()?;
+
+        // 8. Repo-level inspection (branches, bloat, complexity, …) — runs after commit walk.
+        // Progress is printed per collector so users can see which phase is active when
+        // memory or time balloons (these phases can be much heavier than commit walking).
+        let progress_bar_for_reporter = if self.config.quiet {
+            None
+        } else {
+            Some(pb.as_ref().clone())
+        };
+        let reporter = crate::metrics::ProgressReporter::new(progress_bar_for_reporter);
         {
             let repo = thread_safe_repo.to_thread_local();
             for collector in collectors.iter_mut() {
-                if let Err(e) = collector.inspect_repo(&repo)
+                if !self.config.quiet {
+                    pb.println(format!("Inspecting repo: {}...", collector.name()));
+                }
+                if let Err(e) = collector.inspect_repo(&repo, &reporter)
                     && !self.config.quiet
                 {
                     pb.println(format!(
@@ -216,8 +310,22 @@ impl Pipeline {
             HumanDuration(start.elapsed())
         ));
 
-        // 9. Finalize all collectors
-        let results = collectors.iter_mut().map(|c| c.finalize()).collect();
+        // 9. Finalize all collectors. Collectors that aggregate per-change data
+        //    override `finalize_from_db` and query the change store; the rest
+        //    still compute in-memory in `finalize()`. A line is printed before
+        //    each collector runs so it's obvious which phase is executing
+        //    when a long-running or memory-hungry query is in flight.
+        let mut results: Vec<MetricResult> = collectors
+            .iter_mut()
+            .map(|c| {
+                if !self.config.quiet {
+                    pb.println(format!("Computing {}...", c.name()));
+                }
+                c.finalize_from_db(&store, &reporter)
+                    .unwrap_or_else(|| c.finalize())
+            })
+            .collect();
+        fill_column_labels(&mut results);
 
         Ok(results)
     }
@@ -239,6 +347,15 @@ impl Pipeline {
                 ReportKind::Bloat => Box::new(BloatCollector::new()),
                 ReportKind::Outliers => Box::new(OutliersCollector::new()),
                 ReportKind::Quality => Box::new(QualityCollector::new()),
+                ReportKind::Complexity => Box::new(ComplexityCollector::new()),
+                ReportKind::ConstructChurn => Box::new(ConstructChurnCollector::new()),
+                ReportKind::HalfLife => Box::new(HalfLifeCollector::new()),
+                ReportKind::Succession => Box::new(SuccessionCollector::new()),
+                ReportKind::KnowledgeSilos => Box::new(KnowledgeSilosCollector::new()),
+                ReportKind::FanInOut => Box::new(FanInOutCollector::new()),
+                ReportKind::ModuleCoupling => Box::new(ModuleCouplingCollector::new()),
+                ReportKind::ChurnPareto => Box::new(ChurnParetoCollector::new()),
+                ReportKind::ConstructOwnership => Box::new(ConstructOwnershipCollector::new()),
             };
             collectors.push(collector);
         }
@@ -247,33 +364,52 @@ impl Pipeline {
     }
 }
 
+/// Skip parsing source blobs above this size — usually minified bundles or
+/// generated code where construct extraction is meaningless and parse trees
+/// dominate peak memory.
+const MAX_PARSE_BLOB_BYTES: u64 = 512 * 1024;
+
 /// Convert a DiffRecord into a ParsedChange, optionally enriched with tree-sitter constructs.
 /// Free function so it can be called from rayon worker threads without borrowing Pipeline.
+///
+/// Takes the `record` by value and wraps it in `Arc` rather than cloning it,
+/// so per-file `ParsedChange`s in a single commit share one allocation.
 fn parse_diff_record(
     registry: &LanguageRegistry,
     repo: &gix::Repository,
-    record: &DiffRecord,
+    record: DiffRecord,
 ) -> ParsedChange {
-    let constructs = get_file_content_at_commit(repo, &record.commit.oid, &record.file_path)
-        .ok()
-        .and_then(|content| {
-            let line_ranges: Vec<(u32, u32)> = record
-                .hunks
-                .iter()
-                .map(|h| (h.new_start, h.new_start + h.new_lines.saturating_sub(1)))
-                .filter(|(s, e)| *s > 0 && *e >= *s)
-                .collect();
+    // Short-circuit: if no parser is registered for this file extension, skip
+    // loading the blob entirely. This avoids reading binaries (.png, .pdf,
+    // generated bundles, etc.) into memory only to discard them.
+    let constructs = if registry.get_for_file(&record.file_path).is_some()
+        && blob_size_at_commit(repo, &record.commit.oid, &record.file_path)
+            .map(|sz| sz <= MAX_PARSE_BLOB_BYTES)
+            .unwrap_or(true)
+    {
+        get_file_content_at_commit(repo, &record.commit.oid, &record.file_path)
+            .ok()
+            .and_then(|content| {
+                let line_ranges: Vec<(u32, u32)> = record
+                    .hunks
+                    .iter()
+                    .map(|h| (h.new_start, h.new_start + h.new_lines.saturating_sub(1)))
+                    .filter(|(s, e)| *s > 0 && *e >= *s)
+                    .collect();
 
-            if line_ranges.is_empty() {
-                return None;
-            }
+                if line_ranges.is_empty() {
+                    return None;
+                }
 
-            registry.parse_constructs_in_ranges(&record.file_path, &content, &line_ranges)
-        })
-        .unwrap_or_default();
+                registry.parse_constructs_in_ranges(&record.file_path, &content, &line_ranges)
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     ParsedChange {
-        diff: record.clone(),
+        diff: Arc::new(record),
         constructs,
     }
 }
@@ -292,6 +428,66 @@ fn get_file_content_at_commit(
         .ok_or_else(|| anyhow::anyhow!("path not found in tree: {}", file_path))?;
     let object = entry.object()?;
     Ok(String::from_utf8_lossy(&object.data).to_string())
+}
+
+/// Auto-populate `column_labels` for any result that left it empty.
+/// Each label is derived from the corresponding snake_case `columns` entry via
+/// [`humanize`], so writers can show readable headers without each collector
+/// having to spell them out.
+fn fill_column_labels(results: &mut [MetricResult]) {
+    for r in results.iter_mut() {
+        if r.column_labels.is_empty() {
+            r.column_labels = r.columns.iter().map(|c| humanize(c)).collect();
+        }
+    }
+}
+
+/// Look up a blob's size in the tree at `oid` without loading its contents.
+/// Returns `None` if the path or commit can't be resolved (callers default to "parse it").
+fn blob_size_at_commit(repo: &gix::Repository, oid: &str, file_path: &str) -> Option<u64> {
+    use gix::prelude::HeaderExt;
+    let object_id = gix::ObjectId::from_hex(oid.as_bytes()).ok()?;
+    let commit = repo.find_object(object_id).ok()?.try_into_commit().ok()?;
+    let tree = commit.tree().ok()?;
+    let entry = tree.lookup_entry_by_path(file_path).ok()??;
+    let header = repo.objects.header(entry.oid()).ok()?;
+    Some(header.size())
+}
+
+/// Prompt the user (stderr) to confirm unshallowing the repo. Returns true on `y`/`yes`.
+fn prompt_unshallow(repo_path: &str) -> anyhow::Result<bool> {
+    let mut stderr = std::io::stderr();
+    write!(
+        stderr,
+        "warning: {} is a shallow clone — every metric needs full history.\nFetch full history now (`git fetch --unshallow`)? [y/N] ",
+        repo_path
+    )?;
+    stderr.flush()?;
+
+    let mut input = String::new();
+    let stdin = std::io::stdin();
+    stdin.lock().read_line(&mut input)?;
+    let answer = input.trim().to_lowercase();
+    Ok(answer == "y" || answer == "yes")
+}
+
+/// Run `git fetch --unshallow` in the repo. Surfaces git's stderr on failure.
+fn run_unshallow(repo_path: &str) -> anyhow::Result<()> {
+    eprintln!("Running `git fetch --unshallow` in {}...", repo_path);
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["fetch", "--unshallow"])
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to invoke git: {e}"))?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "git fetch --unshallow failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]

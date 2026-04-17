@@ -3,21 +3,23 @@ use std::sync::Arc;
 use gix::bstr::ByteSlice;
 use gix::object::tree::diff::Change;
 
+use crate::interner::Interner;
 use crate::types::{CommitInfo, DiffRecord, FileStatus, Hunk};
 
 /// Extracts file-level diff information from git commits using `gix` (native, no subprocess).
 pub struct DiffExtractor {
     repo: Arc<gix::ThreadSafeRepository>,
+    interner: Arc<Interner>,
 }
 
 impl DiffExtractor {
-    pub fn new(repo: Arc<gix::ThreadSafeRepository>) -> Self {
-        Self { repo }
+    pub fn new(repo: Arc<gix::ThreadSafeRepository>, interner: Arc<Interner>) -> Self {
+        Self { repo, interner }
     }
 
     /// Extract diff records for a single commit by comparing its tree to its parent's tree.
     /// For initial commits (no parent), compares against the empty tree.
-    pub fn extract(&self, commit: &CommitInfo) -> anyhow::Result<Vec<DiffRecord>> {
+    pub fn extract(&self, commit: &Arc<CommitInfo>) -> anyhow::Result<Vec<DiffRecord>> {
         let repo = self.repo.to_thread_local();
 
         let new_commit_id = gix::ObjectId::from_hex(commit.oid.as_bytes())?;
@@ -121,8 +123,12 @@ impl DiffExtractor {
                 }]
             };
 
+            // Intern paths so repeated file paths across commits share one allocation.
+            let file_path: Arc<str> = self.interner.intern(&file_path);
+            let old_path: Option<Arc<str>> = old_path.map(|p| self.interner.intern(&p));
+
             records.push(DiffRecord {
-                commit: commit.clone(),
+                commit: Arc::clone(commit),
                 file_path,
                 old_path,
                 status,
@@ -194,12 +200,16 @@ mod tests {
     }
 
     /// Collect commits from a repo using GitWalker.
-    fn collect_commits(repo_path: &str) -> Vec<CommitInfo> {
-        let walker = GitWalker::new(repo_path.to_string(), TimeRange::All);
+    fn collect_commits(repo_path: &str) -> Vec<Arc<CommitInfo>> {
+        let walker = GitWalker::new(
+            repo_path.to_string(),
+            TimeRange::All,
+            Arc::new(crate::interner::Interner::new()),
+        );
         let mut commits = Vec::new();
         walker
             .walk(|ci| {
-                commits.push(ci);
+                commits.push(Arc::new(ci));
                 Ok(())
             })
             .expect("walk failed");
@@ -208,7 +218,7 @@ mod tests {
 
     fn make_extractor(repo_path: &str) -> DiffExtractor {
         let repo = Arc::new(gix::ThreadSafeRepository::open(repo_path).expect("open repo"));
-        DiffExtractor::new(repo)
+        DiffExtractor::new(repo, Arc::new(crate::interner::Interner::new()))
     }
 
     #[test]
@@ -226,7 +236,7 @@ mod tests {
             .extract(&commits[0])
             .expect("extract failed for second commit");
         assert_eq!(diffs.len(), 1, "second commit should touch 1 file");
-        assert_eq!(diffs[0].file_path, "file.txt");
+        assert_eq!(&*diffs[0].file_path, "file.txt");
         assert_eq!(diffs[0].status, FileStatus::Modified);
 
         // First commit (index 1) added file.txt
@@ -234,7 +244,7 @@ mod tests {
             .extract(&commits[1])
             .expect("extract failed for initial commit");
         assert_eq!(diffs.len(), 1, "initial commit should touch 1 file");
-        assert_eq!(diffs[0].file_path, "file.txt");
+        assert_eq!(&*diffs[0].file_path, "file.txt");
         assert_eq!(diffs[0].status, FileStatus::Added);
     }
 

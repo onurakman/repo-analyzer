@@ -18,11 +18,21 @@ Git Walker -> Diff Extractor -> Tree-sitter Parser -> Metric Collectors -> Repor
 
 The pipeline is orchestrated by `src/pipeline/engine.rs`. Rayon is used for thread pool configuration. Collectors are fed sequentially per commit but the design supports future parallelization.
 
+## Mandatory Verification
+
+After **every** code change — no exceptions — run:
+
+```bash
+cargo clippy --all-targets -- -D warnings
+```
+
+Do not consider any task complete until clippy passes with zero warnings. This applies to one-line edits, refactors, new features, test additions, and shallow "comment-only" changes alike. If clippy fails, fix the lints before reporting the work as done or moving on to the next task.
+
 ## Code Style
 
 - **Edition:** Rust 2024 (`edition = "2024"` in Cargo.toml).
 - **Formatting:** Always run `cargo fmt` before committing.
-- **Linting:** `cargo clippy -- -D warnings` must pass with zero warnings.
+- **Linting:** `cargo clippy --all-targets -- -D warnings` must pass with zero warnings (see Mandatory Verification above).
 - **No `unwrap()` in non-test code.** Use `?` with `anyhow::Result` or return `Option`.
 - **Error handling:**
   - `thiserror` for domain-specific error types inside modules.
