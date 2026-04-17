@@ -59,7 +59,7 @@ impl MetricCollector for BloatCollector {
 
     fn finalize(&mut self) -> MetricResult {
         // Sort by size descending, take top 30
-        self.files.sort_by(|a, b| b.1.cmp(&a.1));
+        self.files.sort_by_key(|f| std::cmp::Reverse(f.1));
 
         let mut entries: Vec<MetricEntry> = Vec::new();
 
