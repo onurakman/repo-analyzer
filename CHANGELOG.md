@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.3](https://github.com/onurakman/repo-analyzer/compare/repo-analyzer-v0.1.2...repo-analyzer-v0.1.3) (2026-04-17)
+
+
+### Features
+
+* Add new metrics collectors (Outliers, Branches, Quality, Bloat) and enhance MetricCollector API ([ffc0817](https://github.com/onurakman/repo-analyzer/commit/ffc081773ee89254ad019a79b826fcccda520bc7))
+* Introduce Knowledge Silos Collector and database-backed metrics ([8863594](https://github.com/onurakman/repo-analyzer/commit/8863594d3ca56575942135a7aa1d884598da0147))
+
 ## [0.1.2](https://github.com/onurakman/repo-analyzer/compare/repo-analyzer-v0.1.1...repo-analyzer-v0.1.2) (2026-04-16)
 
 
