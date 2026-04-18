@@ -73,9 +73,11 @@ impl TerminalWriter {
 
         println!("{table}");
 
-        if entries.len() > top_n {
-            let remaining = entries.len() - top_n;
-            println!("  ... and {remaining} more");
+        // Surface the real total so `--top 20` doesn't look like there are
+        // only 20 entries. Only fires when truncation actually hid rows.
+        let total = entries.len();
+        if total > top_n {
+            println!("  ({top_n} of {total} shown; re-run without `--top` to see all)");
         }
     }
 }

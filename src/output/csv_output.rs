@@ -58,6 +58,7 @@ impl CsvWriter {
     fn write_result_to_writer<W: io::Write>(
         result: &MetricResult,
         writer: W,
+        top: Option<usize>,
     ) -> anyhow::Result<()> {
         let columns = Self::get_columns(result);
         let mut csv_writer = csv::Writer::from_writer(writer);
@@ -68,7 +69,14 @@ impl CsvWriter {
             header.extend(columns.iter().cloned());
             csv_writer.write_record(&header)?;
 
-            Self::write_entries(&result.entries, &columns, &mut csv_writer)?;
+            // `--top` clips the list in place. CSV has no metadata channel
+            // for "total" — consumers read the row count directly — so the
+            // truncation is silent here.
+            let slice: &[MetricEntry] = match top {
+                Some(n) if n < result.entries.len() => &result.entries[..n],
+                _ => &result.entries[..],
+            };
+            Self::write_entries(slice, &columns, &mut csv_writer)?;
         } else {
             // Header: "group" + "name" + column names
             let mut header = vec!["group".to_string(), "name".to_string()];
@@ -112,24 +120,25 @@ impl CsvWriter {
 
 impl ReportWriter for CsvWriter {
     fn write(&self, results: &[MetricResult], config: &OutputConfig) -> anyhow::Result<()> {
+        let top = config.top;
         match (&config.output_path, results.len()) {
             // Single report to file
             (Some(path), 1) => {
                 let file = File::create(path)?;
-                Self::write_result_to_writer(&results[0], file)?;
+                Self::write_result_to_writer(&results[0], file, top)?;
             }
             // Multiple reports to separate files
             (Some(path), _) => {
                 for result in results {
                     let file_path = Self::multi_report_path(path, &result.name);
                     let file = File::create(&file_path)?;
-                    Self::write_result_to_writer(result, file)?;
+                    Self::write_result_to_writer(result, file, top)?;
                 }
             }
             // Single report to stdout
             (None, 1) => {
                 let stdout = io::stdout();
-                Self::write_result_to_writer(&results[0], stdout.lock())?;
+                Self::write_result_to_writer(&results[0], stdout.lock(), top)?;
             }
             // Multiple reports to stdout with separators
             (None, _) => {
@@ -137,7 +146,7 @@ impl ReportWriter for CsvWriter {
                     let name = result.name.to_lowercase().replace(' ', "_");
                     println!("--- {name} ---");
                     let stdout = io::stdout();
-                    Self::write_result_to_writer(result, stdout.lock())?;
+                    Self::write_result_to_writer(result, stdout.lock(), top)?;
                     println!();
                 }
             }

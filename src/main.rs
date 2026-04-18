@@ -55,16 +55,12 @@ fn main() -> anyhow::Result<()> {
     };
 
     let pipeline = pipeline::engine::Pipeline::new(pipeline_config, registry);
-    let mut results = pipeline.run()?;
+    let results = pipeline.run()?;
 
-    // Apply --top: truncate every report's entries to the requested count.
-    // entry_groups (e.g. patterns hourly/daily buckets) are left intact since
-    // they represent fixed dimensions, not a ranked list.
-    if let Some(n) = cli.top {
-        for r in results.iter_mut() {
-            r.entries.truncate(n);
-        }
-    }
+    // NOTE: `--top` is applied inside each writer now, not here.
+    // Writers see the full entry list so they can surface the real total
+    // (e.g. "showing top 20 of 240") even when --top is active. If we
+    // truncated up front that total would be lost forever.
 
     let output_config = OutputConfig {
         format: cli.format.clone(),

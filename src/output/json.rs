@@ -39,7 +39,11 @@ impl JsonWriter {
             .collect()
     }
 
-    fn result_to_json(result: &MetricResult) -> Value {
+    /// Serialize one report, applying `--top` to the flat entries list and
+    /// attaching `total_entries` / `shown_entries` so DB-sink consumers can
+    /// show "N of TOTAL" without a second round trip. `entry_groups` are
+    /// fixed-dimension buckets (e.g. hourly/daily) and not truncated.
+    fn result_to_json(result: &MetricResult, top: Option<usize>) -> Value {
         let mut obj = Map::new();
         obj.insert("name".to_string(), json!(result.name));
         obj.insert("display_name".to_string(), json!(result.display_name));
@@ -48,11 +52,18 @@ impl JsonWriter {
         obj.insert("column_labels".to_string(), json!(result.column_labels));
 
         if result.entry_groups.is_empty() {
-            obj.insert(
-                "entries".to_string(),
-                json!(Self::entries_to_json(&result.entries)),
-            );
+            let total = result.entries.len();
+            let slice: &[MetricEntry] = match top {
+                Some(n) if n < total => &result.entries[..n],
+                _ => &result.entries[..],
+            };
+            obj.insert("total_entries".to_string(), json!(total));
+            obj.insert("shown_entries".to_string(), json!(slice.len()));
+            obj.insert("entries".to_string(), json!(Self::entries_to_json(slice)));
         } else {
+            let total: usize = result.entry_groups.iter().map(|(_, e)| e.len()).sum();
+            obj.insert("total_entries".to_string(), json!(total));
+            obj.insert("shown_entries".to_string(), json!(total));
             for (group_name, group_entries) in &result.entry_groups {
                 let key = format!("entries_{group_name}");
                 obj.insert(key, json!(Self::entries_to_json(group_entries)));
@@ -70,7 +81,7 @@ impl ReportWriter for JsonWriter {
         let mut reports = Map::new();
         for result in results {
             let key = result.name.to_lowercase().replace(' ', "_");
-            reports.insert(key, Self::result_to_json(result));
+            reports.insert(key, Self::result_to_json(result, config.top));
         }
 
         let output = json!({
