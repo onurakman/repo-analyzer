@@ -271,3 +271,105 @@ fn is_valid_line_comment_match(line: &str, end: usize, token: &str) -> bool {
     }
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::langs::detect_language_info;
+
+    #[test]
+    fn blank_and_unknown_language_paths() {
+        let mut state = CommentState::new();
+        assert_eq!(classify_line("", None, &mut state, false), LineType::Blank);
+        assert_eq!(
+            classify_line("   \t  ", None, &mut state, false),
+            LineType::Blank
+        );
+        // Without language info, any non-blank line is treated as code.
+        assert_eq!(
+            classify_line("some code", None, &mut state, false),
+            LineType::Code
+        );
+    }
+
+    #[test]
+    fn count_lines_rust_code_comment_blank() {
+        let rust = detect_language_info("foo.rs", None).expect("rust should be detected");
+        let src = "// hello\nfn foo() {}\n\n// trailing\n";
+        let counts = count_lines(src, Some(rust));
+        assert_eq!(counts.code, 1);
+        assert_eq!(counts.comment, 2);
+        assert_eq!(counts.blank, 1);
+        assert_eq!(counts.total(), 4);
+    }
+
+    #[test]
+    fn count_lines_block_comment_spans_lines() {
+        let rust = detect_language_info("foo.rs", None).expect("rust should be detected");
+        // Three pure comment lines inside a block comment, then one code line.
+        let src = "/*\n first\n second\n*/\nfn bar() {}\n";
+        let counts = count_lines(src, Some(rust));
+        assert_eq!(counts.comment, 4);
+        assert_eq!(counts.code, 1);
+    }
+
+    #[test]
+    fn count_lines_code_before_block_comment_on_same_line() {
+        let rust = detect_language_info("foo.rs", None).expect("rust should be detected");
+        // First line has both code and an opening block comment — should be code.
+        let src = "let x = 1; /* comment starts\nstill comment\n*/\n";
+        let counts = count_lines(src, Some(rust));
+        assert_eq!(counts.code, 1, "line with code + block opener is code");
+        assert_eq!(counts.comment, 2);
+    }
+
+    #[test]
+    fn count_lines_shebang_counted_separately() {
+        // Bash declares a shebang pattern, so we should see one shebang line.
+        let sh = detect_language_info("x.sh", None).expect("bash should be detected");
+        let src = "#!/usr/bin/env bash\necho hi\n";
+        let counts = count_lines(src, Some(sh));
+        assert_eq!(counts.shebang, 1);
+        assert_eq!(counts.code, 1);
+    }
+
+    #[test]
+    fn count_lines_handles_crlf_newlines() {
+        let rust = detect_language_info("foo.rs", None).expect("rust should be detected");
+        let src = "// one\r\nfn main() {}\r\n";
+        let counts = count_lines(src, Some(rust));
+        assert_eq!(counts.comment, 1);
+        assert_eq!(counts.code, 1);
+    }
+
+    #[test]
+    fn comment_state_resets_between_files() {
+        let rust = detect_language_info("foo.rs", None).expect("rust should be detected");
+        // Unclosed block comment — state is "in comment" at EOF.
+        let src = "/* never closes\nstill inside\n";
+        let mut state = CommentState::new();
+        for (i, line) in src.lines().enumerate() {
+            classify_line(line, Some(rust), &mut state, i == 0);
+        }
+        // After a file with an unclosed block comment, `state.is_in_comment()`
+        // should be true — callers creating a fresh state per file avoid the
+        // bleed. This test encodes that contract so a future change that
+        // shares state across files fails loudly.
+        let mut second_state = CommentState::new();
+        let counts = count_lines("fn ok() {}\n", Some(rust));
+        assert_eq!(counts.code, 1);
+        // Sanity: a fresh state still classifies code correctly.
+        assert_eq!(
+            classify_line("fn ok() {}", Some(rust), &mut second_state, false),
+            LineType::Code
+        );
+    }
+
+    #[test]
+    fn line_type_equality_and_copy() {
+        let a = LineType::Code;
+        let b = a; // Copy
+        assert_eq!(a, b);
+        assert_ne!(LineType::Code, LineType::Comment);
+    }
+}

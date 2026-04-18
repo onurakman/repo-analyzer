@@ -123,3 +123,83 @@ pub fn detect_language_info(filename: &str, content: Option<&str>) -> Option<&'s
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_extension_returns_language() {
+        let rust = detect_language_info("src/main.rs", None).expect("rust should be detected");
+        assert_eq!(rust.name, "Rust");
+    }
+
+    #[test]
+    fn literal_filename_match() {
+        // Makefile is matched by literal name, not extension.
+        let mk = detect_language_info("Makefile", None).expect("Makefile should be detected");
+        assert_eq!(mk.name, "Makefile");
+    }
+
+    #[test]
+    fn case_insensitive_extension() {
+        let rust = detect_language_info("LIB.RS", None).expect("case-insensitive glob");
+        assert_eq!(rust.name, "Rust");
+    }
+
+    #[test]
+    fn ambiguous_m_file_picks_objc_over_matlab() {
+        let content = "@interface Foo : NSObject\n@end\n";
+        let lang = detect_language_info("example.m", Some(content)).expect("keywords win");
+        assert_eq!(lang.name, "Objective-C");
+    }
+
+    #[test]
+    fn ambiguous_m_file_without_signal_returns_none() {
+        // No keywords or comments hint at either candidate.
+        let lang = detect_language_info("example.m", Some("just plain words"));
+        assert!(
+            lang.is_none(),
+            "should refuse to guess when nothing disambiguates"
+        );
+    }
+
+    #[test]
+    fn shebang_drives_detection_for_unknown_extension() {
+        let lang = detect_language_info("script", Some("#!/usr/bin/env python\nprint(1)\n"))
+            .expect("shebang fallback");
+        assert_eq!(lang.name, "Python");
+    }
+
+    #[test]
+    fn shebang_with_space_after_bang_normalized() {
+        let lang = detect_language_info("script", Some("#! /usr/bin/env bash\necho hi\n"))
+            .expect("normalized shebang");
+        assert_eq!(lang.name, "Bash");
+    }
+
+    #[test]
+    fn unknown_extension_without_shebang_returns_none() {
+        assert!(detect_language_info("random.xyz", Some("plain text")).is_none());
+        assert!(detect_language_info("random.xyz", None).is_none());
+    }
+
+    #[test]
+    fn no_content_still_resolves_single_candidate() {
+        // Clear-cut extension — no content needed.
+        let go = detect_language_info("main.go", None).expect("go detected by glob alone");
+        assert_eq!(go.name, "Go");
+    }
+
+    #[test]
+    fn tokenize_splits_on_non_alnum_underscore() {
+        let tokens: Vec<&str> = tokenize("hello_world foo-bar __init__").collect();
+        assert_eq!(tokens, vec!["hello_world", "foo", "bar", "__init__"]);
+    }
+
+    #[test]
+    fn tokenize_empty_input() {
+        let tokens: Vec<&str> = tokenize("").collect();
+        assert!(tokens.is_empty());
+    }
+}

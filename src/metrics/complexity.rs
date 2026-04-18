@@ -465,9 +465,13 @@ fn visit(
     let kind = node.kind();
     if spec.function_kinds.contains(&kind) {
         let name = function_name(node, source).unwrap_or_else(|| "<anonymous>".into());
-        let cyclomatic = 1 + count_decisions(node, spec.decision_kinds, spec.function_kinds);
-        let start = node.start_position().row as u32 + 1;
-        let end = node.end_position().row as u32 + 1;
+        // In Dart the signature node is a *sibling* of the body (both children
+        // of `declaration` / `class_member`). Walk up so both the span and the
+        // decision scan cover the body.
+        let scope = scope_for_decisions_and_span(node, spec, kind);
+        let cyclomatic = 1 + count_decisions(&scope, spec.decision_kinds, spec.function_kinds);
+        let start = scope.start_position().row as u32 + 1;
+        let end = scope.end_position().row as u32 + 1;
         out.push(FunctionMetric {
             file: file_path.to_string(),
             name,
@@ -482,6 +486,18 @@ fn visit(
     for child in node.children(&mut cursor) {
         visit(&child, spec, file_path, source, line_types, out);
     }
+}
+
+fn scope_for_decisions_and_span<'a>(node: &Node<'a>, spec: &LangSpec, kind: &str) -> Node<'a> {
+    if spec.name == "Dart"
+        && matches!(
+            kind,
+            "function_signature" | "method_signature" | "getter_signature" | "setter_signature"
+        )
+    {
+        return node.parent().unwrap_or(*node);
+    }
+    *node
 }
 
 /// Count decision-point nodes inside `node`, skipping subtrees rooted at nested
@@ -614,5 +630,69 @@ mod tests {
     fn unsupported_source_yields_no_metrics() {
         // Garbage source for an unsupported file path: spec_for_path returns None
         assert!(spec_for_path("foo.cobol").is_none());
+    }
+
+    #[test]
+    fn javascript_if_and_ternary() {
+        let src = "function f(x) { return x > 0 ? (x > 10 ? 'big' : 'small') : 'neg'; }";
+        let m = analyze(&JAVASCRIPT, src);
+        let cc = m.iter().find(|x| x.name == "f").unwrap().cyclomatic;
+        // 1 base + 2 ternary
+        assert!(cc >= 3, "expected >= 3, got {cc}");
+    }
+
+    #[test]
+    fn javascript_spec_resolves_for_mjs_and_cjs() {
+        assert_eq!(spec_for_path("a.js").unwrap().name, "JavaScript");
+        assert_eq!(spec_for_path("a.jsx").unwrap().name, "JavaScript");
+        assert_eq!(spec_for_path("a.mjs").unwrap().name, "JavaScript");
+        assert_eq!(spec_for_path("a.cjs").unwrap().name, "JavaScript");
+        // .ts / .tsx should still go to TypeScript, not JavaScript.
+        assert_eq!(spec_for_path("a.ts").unwrap().name, "TypeScript");
+        assert_eq!(spec_for_path("a.tsx").unwrap().name, "TypeScript");
+    }
+
+    #[test]
+    fn kotlin_when_branches_count() {
+        let src = "fun f(x: Int): Int {\n    return when (x) {\n        0 -> 1\n        1 -> 2\n        else -> 3\n    }\n}\n";
+        let m = analyze(&KOTLIN, src);
+        let cc = m.iter().find(|x| x.name == "f").unwrap().cyclomatic;
+        // 1 base + 3 when_entry = 4
+        assert!(cc >= 3, "expected >= 3, got {cc}");
+    }
+
+    #[test]
+    fn kotlin_spec_resolves_for_kt_and_kts() {
+        assert_eq!(spec_for_path("a.kt").unwrap().name, "Kotlin");
+        assert_eq!(spec_for_path("build.gradle.kts").unwrap().name, "Kotlin");
+    }
+
+    #[test]
+    fn dart_if_and_for() {
+        let src =
+            "int f(List<int> xs) { var n = 0; for (var x in xs) { if (x > 0) n++; } return n; }\n";
+        let m = analyze(&DART, src);
+        let cc = m.iter().find(|x| x.name == "f").unwrap().cyclomatic;
+        // 1 base + for + if = 3
+        assert!(cc >= 3, "expected >= 3, got {cc}");
+    }
+
+    #[test]
+    fn dart_spec_resolves() {
+        assert_eq!(spec_for_path("lib/main.dart").unwrap().name, "Dart");
+    }
+
+    #[test]
+    fn lines_counts_code_only_excluding_comments_and_blanks() {
+        // Function with 1 code line, 2 comment lines, 1 blank.
+        let src = "fn f() {\n    // comment one\n    // comment two\n\n    let _ = 1;\n}\n";
+        let m = analyze(&RUST, src);
+        let metric = m.iter().find(|x| x.name == "f").unwrap();
+        // Body code lines: `fn f() {`, `let _ = 1;`, `}` => 3 code lines.
+        assert_eq!(
+            metric.line_count, 3,
+            "expected code-only SLOC of 3, got {}",
+            metric.line_count
+        );
     }
 }

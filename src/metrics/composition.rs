@@ -235,3 +235,82 @@ fn is_probably_binary(data: &[u8]) -> bool {
     let sample = &data[..data.len().min(8192)];
     sample.contains(&0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::langs::detect_language_info;
+
+    #[test]
+    fn binary_heuristic_flags_nul_byte() {
+        assert!(is_probably_binary(b"\x7fELF\x02\x01\x01\x00"));
+        assert!(is_probably_binary(b"hello\0world"));
+    }
+
+    #[test]
+    fn binary_heuristic_accepts_plain_text() {
+        assert!(!is_probably_binary(b"fn main() { println!(\"hi\"); }\n"));
+        assert!(!is_probably_binary(b""));
+    }
+
+    #[test]
+    fn record_aggregates_per_language_buckets() {
+        let rust = detect_language_info("a.rs", None).expect("rust");
+        let toml = detect_language_info("Cargo.toml", None).expect("toml");
+        let mut coll = CompositionCollector::new();
+        coll.record(rust, 100, "fn a() {}\n");
+        coll.record(rust, 50, "fn b() {}\n// doc\n\n");
+        coll.record(toml, 200, "[package]\nname = \"x\"\n");
+
+        let rust_bucket = coll.buckets.get("Rust").expect("rust bucket");
+        assert_eq!(rust_bucket.files, 2);
+        assert_eq!(rust_bucket.code, 2);
+        assert_eq!(rust_bucket.bytes, 150);
+
+        let toml_bucket = coll.buckets.get("TOML").expect("toml bucket");
+        assert_eq!(toml_bucket.files, 1);
+        assert_eq!(toml_bucket.code, 2);
+    }
+
+    #[test]
+    fn finalize_sorts_languages_by_code_desc_and_reports_percentages() {
+        let rust = detect_language_info("a.rs", None).expect("rust");
+        let toml = detect_language_info("Cargo.toml", None).expect("toml");
+        let mut coll = CompositionCollector::new();
+        // 10 code lines of Rust, 2 of TOML — Rust should lead.
+        coll.record(rust, 1, "fn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\nfn e() {}\nfn f() {}\nfn g() {}\nfn h() {}\nfn i() {}\nfn j() {}\n");
+        coll.record(toml, 1, "a = 1\nb = 2\n");
+
+        let result = coll.finalize();
+        assert_eq!(result.name, "composition");
+        // First entry is the language with the most code.
+        assert_eq!(result.entries[0].key, "Rust");
+        assert_eq!(result.entries[1].key, "TOML");
+
+        // Percentages should sum to ~100 across languages (ignoring rounding).
+        let sum_pct: f64 = result
+            .entries
+            .iter()
+            .filter_map(|e| match e.values.get("code_pct") {
+                Some(crate::types::MetricValue::Float(f)) => Some(*f),
+                _ => None,
+            })
+            .sum();
+        assert!(
+            (sum_pct - 100.0).abs() < 0.001,
+            "code_pct should sum to 100, got {sum_pct}"
+        );
+    }
+
+    #[test]
+    fn unknown_and_binary_buckets_surface_in_finalize() {
+        let mut coll = CompositionCollector::new();
+        coll.unknown_files = 3;
+        coll.unknown_bytes = 500;
+        coll.binary_files = 2;
+        let result = coll.finalize();
+        let keys: Vec<&str> = result.entries.iter().map(|e| e.key.as_str()).collect();
+        assert!(keys.contains(&"(unknown)"));
+        assert!(keys.contains(&"(binary/skipped)"));
+    }
+}
