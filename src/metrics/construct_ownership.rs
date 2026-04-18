@@ -177,7 +177,7 @@ fn compute_bus_factor(authors: &HashMap<String, u64>, total: u64) -> u64 {
         return 0;
     }
     let mut contributions: Vec<u64> = authors.values().copied().collect();
-    contributions.sort_by(|a, b| b.cmp(a));
+    contributions.sort_by_key(|c| std::cmp::Reverse(*c));
     let half = total / 2;
     let mut acc = 0u64;
     let mut count = 0u64;

@@ -82,7 +82,7 @@ impl MetricCollector for CompositionCollector {
 
     fn finalize(&mut self) -> MetricResult {
         let mut buckets: Vec<LangBucket> = self.buckets.drain().map(|(_, v)| v).collect();
-        buckets.sort_by(|a, b| b.code.cmp(&a.code));
+        buckets.sort_by_key(|b| std::cmp::Reverse(b.code));
 
         let total_code: u64 = buckets.iter().map(|b| b.code).sum();
 
