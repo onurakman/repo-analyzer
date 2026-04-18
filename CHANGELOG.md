@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7](https://github.com/onurakman/repo-analyzer/compare/v0.1.6...v0.1.7) (2026-04-18)
+
+
+### Features
+
+* Add `--unshallow` CLI flag to automate shallow repository handling ([a7fbdf4](https://github.com/onurakman/repo-analyzer/commit/a7fbdf475c0a728bca275b63ea23c498c93342aa))
+
 ## [0.1.6](https://github.com/onurakman/repo-analyzer/compare/v0.1.5...v0.1.6) (2026-04-18)
 
 
