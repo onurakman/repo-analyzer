@@ -78,35 +78,56 @@ ASSET="${BIN_NAME}-${os}-${arch}"
 debug "os=$os arch=$arch asset=$ASSET"
 
 # --- resolve version -----------------------------------------------------
-normalize_version() {
-  # Accept both v0.1.3 and 0.1.3; emit v0.1.3.
-  case "$1" in
-    v*) printf '%s' "$1";;
-    *)  printf 'v%s' "$1";;
-  esac
+# Candidate tag formats to try, in order:
+#   1. v0.1.5              (new release-please format, include-component-in-tag=false)
+#   2. repo-analyzer-v0.1.5 (old component-prefixed format, legacy releases)
+# Accepts user input in any of: 0.1.5, v0.1.5, repo-analyzer-v0.1.5, repo-analyzer-0.1.5.
+tag_candidates() {
+  v="$1"
+  # Strip the "repo-analyzer-" prefix if present, then the leading "v",
+  # leaving a bare "0.1.5" that we can re-assemble into both formats.
+  bare="${v#${BIN_NAME}-}"
+  bare="${bare#v}"
+  printf 'v%s\n%s-v%s\n' "$bare" "$BIN_NAME" "$bare"
 }
 
 if [ -z "$VERSION" ]; then
   log "resolving latest release..."
   # Follow redirect on /releases/latest to get the final tag without hitting
-  # the rate-limited API. `curl -sI` returns the Location header.
+  # the rate-limited API. GitHub redirects to the actual release, so whatever
+  # tag format the repo currently uses comes back here.
   latest_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
     "https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest")
   VERSION="${latest_url##*/}"
   [ -n "$VERSION" ] || fail "could not resolve latest release"
 fi
-VERSION=$(normalize_version "$VERSION")
-debug "version=$VERSION"
+debug "requested version=$VERSION"
 
 # --- download ------------------------------------------------------------
-URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${VERSION}/${ASSET}"
 TMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t repo-analyzer-install)
 trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
 TMP_BIN="${TMP_DIR}/${BIN_NAME}"
 
-log "downloading $URL"
-if ! curl -fsSL -o "$TMP_BIN" "$URL"; then
-  fail "download failed (check that $VERSION has an asset named $ASSET at https://github.com/${REPO_OWNER}/${REPO_NAME}/releases)"
+downloaded=0
+tried=""
+# If the user passed an explicit tag (including the repo-analyzer- prefix),
+# try it verbatim first so a hand-picked exact tag always wins. Then fall
+# through to the two canonical candidate formats.
+for tag in "$VERSION" $(tag_candidates "$VERSION"); do
+  url="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${tag}/${ASSET}"
+  tried="${tried}\n  $url"
+  debug "trying $url"
+  if curl -fsSL -o "$TMP_BIN" "$url" 2>/dev/null; then
+    log "downloaded $url"
+    VERSION="$tag"
+    downloaded=1
+    break
+  fi
+done
+
+if [ "$downloaded" -ne 1 ]; then
+  printf 'tried:%b\n' "$tried" >&2
+  fail "download failed — no release asset named $ASSET for $VERSION (check https://github.com/${REPO_OWNER}/${REPO_NAME}/releases)"
 fi
 [ -s "$TMP_BIN" ] || fail "downloaded file is empty"
 chmod +x "$TMP_BIN"
