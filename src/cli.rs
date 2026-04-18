@@ -45,6 +45,23 @@ pub struct Cli {
     /// Number of threads for parallel processing (0 = auto)
     #[arg(long, default_value_t = 0)]
     pub threads: usize,
+
+    /// In-flight channel capacity between commit producer, parse workers, and
+    /// the SQLite writer. Lower it (1–2) to shrink peak RAM on small pods;
+    /// raise it (8–32) on fast disks to reduce stalls. Default 4.
+    #[arg(long, default_value_t = 4)]
+    pub channel_capacity: usize,
+
+    /// Max parsed changes per batch flushed into the channel. Smaller batches
+    /// cut in-flight memory for huge merge commits; larger batches amortize
+    /// transaction overhead on the SQLite writer. Default 64.
+    #[arg(long, default_value_t = 64)]
+    pub batch_size: usize,
+
+    /// Per-thread `gix` object cache size in MiB. The cache speeds up blob
+    /// reuse but grows with repo activity; drop to 1 on tight pods. Default 4.
+    #[arg(long, default_value_t = 4)]
+    pub object_cache_mb: usize,
 }
 
 impl Cli {
@@ -184,6 +201,9 @@ mod tests {
             output: None,
             quiet: false,
             threads: 0,
+            channel_capacity: 4,
+            batch_size: 64,
+            object_cache_mb: 4,
         };
         let kinds = cli.parse_report_kinds().unwrap();
         assert_eq!(kinds, vec![ReportKind::Hotspots]);
@@ -202,6 +222,9 @@ mod tests {
             output: None,
             quiet: false,
             threads: 0,
+            channel_capacity: 4,
+            batch_size: 64,
+            object_cache_mb: 4,
         };
         let kinds = cli.parse_report_kinds().unwrap();
         assert_eq!(

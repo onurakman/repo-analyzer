@@ -65,6 +65,28 @@ pub struct PipelineConfig {
     pub report_kinds: Vec<ReportKind>,
     pub quiet: bool,
     pub threads: Option<usize>,
+    /// Capacity of the commit and changes channels. Controls peak in-flight
+    /// memory: fewer slots = tighter backpressure.
+    pub channel_capacity: usize,
+    /// Max parsed changes per batch sent to the writer thread.
+    pub batch_size: usize,
+    /// Per-thread `gix` object cache size, in MiB.
+    pub object_cache_mb: usize,
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            repo_path: ".".to_string(),
+            time_range: TimeRange::All,
+            report_kinds: ReportKind::default_set(),
+            quiet: false,
+            threads: None,
+            channel_capacity: 4,
+            batch_size: 64,
+            object_cache_mb: 4,
+        }
+    }
 }
 
 /// Orchestrates the full analysis pipeline:
@@ -182,9 +204,13 @@ impl Pipeline {
         //    process-based collectors read from the DB at finalize time.
         let store = Arc::new(crate::store::ChangeStore::open_temp()?);
         // Small channel + small per-batch cap so a single giant merge commit
-        // cannot queue hundreds of MB of parsed constructs in flight.
-        let (changes_tx, changes_rx) = crossbeam_channel::bounded::<Vec<ParsedChange>>(4);
-        const MAX_CHANGES_PER_BATCH: usize = 64;
+        // cannot queue hundreds of MB of parsed constructs in flight. The
+        // sizes are tunable via the `--channel-capacity` and `--batch-size`
+        // CLI flags for operators on tight pods.
+        let channel_capacity = self.config.channel_capacity.max(1);
+        let max_changes_per_batch = self.config.batch_size.max(1);
+        let (changes_tx, changes_rx) =
+            crossbeam_channel::bounded::<Vec<ParsedChange>>(channel_capacity);
 
         let writer_store = store.clone();
         let writer_handle = std::thread::spawn(move || -> anyhow::Result<()> {
@@ -202,7 +228,8 @@ impl Pipeline {
         let quiet = self.config.quiet;
         let registry = &self.registry;
 
-        let (commit_tx, commit_rx) = crossbeam_channel::bounded::<Arc<crate::types::CommitInfo>>(4);
+        let (commit_tx, commit_rx) =
+            crossbeam_channel::bounded::<Arc<crate::types::CommitInfo>>(channel_capacity);
         let producer_interner = interner.clone();
         let producer_repo_path = self.config.repo_path.clone();
         let producer_time_range = self.config.time_range.clone();
@@ -217,6 +244,8 @@ impl Pipeline {
             drop(commit_tx);
             Ok(())
         });
+
+        let object_cache_bytes = self.config.object_cache_mb.max(1) * 1024 * 1024;
 
         commit_rx
             .into_iter()
@@ -237,25 +266,26 @@ impl Pipeline {
                     }
                 };
 
-                // Cap the per-thread object cache to a small constant. gix's
-                // default keeps decompressed blobs in memory — fine for a
-                // short-lived CLI call on a small repo, but on a 32k-commit
-                // monorepo the cumulative working set balloons into GBs.
+                // Cap the per-thread object cache. gix's default keeps
+                // decompressed blobs in memory — fine for a short-lived CLI
+                // call on a small repo, but on a 32k-commit monorepo the
+                // cumulative working set balloons into GBs. Tunable via
+                // `--object-cache-mb`.
                 let mut thread_repo = thread_safe_repo.to_thread_local();
-                thread_repo.object_cache_size_if_unset(4 * 1024 * 1024);
+                thread_repo.object_cache_size_if_unset(object_cache_bytes);
 
                 // Split the commit's diff records into capped batches so a
                 // single big merge commit doesn't queue hundreds of MBs of
                 // parsed constructs in the channel all at once.
-                let mut changes: Vec<ParsedChange> = Vec::with_capacity(MAX_CHANGES_PER_BATCH);
+                let mut changes: Vec<ParsedChange> = Vec::with_capacity(max_changes_per_batch);
                 for record in diff_records {
                     if is_lock_file(&record.file_path) {
                         continue;
                     }
                     changes.push(parse_diff_record(registry, &thread_repo, record));
-                    if changes.len() >= MAX_CHANGES_PER_BATCH {
+                    if changes.len() >= max_changes_per_batch {
                         let _ = tx.send(std::mem::take(&mut changes));
-                        changes = Vec::with_capacity(MAX_CHANGES_PER_BATCH);
+                        changes = Vec::with_capacity(max_changes_per_batch);
                     }
                 }
                 if !changes.is_empty() {
@@ -606,6 +636,7 @@ mod tests {
             report_kinds: vec![ReportKind::Authors, ReportKind::Churn],
             quiet: true,
             threads: None,
+            ..Default::default()
         };
 
         let registry = LanguageRegistry::build_default();
@@ -677,6 +708,7 @@ mod tests {
             report_kinds: vec![ReportKind::Authors],
             quiet: true,
             threads: None,
+            ..Default::default()
         };
 
         let registry = LanguageRegistry::build_default();

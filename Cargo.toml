@@ -61,6 +61,11 @@ aho-corasick = "1.1"
 globset = "0.4"
 memchr = "2.8"
 
+# Sharded concurrent map — used by the string interner so all rayon workers
+# can intern file paths and author emails without fighting over a single
+# global Mutex.
+dashmap = "6"
+
 [build-dependencies]
 indexmap = { version = "2", features = ["serde"] }
 json5 = "1"

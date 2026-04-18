@@ -1,14 +1,17 @@
-use std::fs;
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
 
 use crate::output::ReportWriter;
 use crate::types::{MetricResult, OutputConfig};
 
 const TEMPLATE: &str = include_str!("../../templates/report.html");
+const GENERATED_AT_MARKER: &str = "{{GENERATED_AT}}";
+const REPORT_DATA_MARKER: &str = "{{REPORT_DATA_JSON}}";
 
 pub struct HtmlWriter;
 
 /// Escape special HTML characters so they don't break out of attributes or
-/// inline text. The JSON payload goes through `encode_json_for_script` below
+/// inline text. The JSON payload goes through [`ScriptEscapeWriter`] below
 /// rather than this function.
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -18,30 +21,151 @@ fn escape_html(s: &str) -> String {
         .replace('\'', "&#x27;")
 }
 
-/// Produce a JSON string that is safe to embed inside a
-/// `<script type="application/json">…</script>` element. We just have to stop
-/// any literal `</script>` sequence in the data from prematurely closing the
-/// tag; the rest of JSON escaping is handled by `serde_json`.
-fn encode_json_for_script(s: &str) -> String {
-    s.replace("</", "<\\/")
+/// A `Write` wrapper that rewrites any `</` byte sequence to `<\/` on the fly.
+/// Lets us stream serde_json directly into the HTML template without buffering
+/// the full JSON payload, while still preventing a literal `</script>` in the
+/// data from closing the surrounding `<script type="application/json">` block.
+///
+/// Byte-oriented so it works correctly even if `<` lands on a buffer boundary.
+struct ScriptEscapeWriter<W: Write> {
+    inner: W,
+    pending_lt: bool,
+}
+
+impl<W: Write> ScriptEscapeWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            pending_lt: false,
+        }
+    }
+
+    fn finish(mut self) -> io::Result<W> {
+        if self.pending_lt {
+            self.inner.write_all(b"<")?;
+            self.pending_lt = false;
+        }
+        Ok(self.inner)
+    }
+}
+
+impl<W: Write> Write for ScriptEscapeWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut i = 0;
+        while i < buf.len() {
+            if self.pending_lt {
+                if buf[i] == b'/' {
+                    self.inner.write_all(b"<\\/")?;
+                    i += 1;
+                } else {
+                    self.inner.write_all(b"<")?;
+                }
+                self.pending_lt = false;
+                continue;
+            }
+            let rest = &buf[i..];
+            match memchr::memchr(b'<', rest) {
+                Some(pos) => {
+                    if pos > 0 {
+                        self.inner.write_all(&rest[..pos])?;
+                    }
+                    i += pos + 1;
+                    if i == buf.len() {
+                        self.pending_lt = true;
+                    } else if buf[i] == b'/' {
+                        self.inner.write_all(b"<\\/")?;
+                        i += 1;
+                    } else {
+                        self.inner.write_all(b"<")?;
+                    }
+                }
+                None => {
+                    self.inner.write_all(rest)?;
+                    i = buf.len();
+                }
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// One segment of the pre-split template: either a literal chunk of HTML or
+/// a placeholder marker that the streamer substitutes at write time.
+enum Segment {
+    Literal(&'static str),
+    GeneratedAt,
+    ReportData,
+}
+
+/// Split the template once at program start into a flat list of literal
+/// chunks and markers. The template has `{{GENERATED_AT}}` appearing twice
+/// and `{{REPORT_DATA_JSON}}` once, in arbitrary order — so we scan linearly
+/// and replace each occurrence in place. Returns an Arc-less static-lived
+/// vector because `TEMPLATE` is `'static`.
+fn split_template() -> Vec<Segment> {
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut rest = TEMPLATE;
+    while !rest.is_empty() {
+        let gen_idx = rest.find(GENERATED_AT_MARKER);
+        let data_idx = rest.find(REPORT_DATA_MARKER);
+        let next = match (gen_idx, data_idx) {
+            (Some(g), Some(d)) if g < d => Some((g, GENERATED_AT_MARKER, Segment::GeneratedAt)),
+            (Some(_), Some(d)) => Some((d, REPORT_DATA_MARKER, Segment::ReportData)),
+            (Some(g), None) => Some((g, GENERATED_AT_MARKER, Segment::GeneratedAt)),
+            (None, Some(d)) => Some((d, REPORT_DATA_MARKER, Segment::ReportData)),
+            (None, None) => None,
+        };
+        match next {
+            Some((idx, marker, seg)) => {
+                if idx > 0 {
+                    segments.push(Segment::Literal(&rest[..idx]));
+                }
+                segments.push(seg);
+                rest = &rest[idx + marker.len()..];
+            }
+            None => {
+                segments.push(Segment::Literal(rest));
+                break;
+            }
+        }
+    }
+    segments
+}
+
+fn stream_html<W: Write>(writer: &mut W, results: &[MetricResult]) -> anyhow::Result<()> {
+    let segments = split_template();
+    let now_escaped = escape_html(&chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
+
+    for seg in segments {
+        match seg {
+            Segment::Literal(s) => writer.write_all(s.as_bytes())?,
+            Segment::GeneratedAt => writer.write_all(now_escaped.as_bytes())?,
+            Segment::ReportData => {
+                let mut script_writer = ScriptEscapeWriter::new(&mut *writer);
+                serde_json::to_writer(&mut script_writer, results)?;
+                script_writer.finish()?;
+            }
+        }
+    }
+    Ok(())
 }
 
 impl ReportWriter for HtmlWriter {
     fn write(&self, results: &[MetricResult], config: &OutputConfig) -> anyhow::Result<()> {
-        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        let raw_json = serde_json::to_string(results)?;
-        let safe_json = encode_json_for_script(&raw_json);
-
-        let html = TEMPLATE
-            .replace("{{GENERATED_AT}}", &escape_html(&now))
-            .replace("{{REPORT_DATA_JSON}}", &safe_json);
-
         if let Some(path) = &config.output_path {
-            fs::write(path, &html)?;
+            let mut writer = BufWriter::new(File::create(path)?);
+            stream_html(&mut writer, results)?;
+            writer.flush()?;
         } else {
-            println!("{html}");
+            let stdout = std::io::stdout();
+            let mut writer = BufWriter::new(stdout.lock());
+            stream_html(&mut writer, results)?;
+            writer.flush()?;
         }
-
         Ok(())
     }
 }
@@ -112,11 +236,41 @@ mod tests {
     }
 
     #[test]
-    fn json_script_close_tags_are_escaped() {
+    fn script_escape_writer_rewrites_close_tags() {
         // Guard against a commit message or file path breaking out of the
         // embedded <script type="application/json"> block.
-        let out = encode_json_for_script("{\"x\":\"foo</script>bar\"}");
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut w = ScriptEscapeWriter::new(&mut buf);
+            w.write_all(b"{\"x\":\"foo</script>bar\"}").unwrap();
+            w.finish().unwrap();
+        }
+        let out = String::from_utf8(buf).unwrap();
         assert!(!out.contains("</script"));
         assert!(out.contains("<\\/script"));
+    }
+
+    #[test]
+    fn script_escape_writer_handles_boundary_split() {
+        // `<` at end of one write, `/` at start of next — must still rewrite.
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut w = ScriptEscapeWriter::new(&mut buf);
+            w.write_all(b"foo<").unwrap();
+            w.write_all(b"/bar").unwrap();
+            w.finish().unwrap();
+        }
+        assert_eq!(String::from_utf8(buf).unwrap(), "foo<\\/bar");
+    }
+
+    #[test]
+    fn script_escape_writer_preserves_lone_lt() {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut w = ScriptEscapeWriter::new(&mut buf);
+            w.write_all(b"a < b").unwrap();
+            w.finish().unwrap();
+        }
+        assert_eq!(String::from_utf8(buf).unwrap(), "a < b");
     }
 }

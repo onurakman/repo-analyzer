@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 
 use serde_json::{Map, Value, json};
 
@@ -77,12 +78,20 @@ impl ReportWriter for JsonWriter {
             "reports": reports
         });
 
-        let pretty = serde_json::to_string_pretty(&output)?;
-
+        // Stream serialization straight into the sink (file or stdout) so we
+        // never materialise the full JSON document in memory — critical on
+        // memory-constrained pods where reports can be tens of MB. Compact
+        // output: downstream consumers pretty-print if they want to.
         if let Some(path) = &config.output_path {
-            fs::write(path, &pretty)?;
+            let mut writer = BufWriter::new(File::create(path)?);
+            serde_json::to_writer(&mut writer, &output)?;
+            writer.flush()?;
         } else {
-            println!("{pretty}");
+            let stdout = std::io::stdout();
+            let mut writer = BufWriter::new(stdout.lock());
+            serde_json::to_writer(&mut writer, &output)?;
+            writeln!(writer)?;
+            writer.flush()?;
         }
 
         Ok(())

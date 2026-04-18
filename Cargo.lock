@@ -2075,6 +2075,7 @@ dependencies = [
  "comfy-table",
  "crossbeam-channel",
  "csv",
+ "dashmap",
  "gix",
  "globset",
  "indexmap",

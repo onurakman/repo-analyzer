@@ -22,6 +22,13 @@ impl OutliersCollector {
 const HIGH_CHURN_THRESHOLD: u64 = 100;
 const HIGH_AUTHORS_THRESHOLD: usize = 5;
 
+/// Safety cap on how many candidate rows we pull out of SQL before the
+/// Rust-side source-file filter. The SQL already rejects files that don't
+/// meet at least one threshold, so in practice this cap is never hit on
+/// normal repos — it just prevents a pathological case from unbounded
+/// materialization.
+const MAX_CANDIDATES: i64 = 5_000;
+
 impl MetricCollector for OutliersCollector {
     fn name(&self) -> &str {
         "outliers"
@@ -36,24 +43,39 @@ impl MetricCollector for OutliersCollector {
         store: &ChangeStore,
         _progress: &crate::metrics::ProgressReporter,
     ) -> Option<MetricResult> {
+        // Push both threshold filters into SQL — any file that fails both is
+        // dead weight we don't want to drag into Rust. Status-deleted files
+        // are already excluded via the HAVING clause. ORDER BY + LIMIT caps
+        // the pull in case a pathological repo has millions of candidate
+        // files; the normal path never hits the limit.
         let rows = store
             .with_conn(|conn| -> anyhow::Result<Vec<(String, u64, u64, u64)>> {
                 let mut stmt = conn.prepare(
                     "SELECT file_path,
-                            COUNT(*)                                            AS change_count,
-                            COUNT(DISTINCT email)                               AS unique_authors,
-                            SUM(additions + deletions)                          AS total_churn
+                            COUNT(*)                        AS change_count,
+                            COUNT(DISTINCT email)           AS unique_authors,
+                            SUM(additions + deletions)     AS total_churn
                        FROM changes
                       GROUP BY file_path
-                     HAVING MAX(CASE WHEN status = 2 THEN 1 ELSE 0 END) = 0",
+                     HAVING MAX(CASE WHEN status = 2 THEN 1 ELSE 0 END) = 0
+                        AND (COUNT(*) >= ?1 OR COUNT(DISTINCT email) >= ?2)
+                      ORDER BY change_count DESC
+                      LIMIT ?3",
                 )?;
-                let iter = stmt.query_map([], |row| {
-                    let file: String = row.get(0)?;
-                    let cc: i64 = row.get(1)?;
-                    let ua: i64 = row.get(2)?;
-                    let tc: i64 = row.get(3)?;
-                    Ok((file, cc as u64, ua as u64, tc as u64))
-                })?;
+                let iter = stmt.query_map(
+                    rusqlite::params![
+                        HIGH_CHURN_THRESHOLD as i64,
+                        HIGH_AUTHORS_THRESHOLD as i64,
+                        MAX_CANDIDATES,
+                    ],
+                    |row| {
+                        let file: String = row.get(0)?;
+                        let cc: i64 = row.get(1)?;
+                        let ua: i64 = row.get(2)?;
+                        let tc: i64 = row.get(3)?;
+                        Ok((file, cc as u64, ua as u64, tc as u64))
+                    },
+                )?;
                 let mut out = Vec::new();
                 for r in iter {
                     out.push(r?);
@@ -63,12 +85,11 @@ impl MetricCollector for OutliersCollector {
             .ok()?
             .ok()?;
 
+        // SQL already enforced the threshold; only the Rust-only
+        // `is_source_file` check remains here.
         let mut entries: Vec<MetricEntry> = rows
             .into_iter()
             .filter(|(file, _, _, _)| is_source_file(file))
-            .filter(|(_, cc, ua, _)| {
-                *cc >= HIGH_CHURN_THRESHOLD || (*ua as usize) >= HIGH_AUTHORS_THRESHOLD
-            })
             .map(|(file, cc, ua, tc)| {
                 let rec = build_recommendation(cc, ua as usize);
                 let mut values = HashMap::new();

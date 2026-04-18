@@ -37,12 +37,21 @@ fn main() -> anyhow::Result<()> {
         Some(cli.threads)
     };
 
+    // Guard the memory-tuning knobs against zero values — the pipeline needs
+    // at least one slot in each channel and at least one change per batch.
+    let channel_capacity = cli.channel_capacity.max(1);
+    let batch_size = cli.batch_size.max(1);
+    let object_cache_mb = cli.object_cache_mb.max(1);
+
     let pipeline_config = pipeline::engine::PipelineConfig {
         repo_path: cli.path.clone(),
         time_range,
         report_kinds,
         quiet: cli.quiet,
         threads,
+        channel_capacity,
+        batch_size,
+        object_cache_mb,
     };
 
     let pipeline = pipeline::engine::Pipeline::new(pipeline_config, registry);

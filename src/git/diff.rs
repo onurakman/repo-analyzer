@@ -119,7 +119,6 @@ impl DiffExtractor {
                     old_lines: deletions,
                     new_start: 1,
                     new_lines: additions,
-                    content: String::new(),
                 }]
             };
 

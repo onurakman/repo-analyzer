@@ -38,7 +38,6 @@ pub struct Hunk {
     pub old_lines: u32,
     pub new_start: u32,
     pub new_lines: u32,
-    pub content: String,
 }
 
 /// One file's diff within a commit.
