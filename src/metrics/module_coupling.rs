@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::analysis::source_filter::is_source_file;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
 use crate::types::{MetricEntry, MetricResult, MetricValue};
@@ -54,6 +55,9 @@ impl MetricCollector for ModuleCouplingCollector {
                 let mut commits: HashMap<String, HashSet<String>> = HashMap::new();
                 for r in rows {
                     let (oid, file) = r?;
+                    if !is_source_file(&file) {
+                        continue;
+                    }
                     let module = module_of(&file, MODULE_DEPTH);
                     commits.entry(oid).or_default().insert(module);
                 }

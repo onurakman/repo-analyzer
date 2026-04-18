@@ -18,10 +18,12 @@ use crate::metrics::composition::CompositionCollector;
 use crate::metrics::construct_churn::ConstructChurnCollector;
 use crate::metrics::construct_ownership::ConstructOwnershipCollector;
 use crate::metrics::coupling::CouplingCollector;
+use crate::metrics::debt_markers::DebtMarkersCollector;
 use crate::metrics::fan_in_out::FanInOutCollector;
 use crate::metrics::half_life::HalfLifeCollector;
 use crate::metrics::hotspots::HotspotsCollector;
 use crate::metrics::knowledge_silos::KnowledgeSilosCollector;
+use crate::metrics::large_sources::LargeSourcesCollector;
 use crate::metrics::module_coupling::ModuleCouplingCollector;
 use crate::metrics::outliers::OutliersCollector;
 use crate::metrics::ownership::OwnershipCollector;
@@ -393,6 +395,8 @@ impl Pipeline {
                 ReportKind::Complexity => Box::new(ComplexityCollector::new()),
                 ReportKind::Composition => Box::new(CompositionCollector::new()),
                 ReportKind::ConstructChurn => Box::new(ConstructChurnCollector::new()),
+                ReportKind::DebtMarkers => Box::new(DebtMarkersCollector::new()),
+                ReportKind::LargeSources => Box::new(LargeSourcesCollector::new()),
                 ReportKind::HalfLife => Box::new(HalfLifeCollector::new()),
                 ReportKind::Succession => Box::new(SuccessionCollector::new()),
                 ReportKind::KnowledgeSilos => Box::new(KnowledgeSilosCollector::new()),

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::analysis::source_filter::is_source_file;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
 use crate::types::{MetricEntry, MetricResult, MetricValue};
@@ -39,6 +40,8 @@ impl MetricCollector for ChurnCollector {
     ) -> Option<MetricResult> {
         let entries = store
             .with_conn(|conn| -> anyhow::Result<Vec<MetricEntry>> {
+                // No LIMIT in SQL: non-code files are filtered out in Rust
+                // before the top-500 slice, so the cap applies to source files.
                 let mut stmt = conn.prepare(
                     "SELECT file_path,
                             SUM(additions) AS added,
@@ -46,8 +49,7 @@ impl MetricCollector for ChurnCollector {
                             COUNT(*) AS change_count
                        FROM changes
                       GROUP BY file_path
-                      ORDER BY (SUM(additions) + SUM(deletions)) DESC
-                      LIMIT 500",
+                      ORDER BY (SUM(additions) + SUM(deletions)) DESC",
                 )?;
                 let rows = stmt.query_map([], |row| {
                     let file: String = row.get(0)?;
@@ -60,6 +62,9 @@ impl MetricCollector for ChurnCollector {
                 let mut out = Vec::new();
                 for r in rows {
                     let (file, added, deleted, change_count) = r?;
+                    if !is_source_file(&file) {
+                        continue;
+                    }
                     let total_churn = added + deleted;
                     let net_change = added as i64 - deleted as i64;
                     let churn_rate = if change_count > 0 {
@@ -76,6 +81,9 @@ impl MetricCollector for ChurnCollector {
                     values.insert("change_count".into(), MetricValue::Count(change_count));
                     values.insert("churn_rate".into(), MetricValue::Float(churn_rate));
                     out.push(MetricEntry { key: file, values });
+                    if out.len() == 500 {
+                        break;
+                    }
                 }
                 Ok(out)
             })

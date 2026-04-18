@@ -223,7 +223,8 @@ fn score_bus_factor(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
     }
 }
 
-/// Pillar 3: refactoring debt from `complexity` and `outliers`.
+/// Pillar 3: refactoring debt from `complexity`, `outliers`, and stale
+/// debt markers (TODO/FIXME/HACK/XXX comments older than 6 months).
 fn score_refactoring_debt(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
     let complex = by_name
         .get("complexity")
@@ -231,6 +232,14 @@ fn score_refactoring_debt(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
         .unwrap_or(&[]);
     let outliers = by_name
         .get("outliers")
+        .map(|r| r.entries.as_slice())
+        .unwrap_or(&[]);
+    let markers = by_name
+        .get("debt_markers")
+        .map(|r| r.entries.as_slice())
+        .unwrap_or(&[]);
+    let large = by_name
+        .get("large_sources")
         .map(|r| r.entries.as_slice())
         .unwrap_or(&[]);
 
@@ -251,10 +260,50 @@ fn score_refactoring_debt(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
 
     let outlier_count = outliers.len();
 
+    // Only markers older than 180 days count. Fresh TODOs are normal backlog,
+    // not debt. Rotten (>365d) TODOs hurt a bit more than merely-stale ones.
+    let stale_markers = markers
+        .iter()
+        .filter(|e| match e.values.get("age_days") {
+            Some(MetricValue::Count(d)) => *d >= 180 && *d < 365,
+            _ => false,
+        })
+        .count();
+    let rotten_markers = markers
+        .iter()
+        .filter(|e| match e.values.get("age_days") {
+            Some(MetricValue::Count(d)) => *d >= 365,
+            _ => false,
+        })
+        .count();
+
+    // Large-source files are split candidates. A single >5k file ("god
+    // module") is painful; a handful of 1.5k-5k files less so.
+    let very_large_sources = large
+        .iter()
+        .filter(|e| match e.values.get("code_lines") {
+            Some(MetricValue::Count(n)) => *n >= 5000,
+            _ => false,
+        })
+        .count();
+    let sizeable_sources = large
+        .iter()
+        .filter(|e| match e.values.get("code_lines") {
+            Some(MetricValue::Count(n)) => *n >= 1500 && *n < 5000,
+            _ => false,
+        })
+        .count();
+
     // CC≥20 is twice as painful as CC 11-19. Outliers add a small kicker.
+    // Rotten markers and god-modules add a steady trickle — no single one
+    // tanks the score, but a backlog of them will.
     let penalty = (very_high as f64 * 4.0).min(50.0)
         + (high as f64 * 1.0).min(20.0)
-        + (outlier_count as f64 * 0.5).min(20.0);
+        + (outlier_count as f64 * 0.5).min(20.0)
+        + (stale_markers as f64 * 0.3).min(10.0)
+        + (rotten_markers as f64 * 0.6).min(20.0)
+        + (very_large_sources as f64 * 3.0).min(15.0)
+        + (sizeable_sources as f64 * 0.5).min(10.0);
     let score = (100.0 - penalty).max(MIN_PILLAR_SCORE);
 
     let mut actions: Vec<Action> = Vec::new();
@@ -274,14 +323,53 @@ fn score_refactoring_debt(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
             ));
         }
     }
+    // Biggest source file — surface the top-1 as a concrete split target.
+    if let Some(biggest) = large.first()
+        && let Some(MetricValue::Count(lines)) = biggest.values.get("code_lines")
+        && *lines >= 1500
+    {
+        actions.push(Action::new(
+            "refactoring_debt",
+            biggest.key.clone(),
+            format!("{} code lines — god-module candidate", lines),
+            "Split by responsibility; if auto-generated, move to a build step instead",
+        ));
+    }
+
+    // Oldest rotten marker as a concrete candidate to resolve or delete.
+    if let Some(oldest) = markers
+        .iter()
+        .find(|e| matches!(e.values.get("age_days"), Some(MetricValue::Count(d)) if *d >= 365))
+    {
+        let age = match oldest.values.get("age_days") {
+            Some(MetricValue::Count(d)) => *d,
+            _ => 0,
+        };
+        let marker = match oldest.values.get("marker") {
+            Some(MetricValue::Text(s)) => s.clone(),
+            _ => "TODO".into(),
+        };
+        actions.push(Action::new(
+            "refactoring_debt",
+            oldest.key.clone(),
+            format!("{} open for {} days", marker, age),
+            "Resolve it or delete the comment — don't leave it to rot",
+        ));
+    }
 
     Pillar {
         key: "refactoring_debt",
         display: "Refactoring Debt",
         score,
         summary: format!(
-            "{} functions CC≥20, {} CC 11-19, {} outlier files",
-            very_high, high, outlier_count
+            "{} fns CC≥20, {} CC 11-19, {} outliers, {} stale + {} rotten markers, {} huge + {} sizeable files",
+            very_high,
+            high,
+            outlier_count,
+            stale_markers,
+            rotten_markers,
+            very_large_sources,
+            sizeable_sources
         ),
         actions,
     }
@@ -776,6 +864,82 @@ mod tests {
         // One action for the CC=25 entry.
         assert_eq!(p.actions.len(), 1);
         assert!(p.actions[0].target.contains("foo"));
+    }
+
+    #[test]
+    fn refactoring_debt_penalises_rotten_todos() {
+        let markers = mk_result(
+            "debt_markers",
+            vec![
+                mk_entry("a.rs:10", &[("age_days", MetricValue::Count(50))]), // fresh, ignored
+                mk_entry("a.rs:20", &[("age_days", MetricValue::Count(200))]), // stale
+                mk_entry("a.rs:30", &[("age_days", MetricValue::Count(400))]), // rotten
+                mk_entry("a.rs:40", &[("age_days", MetricValue::Count(500))]), // rotten
+            ],
+        );
+        let mut by_name = HashMap::new();
+        by_name.insert("debt_markers", &markers);
+        let p = score_refactoring_debt(&by_name);
+        assert!(
+            p.score < 100.0,
+            "stale + rotten markers should deduct points, got {}",
+            p.score
+        );
+        // Summary should reflect the split.
+        assert!(p.summary.contains("1 stale"), "summary = {}", p.summary);
+        assert!(p.summary.contains("2 rotten"), "summary = {}", p.summary);
+        // An action for the oldest rotten marker.
+        assert!(
+            p.actions
+                .iter()
+                .any(|a| a.target.contains("a.rs:40") || a.target.contains("a.rs:30")),
+            "should surface a rotten marker as action"
+        );
+    }
+
+    #[test]
+    fn refactoring_debt_penalises_large_source_files() {
+        let large = mk_result(
+            "large_sources",
+            vec![
+                mk_entry("huge.java", &[("code_lines", MetricValue::Count(8000))]), // god module
+                mk_entry("big.java", &[("code_lines", MetricValue::Count(2500))]),  // sizeable
+                mk_entry("small.java", &[("code_lines", MetricValue::Count(600))]), // ignored
+            ],
+        );
+        let mut by_name = HashMap::new();
+        by_name.insert("large_sources", &large);
+        let p = score_refactoring_debt(&by_name);
+        assert!(
+            p.score < 100.0,
+            "huge files should deduct points, got {}",
+            p.score
+        );
+        assert!(p.summary.contains("1 huge"), "summary = {}", p.summary);
+        assert!(p.summary.contains("1 sizeable"), "summary = {}", p.summary);
+        // Should surface the biggest one as an action.
+        assert!(
+            p.actions.iter().any(|a| a.target.contains("huge.java")),
+            "should surface huge.java as action"
+        );
+    }
+
+    #[test]
+    fn refactoring_debt_ignores_fresh_todos() {
+        let markers = mk_result(
+            "debt_markers",
+            vec![
+                mk_entry("a.rs:1", &[("age_days", MetricValue::Count(10))]),
+                mk_entry("a.rs:2", &[("age_days", MetricValue::Count(100))]),
+            ],
+        );
+        let mut by_name = HashMap::new();
+        by_name.insert("debt_markers", &markers);
+        let p = score_refactoring_debt(&by_name);
+        assert_eq!(
+            p.score as u64, 100,
+            "fresh markers (<180d) should not penalise"
+        );
     }
 
     #[test]

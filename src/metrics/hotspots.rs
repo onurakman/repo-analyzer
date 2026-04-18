@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::analysis::source_filter::is_source_file;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
 use crate::types::{MetricEntry, MetricResult, MetricValue};
@@ -52,6 +53,9 @@ impl MetricCollector for HotspotsCollector {
                 })?;
                 for r in rows {
                     let (file, changes, authors) = r?;
+                    if !is_source_file(&file) {
+                        continue;
+                    }
                     let score = changes * authors;
                     let mut values = HashMap::new();
                     values.insert("level".into(), MetricValue::Text("file".into()));

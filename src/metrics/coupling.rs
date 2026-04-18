@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::analysis::source_filter::is_source_file;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
 use crate::types::{MetricEntry, MetricResult, MetricValue};
@@ -43,21 +44,47 @@ impl MetricCollector for CouplingCollector {
         store
             .with_conn(|conn| -> anyhow::Result<MetricResult> {
                 progress.status(&format!(
-                    "  coupling: picking top {TOP_FILES} active files..."
+                    "  coupling: picking top {TOP_FILES} active source files..."
                 ));
-                // Step 1: pick the top-N files by commit activity. Anything
-                // outside this set is too quiet to produce interesting
-                // coupling pairs and just balloons memory.
-                conn.execute_batch(&format!(
+                // Step 1: pick the top-N most-active *source* files (config,
+                // lockfiles, docs are excluded up front so non-code pairs
+                // don't crowd out real architectural coupling).
+                conn.execute_batch(
                     "DROP TABLE IF EXISTS __coupling_files;
                      DROP TABLE IF EXISTS __coupling_changes;
-                     CREATE TEMP TABLE __coupling_files AS
-                       SELECT file_path AS file, COUNT(*) AS cnt
-                         FROM changes
-                        GROUP BY file_path
-                        ORDER BY cnt DESC
-                        LIMIT {TOP_FILES};"
-                ))?;
+                     CREATE TEMP TABLE __coupling_files (file TEXT PRIMARY KEY, cnt INTEGER);",
+                )?;
+                let top_files: Vec<(String, i64)> = {
+                    let mut stmt = conn.prepare(
+                        "SELECT file_path, COUNT(*) AS cnt
+                           FROM changes
+                          GROUP BY file_path
+                          ORDER BY cnt DESC",
+                    )?;
+                    let rows = stmt.query_map([], |row| {
+                        let f: String = row.get(0)?;
+                        let n: i64 = row.get(1)?;
+                        Ok((f, n))
+                    })?;
+                    let mut out: Vec<(String, i64)> = Vec::new();
+                    for r in rows {
+                        let (f, n) = r?;
+                        if !is_source_file(&f) {
+                            continue;
+                        }
+                        out.push((f, n));
+                        if out.len() as i64 == TOP_FILES {
+                            break;
+                        }
+                    }
+                    out
+                };
+                let mut ins =
+                    conn.prepare("INSERT INTO __coupling_files(file, cnt) VALUES (?1, ?2)")?;
+                for (f, n) in &top_files {
+                    ins.execute(rusqlite::params![f, n])?;
+                }
+                drop(ins);
 
                 progress.status("  coupling: materializing filtered changes...");
                 // Step 2: materialize a narrow (commit_oid, file_path) view

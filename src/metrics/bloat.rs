@@ -3,7 +3,14 @@ use std::collections::HashMap;
 use gix::prelude::HeaderExt;
 
 use crate::metrics::MetricCollector;
+use crate::metrics::large_sources::is_source_path;
 use crate::types::{MetricEntry, MetricResult, MetricValue, ParsedChange};
+
+/// Source files above this are absurd even for auto-generated code and
+/// warrant a bloat flag. Below this, source files are the
+/// [`large_sources`](crate::metrics::large_sources) report's concern —
+/// splitting them is a refactor, not a git-hygiene action.
+const SOURCE_BLOAT_THRESHOLD: u64 = 20 * 1024 * 1024;
 
 /// Patterns for files that are commonly committed by mistake.
 const SUSPICIOUS_PATTERNS: &[(&str, &str)] = &[
@@ -155,9 +162,17 @@ fn walk_tree(repo: &gix::Repository, tree: &gix::Tree, prefix: &str, out: &mut V
                 walk_tree(repo, &subtree, &full_path, out);
             }
         } else if mode.is_blob() {
-            // Use header to avoid reading the entire blob
+            // Use header to avoid reading the entire blob.
             if let Ok(header) = repo.objects.header(id) {
-                out.push((full_path, header.size()));
+                let size = header.size();
+                // Source files belong in `large_sources`, not bloat — their
+                // fix is "split the module", not "rewrite git history".
+                // We still catch truly absurd sizes (>20 MB) as likely
+                // generated artifacts checked in by accident.
+                if is_source_path(&full_path) && size < SOURCE_BLOAT_THRESHOLD {
+                    continue;
+                }
+                out.push((full_path, size));
             }
         }
     }

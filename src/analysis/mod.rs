@@ -5,3 +5,4 @@
 //! breakdowns rather than raw line counts.
 
 pub mod line_classifier;
+pub mod source_filter;

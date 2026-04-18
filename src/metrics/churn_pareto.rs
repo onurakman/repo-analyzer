@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::analysis::source_filter::is_source_file;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
 use crate::types::{MetricEntry, MetricResult, MetricValue};
@@ -48,7 +49,11 @@ impl MetricCollector for ChurnParetoCollector {
                 })?;
                 let mut out = Vec::new();
                 for r in rows {
-                    out.push(r?);
+                    let (path, churn) = r?;
+                    if !is_source_file(&path) {
+                        continue;
+                    }
+                    out.push((path, churn));
                 }
                 Ok(out)
             })

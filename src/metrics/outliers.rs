@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::analysis::source_filter::is_source_file;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
 use crate::types::{MetricEntry, MetricResult, MetricValue};
@@ -64,6 +65,7 @@ impl MetricCollector for OutliersCollector {
 
         let mut entries: Vec<MetricEntry> = rows
             .into_iter()
+            .filter(|(file, _, _, _)| is_source_file(file))
             .filter(|(_, cc, ua, _)| {
                 *cc >= HIGH_CHURN_THRESHOLD || (*ua as usize) >= HIGH_AUTHORS_THRESHOLD
             })
