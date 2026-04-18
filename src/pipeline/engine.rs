@@ -342,6 +342,20 @@ impl Pipeline {
             .collect();
         fill_column_labels(&mut results);
 
+        // Health is a synthesis pass, not a collector — it reads the other
+        // finalized reports and derives a score + action list. Prepend it so
+        // it appears first in the output.
+        if self.config.report_kinds.contains(&ReportKind::Health) {
+            pb.set_message("[5/5] Computing health score...");
+            if let Some(mut health) = crate::scoring::health::compute_health(
+                &results,
+                std::path::Path::new(&self.config.repo_path),
+            ) {
+                fill_column_labels(std::slice::from_mut(&mut health));
+                results.insert(0, health);
+            }
+        }
+
         if !self.config.quiet {
             pb.disable_steady_tick();
         }
@@ -359,7 +373,13 @@ impl Pipeline {
         let mut collectors: Vec<Box<dyn MetricCollector>> = Vec::new();
 
         for kind in &self.config.report_kinds {
+            // Health is synthesised post-finalize from the other reports; it
+            // doesn't collect anything per-commit, so skip it here.
+            if matches!(kind, ReportKind::Health) {
+                continue;
+            }
             let collector: Box<dyn MetricCollector> = match kind {
+                ReportKind::Health => unreachable!("filtered out above"),
                 ReportKind::Authors => Box::new(AuthorsCollector::new()),
                 ReportKind::Hotspots => Box::new(HotspotsCollector::new()),
                 ReportKind::Churn => Box::new(ChurnCollector::new()),

@@ -9,6 +9,7 @@ mod metrics;
 mod output;
 mod parser;
 mod pipeline;
+mod scoring;
 mod store;
 mod types;
 

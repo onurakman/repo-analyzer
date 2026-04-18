@@ -14,7 +14,7 @@ pub struct Cli {
     #[arg(short, long, value_enum, default_value_t = OutputFormat::Table)]
     pub format: OutputFormat,
 
-    /// Run only these reports (comma-separated: authors,hotspots,churn,ownership,coupling,patterns,age,bloat,outliers,quality,complexity,composition,construct_churn,half_life,succession,knowledge_silos,fan_in_out,module_coupling,churn_pareto,construct_ownership)
+    /// Run only these reports (comma-separated: health,authors,hotspots,churn,ownership,coupling,patterns,age,bloat,outliers,quality,complexity,composition,construct_churn,half_life,succession,knowledge_silos,fan_in_out,module_coupling,churn_pareto,construct_ownership)
     #[arg(long)]
     pub only: Option<String>,
 

@@ -111,6 +111,19 @@
     @apply border-b text-slate-500 bg-white sticky top-0;
   }
   html.dark thead th { @apply border-slate-700 text-slate-500 bg-[#11151c]; }
+  /* Health gauge — a circular 0-100 score indicator whose colour is
+     interpolated from red to green via HSL (no JS library needed). */
+  .health-hero { @apply flex items-center gap-6 mb-4 mt-2; }
+  .gauge { @apply relative flex items-center justify-center flex-shrink-0; width: 140px; height: 140px; }
+  .gauge svg { transform: rotate(-90deg); }
+  .gauge-track { stroke: rgba(100, 116, 139, 0.2); fill: none; }
+  .gauge-fill { fill: none; transition: stroke-dashoffset 700ms ease-out; stroke-linecap: round; }
+  .gauge-label { @apply absolute inset-0 flex items-center justify-center font-mono; }
+  .gauge-score { @apply text-5xl font-bold leading-none; }
+  .health-text { @apply flex-1; }
+  .health-interp { @apply text-sm text-slate-600; }
+  html.dark .health-interp { @apply text-slate-300; }
+
   /* break-words (overflow-wrap: anywhere) lets long identifiers and file
      paths wrap consistently across all cells, so rows stay short instead
      of the first column wrapping while later columns push the row tall. */
@@ -250,6 +263,8 @@
   // Order reports from "most actionable / risk" at the top to plain descriptive
   // stats at the bottom. Readers typically care about problems first.
   const REPORT_ORDER = [
+    // Overall health + actions at the very top.
+    'health',
     // Opening frame: what is the repo made of?
     'composition',
     // Immediate risk / refactor candidates
@@ -298,6 +313,7 @@
     authors: 'users', hotspots: 'flame', churn: 'activity',
     ownership: 'shield', coupling: 'link', patterns: 'clock',
     age: 'calendar', bloat: 'hard-drive', composition: 'pie-chart',
+    health: 'heart-pulse',
     outliers: 'triangle-alert', quality: 'check-circle', complexity: 'git-merge',
     construct_churn: 'code-2', construct_ownership: 'user-check',
     half_life: 'hourglass', succession: 'user-plus', knowledge_silos: 'lock',
@@ -430,6 +446,69 @@
   // ------------------------------------------------------------------
   // Per-report section
   // ------------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // Health score gauge helpers
+  // ------------------------------------------------------------------
+  function findOverallEntry(groups) {
+    const overallGroup = groups.find(([name]) => name === 'Overall');
+    if (!overallGroup) return null;
+    const entry = (overallGroup[1] || []).find(e => e.key === 'overall');
+    return entry || null;
+  }
+
+  function buildHealthHero(overallEntry) {
+    const rawScore = overallEntry.values && overallEntry.values.score;
+    const score = typeof rawScore === 'number' ? Math.max(0, Math.min(100, rawScore)) : 0;
+    const details = (overallEntry.values && overallEntry.values.details) || '';
+    const action = (overallEntry.values && overallEntry.values.action) || '';
+
+    // Interpolate red→yellow→green via HSL. 0 → hue 0 (red), 100 → hue 120 (green).
+    const hue = (score / 100) * 120;
+    const color = 'hsl(' + hue + ', 75%, 45%)';
+
+    const size = 140;
+    const stroke = 12;
+    const radius = (size - stroke) / 2;
+    const circumference = 2 * Math.PI * radius;
+    const offset = circumference * (1 - score / 100);
+
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('width', String(size));
+    svg.setAttribute('height', String(size));
+    svg.setAttribute('viewBox', '0 0 ' + size + ' ' + size);
+    const track = document.createElementNS(svgNS, 'circle');
+    track.setAttribute('class', 'gauge-track');
+    track.setAttribute('cx', String(size / 2));
+    track.setAttribute('cy', String(size / 2));
+    track.setAttribute('r', String(radius));
+    track.setAttribute('stroke-width', String(stroke));
+    svg.appendChild(track);
+    const fill = document.createElementNS(svgNS, 'circle');
+    fill.setAttribute('class', 'gauge-fill');
+    fill.setAttribute('cx', String(size / 2));
+    fill.setAttribute('cy', String(size / 2));
+    fill.setAttribute('r', String(radius));
+    fill.setAttribute('stroke-width', String(stroke));
+    fill.setAttribute('stroke', color);
+    fill.setAttribute('stroke-dasharray', String(circumference));
+    fill.setAttribute('stroke-dashoffset', String(offset));
+    svg.appendChild(fill);
+
+    const gauge = el('div', { class: 'gauge' },
+      svg,
+      el('div', { class: 'gauge-label' },
+        el('span', { class: 'gauge-score', style: 'color: ' + color, text: String(score) })
+      )
+    );
+
+    const text = el('div', { class: 'health-text' },
+      el('div', { class: 'health-interp', text: details + (action ? ' · ' + action : '') })
+    );
+
+    return el('div', { class: 'health-hero' }, gauge, text);
+  }
+
   function renderSection(report, index) {
     const iconName = ICON_MAP[report.name] || ICON_DEFAULT;
     const totalRows = (report.entry_groups && report.entry_groups.length)
@@ -464,15 +543,27 @@
     const labels = (report.column_labels && report.column_labels.length)
       ? report.column_labels : columns;
 
-    if (report.entry_groups && report.entry_groups.length) {
-      report.entry_groups.forEach(([groupName, groupEntries]) => {
+    // Health report gets a big circular score gauge at the top — the
+    // information is in the "Overall" entry group, but the gauge conveys it
+    // at a glance so we hide that group from the normal table below.
+    let groupsToRender = report.entry_groups || [];
+    if (report.name === 'health' && groupsToRender.length) {
+      const overall = findOverallEntry(groupsToRender);
+      if (overall) {
+        body.append(buildHealthHero(overall));
+        groupsToRender = groupsToRender.filter(([name]) => name !== 'Overall');
+      }
+    }
+
+    if (groupsToRender.length) {
+      groupsToRender.forEach(([groupName, groupEntries]) => {
         body.append(el('h3', { class: 'group-header' },
           groupName,
           el('span', { class: 'group-count', text: '(' + groupEntries.length + ' entries)' })
         ));
         body.append(renderEntries(groupEntries, columns, labels));
       });
-    } else {
+    } else if (!(report.entry_groups && report.entry_groups.length)) {
       body.append(renderEntries(report.entries || [], columns, labels));
     }
 

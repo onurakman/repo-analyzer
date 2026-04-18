@@ -358,6 +358,7 @@ pub fn humanize(s: &str) -> String {
 /// Which reports (metric collectors) to run.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub enum ReportKind {
+    Health,
     Authors,
     Hotspots,
     Churn,
@@ -398,7 +399,10 @@ impl ReportKind {
     /// All known report kinds.
     pub fn all() -> Vec<ReportKind> {
         vec![
-            // Language composition first — a snapshot of what the repo is
+            // Health score first — a one-glance overview with actionable
+            // items, synthesised from every other report.
+            Self::Health,
+            // Language composition second — a snapshot of what the repo is
             // made of is the natural opening frame before any history-driven
             // metric.
             Self::Composition,
@@ -438,6 +442,7 @@ impl ReportKind {
             "outliers" => Some(Self::Outliers),
             "quality" => Some(Self::Quality),
             "complexity" => Some(Self::Complexity),
+            "health" => Some(Self::Health),
             "composition" => Some(Self::Composition),
             "construct_churn" | "construct-churn" => Some(Self::ConstructChurn),
             "half_life" | "half-life" | "halflife" => Some(Self::HalfLife),
@@ -466,6 +471,7 @@ impl fmt::Display for ReportKind {
             Self::Outliers => "outliers",
             Self::Quality => "quality",
             Self::Complexity => "complexity",
+            Self::Health => "health",
             Self::Composition => "composition",
             Self::ConstructChurn => "construct_churn",
             Self::HalfLife => "half_life",
