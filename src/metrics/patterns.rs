@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
-use crate::types::{MetricEntry, MetricResult, MetricValue};
+use crate::types::{EntryGroup, MetricEntry, MetricResult, MetricValue};
 
 pub struct PatternsCollector;
 
@@ -105,8 +105,16 @@ impl MetricCollector for PatternsCollector {
             column_labels: vec![],
             entries: vec![],
             entry_groups: vec![
-                ("hourly".into(), hourly_entries),
-                ("daily".into(), daily_entries),
+                EntryGroup {
+                    name: "hourly".into(),
+                    label: "Hourly".into(),
+                    entries: hourly_entries,
+                },
+                EntryGroup {
+                    name: "daily".into(),
+                    label: "Daily".into(),
+                    entries: daily_entries,
+                },
             ],
         })
     }

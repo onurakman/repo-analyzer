@@ -497,9 +497,9 @@
   // Health score gauge helpers
   // ------------------------------------------------------------------
   function findOverallEntry(groups) {
-    const overallGroup = groups.find(([name]) => name === 'Overall');
+    const overallGroup = groups.find(g => g.name === 'overall');
     if (!overallGroup) return null;
-    const entry = (overallGroup[1] || []).find(e => e.key === 'overall');
+    const entry = (overallGroup.entries || []).find(e => e.key === 'overall');
     return entry || null;
   }
 
@@ -559,7 +559,7 @@
   function renderSection(report, index) {
     const iconName = ICON_MAP[report.name] || ICON_DEFAULT;
     const totalRows = (report.entry_groups && report.entry_groups.length)
-      ? report.entry_groups.reduce((s, g) => s + (g[1] ? g[1].length : 0), 0)
+      ? report.entry_groups.reduce((s, g) => s + (g.entries ? g.entries.length : 0), 0)
       : (report.entries ? report.entries.length : 0);
 
     const section = el('section', {
@@ -598,17 +598,17 @@
       const overall = findOverallEntry(groupsToRender);
       if (overall) {
         body.append(buildHealthHero(overall));
-        groupsToRender = groupsToRender.filter(([name]) => name !== 'Overall');
+        groupsToRender = groupsToRender.filter(g => g.name !== 'overall');
       }
     }
 
     if (groupsToRender.length) {
-      groupsToRender.forEach(([groupName, groupEntries]) => {
+      groupsToRender.forEach(g => {
         body.append(el('h3', { class: 'group-header' },
-          groupName,
-          el('span', { class: 'group-count', text: '(' + groupEntries.length + ' entries)' })
+          g.label || g.name,
+          el('span', { class: 'group-count', text: '(' + (g.entries || []).length + ' entries)' })
         ));
-        body.append(renderEntries(groupEntries, columns, labels));
+        body.append(renderEntries(g.entries || [], columns, labels));
       });
     } else if (!(report.entry_groups && report.entry_groups.length)) {
       body.append(renderEntries(report.entries || [], columns, labels));
@@ -634,7 +634,7 @@
   DATA.forEach((r, i) => {
     sectionsRoot.append(renderSection(r, i));
     const totalRows = (r.entry_groups && r.entry_groups.length)
-      ? r.entry_groups.reduce((s, g) => s + (g[1] ? g[1].length : 0), 0)
+      ? r.entry_groups.reduce((s, g) => s + (g.entries ? g.entries.length : 0), 0)
       : (r.entries ? r.entries.length : 0);
     const iconName = ICON_MAP[r.name] || ICON_DEFAULT;
     const a = el('a', { href: '#sec-' + i, class: 'nav-link' },
@@ -662,7 +662,7 @@
   const totalReports = DATA.length;
   const totalRows = DATA.reduce((s, r) => {
     if (r.entry_groups && r.entry_groups.length) {
-      return s + r.entry_groups.reduce((x, g) => x + (g[1] ? g[1].length : 0), 0);
+      return s + r.entry_groups.reduce((x, g) => x + (g.entries ? g.entries.length : 0), 0);
     }
     return s + (r.entries ? r.entries.length : 0);
   }, 0);
@@ -670,7 +670,7 @@
   const riskCount = (() => {
     let n = 0;
     for (const r of DATA) {
-      const all = (r.entries || []).concat(...(r.entry_groups || []).map(g => g[1] || []));
+      const all = (r.entries || []).concat(...(r.entry_groups || []).map(g => g.entries || []));
       for (const e of all) {
         for (const v of Object.values(e.values || {})) {
           if (typeof v === 'string' && BAD.test(v)) n++;

@@ -310,6 +310,16 @@ pub struct MetricEntry {
     pub values: HashMap<String, MetricValue>,
 }
 
+/// A named group of entries (e.g., "hourly" / "daily" in patterns,
+/// "pillars" / "actions" in health). `name` is the stable snake_case id;
+/// `label` is the human-friendly heading shown in reports.
+#[derive(Debug, Clone, Serialize)]
+pub struct EntryGroup {
+    pub name: String,
+    pub label: String,
+    pub entries: Vec<MetricEntry>,
+}
+
 /// The result of one metric collector's run.
 ///
 /// When `entry_groups` is non-empty, entries are organized into named groups
@@ -331,7 +341,7 @@ pub struct MetricResult {
     pub column_labels: Vec<String>,
     pub entries: Vec<MetricEntry>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub entry_groups: Vec<(String, Vec<MetricEntry>)>,
+    pub entry_groups: Vec<EntryGroup>,
 }
 
 /// Convert a snake_case identifier into a human-friendly Title Case label.

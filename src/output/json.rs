@@ -61,13 +61,24 @@ impl JsonWriter {
             obj.insert("shown_entries".to_string(), json!(slice.len()));
             obj.insert("entries".to_string(), json!(Self::entries_to_json(slice)));
         } else {
-            let total: usize = result.entry_groups.iter().map(|(_, e)| e.len()).sum();
+            let total: usize = result.entry_groups.iter().map(|g| g.entries.len()).sum();
             obj.insert("total_entries".to_string(), json!(total));
             obj.insert("shown_entries".to_string(), json!(total));
-            for (group_name, group_entries) in &result.entry_groups {
-                let key = format!("entries_{group_name}");
-                obj.insert(key, json!(Self::entries_to_json(group_entries)));
-            }
+            let groups: Vec<Value> = result
+                .entry_groups
+                .iter()
+                .map(|g| {
+                    let mut gm = Map::new();
+                    gm.insert("name".to_string(), json!(&g.name));
+                    gm.insert("label".to_string(), json!(&g.label));
+                    gm.insert(
+                        "entries".to_string(),
+                        json!(Self::entries_to_json(&g.entries)),
+                    );
+                    Value::Object(gm)
+                })
+                .collect();
+            obj.insert("entry_groups".to_string(), Value::Array(groups));
         }
 
         Value::Object(obj)

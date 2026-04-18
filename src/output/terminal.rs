@@ -115,9 +115,13 @@ impl ReportWriter for TerminalWriter {
                 }
                 Self::render_table(&result.entries, &columns, &labels, top_n);
             } else {
-                for (group_name, group_entries) in &result.entry_groups {
-                    println!("\n  -- {} ({} entries) --", group_name, group_entries.len());
-                    Self::render_table(group_entries, &columns, &labels, top_n);
+                for group in &result.entry_groups {
+                    println!(
+                        "\n  -- {} ({} entries) --",
+                        group.label,
+                        group.entries.len()
+                    );
+                    Self::render_table(&group.entries, &columns, &labels, top_n);
                 }
             }
         }

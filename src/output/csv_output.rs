@@ -83,9 +83,9 @@ impl CsvWriter {
             header.extend(columns.iter().cloned());
             csv_writer.write_record(&header)?;
 
-            for (group_name, group_entries) in &result.entry_groups {
-                for entry in group_entries {
-                    let mut row = vec![group_name.clone(), entry.key.clone()];
+            for group in &result.entry_groups {
+                for entry in &group.entries {
+                    let mut row = vec![group.name.clone(), entry.key.clone()];
                     for col in &columns {
                         let val = entry
                             .values

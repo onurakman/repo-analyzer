@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::types::{MetricEntry, MetricResult, MetricValue};
+use crate::types::{EntryGroup, MetricEntry, MetricResult, MetricValue};
 
 /// Weight of each pillar in the overall score. Equal weighting keeps the
 /// surface transparent — one pillar can't dominate silently.
@@ -686,14 +686,30 @@ fn build_result(overall: u64, pillars: Vec<Pillar>, hygiene: Vec<HygieneFinding>
         })
         .collect();
 
-    let mut entry_groups: Vec<(String, Vec<MetricEntry>)> = Vec::new();
-    entry_groups.push(("Overall".into(), vec![overall_entry]));
-    entry_groups.push(("Pillars (0-100 each, equal weight)".into(), pillar_entries));
+    let mut entry_groups: Vec<EntryGroup> = Vec::new();
+    entry_groups.push(EntryGroup {
+        name: "overall".into(),
+        label: "Overall".into(),
+        entries: vec![overall_entry],
+    });
+    entry_groups.push(EntryGroup {
+        name: "pillars".into(),
+        label: "Pillars (0-100 each, equal weight)".into(),
+        entries: pillar_entries,
+    });
     if !action_entries.is_empty() {
-        entry_groups.push(("Start here — actions".into(), action_entries));
+        entry_groups.push(EntryGroup {
+            name: "actions".into(),
+            label: "Start here — actions".into(),
+            entries: action_entries,
+        });
     }
     if !hygiene_entries.is_empty() {
-        entry_groups.push(("Repo hygiene — run these".into(), hygiene_entries));
+        entry_groups.push(EntryGroup {
+            name: "hygiene".into(),
+            label: "Repo hygiene — run these".into(),
+            entries: hygiene_entries,
+        });
     }
 
     MetricResult {
@@ -996,7 +1012,7 @@ mod tests {
         let result = compute_health(&[], &tmp).expect("should produce result");
         assert_eq!(result.name, "health");
         // Without any collector data, every pillar is effectively 100.
-        let overall = result.entry_groups[0].1[0]
+        let overall = result.entry_groups[0].entries[0]
             .values
             .get("score")
             .and_then(|v| match v {
