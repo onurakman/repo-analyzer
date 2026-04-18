@@ -6,6 +6,18 @@ Git repository analysis tool with code-construct-level granularity.
 
 ## Installation
 
+### Pre-built binary (recommended)
+
+Pulls the latest release for your platform and installs it into `/usr/local/bin`.
+
+```bash
+curl -sfL https://raw.githubusercontent.com/onurakman/repo-analyzer/master/contrib/install.sh | sh -s -- -b /usr/local/bin
+```
+
+Pass a specific version as the last argument (e.g. `v0.1.5`). Use `-b "$HOME/.local/bin"` if you don't want to use sudo. Linux builds are statically linked against musl, so they run on any distro (Alpine, Debian, RHEL, slim Docker images — no glibc dance).
+
+### From source
+
 ```bash
 # Install to ~/.cargo/bin
 cargo install --path .
@@ -25,16 +37,22 @@ repo-analyzer [OPTIONS] [PATH]
 |---|---|---|---|---|
 | `PATH` | | | `.` | Path to the git repository to analyze |
 | | `-f` | `--format` | `table` | Output format: `table`, `json`, `csv`, `html` |
-| | | `--only` | all | Comma-separated report filter (any of: `composition`, `authors`, `hotspots`, `churn`, `ownership`, `coupling`, `patterns`, `age`, `bloat`, `outliers`, `quality`, `complexity`, `construct_churn`, `half_life`, `succession`, `knowledge_silos`, `fan_in_out`, `module_coupling`, `churn_pareto`, `construct_ownership`) |
+| | | `--only` | all | Comma-separated report filter (see [Reports](#reports) for valid names) |
 | | | `--since` | none | Analyze commits since duration (e.g. `6m`, `1y`, `30d`, `2w`) |
 | | | `--from` | none | Start date `YYYY-MM-DD` (requires `--to`) |
 | | | `--to` | none | End date `YYYY-MM-DD` (requires `--from`) |
-| | | `--top` | none | Show only the top N entries per report |
+| | | `--top` | none | Truncate each report to the top N entries (terminal/JSON/CSV only; totals are still surfaced so `top 20 of 240` is visible) |
 | | `-o` | `--output` | stdout | Write output to file instead of stdout |
 | | `-q` | `--quiet` | `false` | Suppress progress indicators |
+| | `-u` | `--unshallow` | `false` | Auto-run `git fetch --unshallow` on shallow clones instead of prompting or aborting. Pair with `--quiet` for CI. |
 | | | `--threads` | `0` (auto) | Number of threads for parallel processing |
+| | | `--channel-capacity` | `4` | Bounded-channel slots between producer, workers, and SQLite writer. Lower (1–2) to tighten RAM on small pods; raise (8–32) on fast disks. |
+| | | `--batch-size` | `64` | Max parsed changes per batch flushed to the store. Smaller cuts in-flight memory on huge merge commits; larger amortizes SQLite transaction overhead. |
+| | | `--object-cache-mb` | `4` | Per-thread `gix` object cache size in MiB. Drop to `1` on tight pods; raise for very repo-heavy runs. |
 
 Duration suffixes: `d` (days), `w` (weeks), `m` (months, ~30 days), `y` (years, ~365 days).
+
+Short flags may be combined: `-qu` = `--quiet --unshallow`, `-quf json` = `--quiet --unshallow --format json`.
 
 ## Examples
 
@@ -56,12 +74,19 @@ repo-analyzer -f csv -o metrics.csv --only coupling,patterns
 
 # Full analysis with 4 threads
 repo-analyzer /path/to/repo --threads 4
+
+# CI: shallow clone, quiet, auto-unshallow, JSON to file
+repo-analyzer . -qu -f json -o report.json
+
+# Tight memory pod: smaller batch + smaller gix cache
+repo-analyzer . --batch-size 16 --object-cache-mb 1 --channel-capacity 2
 ```
 
 ## Reports
 
 | Report | `--only` value | Description |
 |---|---|---|
+| Health Score | `health` | Single 0–100 score synthesised from every other report, plus a prioritised action list |
 | Code Composition | `composition` | Language breakdown at HEAD: real code vs comment vs blank lines, files and bytes per language |
 | Authors | `authors` | Commit counts and contribution stats per author |
 | Hotspots | `hotspots` | Files and constructs with the most change activity |
@@ -75,6 +100,8 @@ repo-analyzer /path/to/repo --threads 4
 | Quality | `quality` | Commit quality signals: short/low-quality messages, mega-commits, reverts, merges |
 | Complexity | `complexity` | Cyclomatic complexity per function (code-only SLOC) |
 | Construct Churn | `construct_churn` | Churn at function / class / method level |
+| Debt Markers | `debt_markers` | `TODO` / `FIXME` / `HACK` / `XXX` comments, enriched with git-blame (author + age) |
+| Large Sources | `large_sources` | Source files past a size threshold — likely refactor candidates |
 | Half-Life | `half_life` | How long lines in each file survive before being rewritten (heavy — opt-in via `--only`) |
 | Succession | `succession` | How ownership of files transfers between authors over time |
 | Knowledge Silos | `knowledge_silos` | Files known by only one author (bus-factor risk) |
@@ -84,6 +111,8 @@ repo-analyzer /path/to/repo --threads 4
 | Construct Ownership | `construct_ownership` | Author ownership at function / class level |
 
 By default every report except `half_life` is generated (it's memory-hungry on long histories — opt in via `--only half_life,...`). Use `--only` to select a subset.
+
+Most metrics skip non-code paths (lockfiles, generated bundles, docs, assets) via the shared `source_filter` so coupling and outlier signals aren't drowned out by noise.
 
 ## Output Formats
 
@@ -159,13 +188,21 @@ make run-html        # HTML to report.html
 make run-csv         # CSV to report.csv
 ```
 
+## Shallow clones
+
+History-based metrics need the full commit log. If the repo is a shallow clone:
+
+- **Interactive:** you're prompted to unshallow (`git fetch --unshallow`).
+- **`--quiet`:** the run aborts with instructions.
+- **`--unshallow` / `-u`:** the fetch runs automatically. Typical CI use: `-qu`.
+
 ## CI/CD
 
 The project uses [release-please](https://github.com/googleapis/release-please-action) for automated versioning.
 
 - Every push to `master` runs CI checks (`fmt`, `clippy`, `test`).
 - Conventional commits (`feat:`, `fix:`, etc.) trigger automatic version bump PRs.
-- Merging a release PR creates a git tag, GitHub Release, and builds binaries for Linux, macOS, and Windows (amd64 + arm64).
+- Merging a release PR creates a git tag, GitHub Release, and builds binaries for Linux (musl, static), macOS, and Windows (amd64 + arm64). Linux targets use [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) so the resulting binaries have no glibc version dependency and run on any distro.
 
 ## License
 

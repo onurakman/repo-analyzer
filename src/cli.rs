@@ -62,6 +62,12 @@ pub struct Cli {
     /// reuse but grows with repo activity; drop to 1 on tight pods. Default 4.
     #[arg(long, default_value_t = 4)]
     pub object_cache_mb: usize,
+
+    /// Automatically run `git fetch --unshallow` when the repository is a
+    /// shallow clone. Without this flag, shallow repos either prompt the user
+    /// (interactive) or abort (`--quiet`). Pair with `--quiet` in CI.
+    #[arg(short = 'u', long)]
+    pub unshallow: bool,
 }
 
 impl Cli {
@@ -204,6 +210,7 @@ mod tests {
             channel_capacity: 4,
             batch_size: 64,
             object_cache_mb: 4,
+            unshallow: false,
         };
         let kinds = cli.parse_report_kinds().unwrap();
         assert_eq!(kinds, vec![ReportKind::Hotspots]);
@@ -225,6 +232,7 @@ mod tests {
             channel_capacity: 4,
             batch_size: 64,
             object_cache_mb: 4,
+            unshallow: false,
         };
         let kinds = cli.parse_report_kinds().unwrap();
         assert_eq!(

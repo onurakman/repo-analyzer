@@ -72,6 +72,9 @@ pub struct PipelineConfig {
     pub batch_size: usize,
     /// Per-thread `gix` object cache size, in MiB.
     pub object_cache_mb: usize,
+    /// When `true`, a shallow repository is unshallowed automatically without
+    /// prompting. Intended for CI pipelines that pair this with `--quiet`.
+    pub unshallow: bool,
 }
 
 impl Default for PipelineConfig {
@@ -85,6 +88,7 @@ impl Default for PipelineConfig {
             channel_capacity: 4,
             batch_size: 64,
             object_cache_mb: 4,
+            unshallow: false,
         }
     }
 }
@@ -114,20 +118,31 @@ impl Pipeline {
                 .ok(); // Ignore error if pool already initialized
         }
 
-        // Shallow repos break every history-based metric. Prompt to unshallow when interactive;
-        // otherwise abort with a clear error.
+        // Shallow repos break every history-based metric. Three paths:
+        //   1. `--unshallow` / `-u` → just run it, no prompt. CI path.
+        //   2. quiet (no --unshallow) → bail with instructions.
+        //   3. interactive           → prompt the user; abort on "no".
         if gix::open(&self.config.repo_path)?.is_shallow() {
-            if self.config.quiet {
+            if self.config.unshallow {
+                if !self.config.quiet {
+                    eprintln!(
+                        "note: {} is a shallow clone — unshallowing (--unshallow)",
+                        self.config.repo_path
+                    );
+                }
+                run_unshallow(&self.config.repo_path)?;
+            } else if self.config.quiet {
                 anyhow::bail!(
                     "repository at {} is a shallow clone; all metrics depend on full history. \
-                     Run `git fetch --unshallow` (or re-clone without --depth) and retry.",
+                     Run `git fetch --unshallow` first, or re-run with `--unshallow`.",
                     self.config.repo_path
                 );
+            } else {
+                if !prompt_unshallow(&self.config.repo_path)? {
+                    anyhow::bail!("aborted: shallow repository, user declined to unshallow");
+                }
+                run_unshallow(&self.config.repo_path)?;
             }
-            if !prompt_unshallow(&self.config.repo_path)? {
-                anyhow::bail!("aborted: shallow repository, user declined to unshallow");
-            }
-            run_unshallow(&self.config.repo_path)?;
         }
 
         // 2. Count commits up front with a cheap walk (just traverses oids).

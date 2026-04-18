@@ -52,6 +52,7 @@ fn main() -> anyhow::Result<()> {
         channel_capacity,
         batch_size,
         object_cache_mb,
+        unshallow: cli.unshallow,
     };
 
     let pipeline = pipeline::engine::Pipeline::new(pipeline_config, registry);
