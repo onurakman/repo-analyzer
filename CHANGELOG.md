@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/onurakman/repo-analyzer/compare/v0.1.7...v0.1.8) (2026-04-18)
+
+
+### Miscellaneous Chores
+
+* release 0.1.8 ([224ea70](https://github.com/onurakman/repo-analyzer/commit/224ea70c21c461d7ee2e172001d7268f00cb727d))
+
 ## [0.1.7](https://github.com/onurakman/repo-analyzer/compare/v0.1.6...v0.1.7) (2026-04-18)
 
 
