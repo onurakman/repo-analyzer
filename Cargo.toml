@@ -57,8 +57,12 @@ regex = "1.12.3"
 rusqlite = { version = "0.39", features = ["bundled"] }
 
 # Language detection / line classification (see `src/langs`, `src/analysis`).
+# Detection is delegated to `linguist` (GitHub Linguist data, MIT). Codestats'
+# `Language` table (languages.json5) is still used for line classification —
+# we map Linguist's name back to a codestats entry so comment/blank counting
+# keeps the 460-language coverage.
 aho-corasick = "1.1"
-globset = "0.4"
+linguist = "0.1"
 memchr = "2.8"
 
 # Sharded concurrent map — used by the string interner so all rayon workers

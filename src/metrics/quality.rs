@@ -206,8 +206,14 @@ impl MetricCollector for QualityCollector {
                 },
             ),
             {
+                // This row reports a character-count average, not a commit
+                // count. Putting `total_commits` in the `commits` column here
+                // makes the value collide with the `total_commits` row and
+                // looks like a duplicate — show the rounded average instead.
                 let mut values = HashMap::new();
-                values.insert("commits".into(), MetricValue::Count(total_commits));
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let avg_u64 = avg_msg_len.round().max(0.0) as u64;
+                values.insert("commits".into(), MetricValue::Count(avg_u64));
                 values.insert("percent".into(), MetricValue::Float(avg_msg_len));
                 values.insert(
                     "recommendation".into(),

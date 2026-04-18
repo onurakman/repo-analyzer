@@ -1,89 +1,117 @@
-pub(super) mod patterns;
 pub mod scoring;
 
 use std::borrow::Cow;
 
-use self::patterns::get_candidates;
 use super::data::{LANGUAGES, Language};
 
-const COMMENT_MATCH_SCORE: i32 = 50;
-const KEYWORD_MATCH_SCORE: i32 = 10;
+/// Detect the language for a given filename. If content is provided, it will
+/// be used for shebang sniffing and to disambiguate when multiple languages
+/// share the filename pattern (e.g. `*.m` = Objective-C or MATLAB).
+///
+/// Detection is delegated to the [`linguist`] crate (GitHub Linguist data).
+/// The returned `Language` is still a reference into the codestats-derived
+/// [`LANGUAGES`] table so downstream line classification (comment / blank line
+/// counting, complexity scoring) keeps working. Linguist names are mapped to
+/// codestats names via [`map_to_codestats`]; mismatches fall back to a small
+/// alias table.
+#[must_use]
+pub fn detect_language_info(filename: &str, content: Option<&str>) -> Option<&'static Language> {
+    let mut candidates: Vec<&'static str> = linguist::detect_language_by_filename(filename)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
 
-#[inline]
-fn score_language(lang: &Language, content: &str, tokens: &[&str]) -> i32 {
-    if lang.line_comments.is_empty() && lang.block_comments.is_empty() && lang.keywords.is_empty() {
-        return 0;
+    if candidates.is_empty() {
+        candidates = linguist::detect_language_by_extension(filename)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
     }
-    let mut score: i32 = 0;
-    for comment in lang.line_comments {
-        if content.contains(comment) {
-            score = score.saturating_add(COMMENT_MATCH_SCORE);
+
+    // Linguist is case-sensitive on extensions (`.RS` ≠ `.rs`), but source
+    // trees routinely ship uppercase extensions (old Windows repos, macros,
+    // etc). Retry with a lowercased filename so codestats' case-insensitive
+    // behavior is preserved.
+    if candidates.is_empty() {
+        let lc = filename.to_ascii_lowercase();
+        if lc != filename {
+            candidates = linguist::detect_language_by_extension(&lc)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|d| d.name)
+                .collect();
         }
     }
-    for comment_pair in lang.block_comments {
-        if content.contains(comment_pair.0) && content.contains(comment_pair.1) {
-            score = score.saturating_add(COMMENT_MATCH_SCORE);
-        }
-    }
-    let mut matched_chars: usize = 0;
-    for keyword in lang.keywords {
-        let count = if keyword
-            .chars()
-            .any(|c| !c.is_ascii_alphanumeric() && c != '_')
-        {
-            let occurrences = content.matches(keyword).count();
-            matched_chars = matched_chars.saturating_add(occurrences.saturating_mul(keyword.len()));
-            occurrences
-        } else {
-            tokens
-                .iter()
-                .filter(|token| token.eq_ignore_ascii_case(keyword))
-                .count()
-        };
-        let clamped_count =
-            count.min(usize::try_from(i32::MAX / KEYWORD_MATCH_SCORE).unwrap_or(usize::MAX));
-        let count_i32 = clamped_count as i32;
-        score = score.saturating_add(count_i32.saturating_mul(KEYWORD_MATCH_SCORE));
-    }
-    if is_symbol_only_language(lang) && !tokens.is_empty() {
-        let non_whitespace = content.chars().filter(|c| !c.is_whitespace()).count();
-        if non_whitespace > 0 {
-            let matched_chars_u128 = matched_chars as u128;
-            let non_whitespace_u128 = non_whitespace as u128;
-            if matched_chars_u128.saturating_mul(2) < non_whitespace_u128 {
-                return 0;
+
+    let resolved: &'static str = match candidates.len() {
+        // No glob/filename match: fall back to codestats' shebang detection
+        // for extensionless scripts (`script` with `#!/usr/bin/env python`).
+        // Linguist has no shebang-only API.
+        0 => return content.and_then(detect_from_shebang),
+        1 => candidates[0],
+        _ => match content {
+            Some(c) => {
+                // Prefer shebang when ambiguous extensions ship a hashbang
+                // (`foo.pl` vs `#!/usr/bin/env perl`). If the shebang maps
+                // to one of the candidates, honor it; otherwise try
+                // Linguist's heuristic rules; otherwise refuse to guess —
+                // content was provided and nothing matched, so guessing here
+                // would be worse than admitting defeat.
+                if let Some(lang) = detect_from_shebang(c)
+                    && candidates.contains(&lang.name)
+                {
+                    return Some(lang);
+                }
+                let disamb = linguist::disambiguate(filename, c).unwrap_or_default();
+                match disamb.first() {
+                    Some(d) => d.name,
+                    None => return None,
+                }
             }
-        }
+            None => {
+                // No content means heuristic rules can't fire. Still try
+                // `disambiguate(filename, "")` — a handful of rules resolve
+                // without reading bytes (e.g. `.h` → C by default). If
+                // nothing matches, degrade to the first candidate that has a
+                // codestats counterpart; Linguist-only languages (e.g.
+                // RenderScript for `.rs`) get skipped in favor of the one
+                // codestats can actually line-count.
+                let disamb = linguist::disambiguate(filename, "").unwrap_or_default();
+                if let Some(d) = disamb.first() {
+                    d.name
+                } else {
+                    return candidates.iter().find_map(|n| map_to_codestats(n));
+                }
+            }
+        },
+    };
+
+    map_to_codestats(resolved)
+}
+
+/// Map a Linguist language name to the corresponding codestats [`Language`]
+/// entry. Direct name match first; small alias table handles the handful of
+/// names that differ between the two datasets. Returns `None` if Linguist
+/// detects a language codestats doesn't know (rare — accepted regression).
+fn map_to_codestats(linguist_name: &str) -> Option<&'static Language> {
+    if let Some(lang) = LANGUAGES.iter().find(|l| l.name == linguist_name) {
+        return Some(lang);
     }
-    score
-}
-
-fn is_symbol_only_language(lang: &Language) -> bool {
-    !lang.keywords.is_empty()
-        && lang
-            .keywords
-            .iter()
-            .all(|kw| kw.chars().all(|c| !c.is_ascii_alphanumeric() && c != '_'))
-        && lang.line_comments.is_empty()
-        && lang.block_comments.is_empty()
-}
-
-#[inline]
-fn disambiguate<'a>(candidates: &[&'a Language], content: &str) -> Option<&'a Language> {
-    let tokens: Vec<_> = tokenize(content).collect();
-    candidates
-        .iter()
-        .map(|lang| (*lang, score_language(lang, content, &tokens)))
-        .max_by_key(|(_, score)| *score)
-        .filter(|(_, score)| *score > 0)
-        .map(|(lang, _)| lang)
-}
-
-#[inline]
-fn tokenize(content: &str) -> impl Iterator<Item = &str> {
-    content
-        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-        .filter(|token| !token.is_empty())
+    let alias = match linguist_name {
+        "Shell" => "Bash",
+        "TSX" => "TypeScript",
+        "JSX" => "JavaScript",
+        "Vim Script" => "Vim",
+        "Cython" => "Python",
+        "HTML+ERB" => "HTML",
+        "JavaScript+ERB" => "JavaScript",
+        "TypeScript+ERB" => "TypeScript",
+        "Ruby+ERB" => "Ruby",
+        _ => return None,
+    };
+    LANGUAGES.iter().find(|l| l.name == alias)
 }
 
 #[inline]
@@ -109,21 +137,6 @@ fn detect_from_shebang(content: &str) -> Option<&'static Language> {
     })
 }
 
-/// Detect the language for a given filename. If content is provided, it will
-/// be used for shebang sniffing and to disambiguate when multiple languages
-/// share the filename pattern (e.g. `*.m` = Objective-C or MATLAB).
-#[must_use]
-pub fn detect_language_info(filename: &str, content: Option<&str>) -> Option<&'static Language> {
-    let candidates = get_candidates(filename);
-    match candidates.len() {
-        0 => content.and_then(detect_from_shebang),
-        1 => Some(candidates[0]),
-        _ => content.and_then(|file_content| {
-            detect_from_shebang(file_content).or_else(|| disambiguate(&candidates, file_content))
-        }),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,27 +149,25 @@ mod tests {
 
     #[test]
     fn literal_filename_match() {
-        // Makefile is matched by literal name, not extension.
         let mk = detect_language_info("Makefile", None).expect("Makefile should be detected");
         assert_eq!(mk.name, "Makefile");
     }
 
     #[test]
     fn case_insensitive_extension() {
-        let rust = detect_language_info("LIB.RS", None).expect("case-insensitive glob");
+        let rust = detect_language_info("LIB.RS", None).expect("case-insensitive extension");
         assert_eq!(rust.name, "Rust");
     }
 
     #[test]
     fn ambiguous_m_file_picks_objc_over_matlab() {
         let content = "@interface Foo : NSObject\n@end\n";
-        let lang = detect_language_info("example.m", Some(content)).expect("keywords win");
+        let lang = detect_language_info("example.m", Some(content)).expect("heuristic wins");
         assert_eq!(lang.name, "Objective-C");
     }
 
     #[test]
     fn ambiguous_m_file_without_signal_returns_none() {
-        // No keywords or comments hint at either candidate.
         let lang = detect_language_info("example.m", Some("just plain words"));
         assert!(
             lang.is_none(),
@@ -186,20 +197,14 @@ mod tests {
 
     #[test]
     fn no_content_still_resolves_single_candidate() {
-        // Clear-cut extension — no content needed.
         let go = detect_language_info("main.go", None).expect("go detected by glob alone");
         assert_eq!(go.name, "Go");
     }
 
     #[test]
-    fn tokenize_splits_on_non_alnum_underscore() {
-        let tokens: Vec<&str> = tokenize("hello_world foo-bar __init__").collect();
-        assert_eq!(tokens, vec!["hello_world", "foo", "bar", "__init__"]);
-    }
-
-    #[test]
-    fn tokenize_empty_input() {
-        let tokens: Vec<&str> = tokenize("").collect();
-        assert!(tokens.is_empty());
+    fn shell_alias_maps_to_bash() {
+        // Linguist calls it "Shell"; codestats calls it "Bash".
+        let sh = detect_language_info("script.sh", None).expect("shell → bash alias");
+        assert_eq!(sh.name, "Bash");
     }
 }

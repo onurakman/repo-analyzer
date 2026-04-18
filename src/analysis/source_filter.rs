@@ -8,7 +8,10 @@
 //! Classification rules (conservative: "unknown = not code"):
 //! 1. Paths ending in `.lock` are always data.
 //! 2. Explicit non-source filenames (lockfiles, CI state, docs) are rejected.
-//! 3. Otherwise, detect the language via [`crate::langs::detect_language_info`].
+//! 3. Paths matching GitHub Linguist's `vendor.yml` patterns (node_modules/,
+//!    vendor/, bower_components/, `*.min.js`, generated protobuf, fixtures, …)
+//!    are rejected via [`linguist::is_vendored`].
+//! 4. Otherwise, detect the language via [`crate::langs::detect_language_info`].
 //!    If the language name is in [`NON_CODE_LANGUAGES`], it's not source code.
 //!    If no language is detected, treat it as not source code.
 
@@ -110,6 +113,14 @@ pub fn is_source_file(path: &str) -> bool {
         return false;
     }
 
+    // Linguist's curated vendor.yml — catches `node_modules/`, `vendor/`,
+    // `bower_components/`, minified bundles (`*.min.js`), generated protobuf,
+    // test fixtures, etc. Failure-open: treat a regex error as "not vendored"
+    // so a broken upstream pattern never blocks legitimate source files.
+    if linguist::is_vendored(path).unwrap_or(false) {
+        return false;
+    }
+
     match detect_language_info(path, None) {
         Some(lang) => !NON_CODE_LANGUAGES.contains(&lang.name),
         None => false,
@@ -185,5 +196,17 @@ mod tests {
     fn case_insensitive_filename_match() {
         assert!(!is_source_file("license"));
         assert!(!is_source_file("LICENSE.TXT".to_lowercase().as_str()));
+    }
+
+    #[test]
+    fn vendored_paths_dropped_by_linguist() {
+        // Patterns that weren't in our hardcoded list but Linguist's
+        // vendor.yml covers. Regression guard: if the linguist crate's
+        // vendor patterns change in a way that stops catching these, the
+        // signal for code-focused metrics regresses silently.
+        assert!(!is_source_file("node_modules/react/index.js"));
+        assert!(!is_source_file("vendor/bundle/gems/rails.rb"));
+        assert!(!is_source_file("bower_components/jquery/jquery.js"));
+        assert!(!is_source_file("web/dist/app.min.js"));
     }
 }

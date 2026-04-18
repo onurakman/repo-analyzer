@@ -7,6 +7,7 @@ pub mod metrics;
 pub mod output;
 pub mod parser;
 pub mod pipeline;
+pub mod quick_composition;
 pub mod scoring;
 pub mod store;
 pub mod types;

@@ -9,6 +9,7 @@ mod metrics;
 mod output;
 mod parser;
 mod pipeline;
+mod quick_composition;
 mod scoring;
 mod store;
 mod types;
@@ -18,6 +19,12 @@ use types::{OutputConfig, OutputFormat};
 
 fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
+
+    // Fast path: filesystem-only language composition. Skips the whole
+    // git-history pipeline; prints a flat JSON array and exits.
+    if cli.quick_composition {
+        return run_quick_composition(&cli);
+    }
 
     let time_range = cli.parse_time_range()?;
     let report_kinds = cli.parse_report_kinds()?;
@@ -79,5 +86,25 @@ fn main() -> anyhow::Result<()> {
 
     writer.write(&results, &output_config)?;
 
+    Ok(())
+}
+
+fn run_quick_composition(cli: &cli::Cli) -> anyhow::Result<()> {
+    let repo_path = std::path::Path::new(&cli.path);
+    if !repo_path.is_dir() {
+        anyhow::bail!("'{}' is not a directory", cli.path);
+    }
+
+    let shares = quick_composition::repo_composition(repo_path);
+    let truncated: Vec<&quick_composition::LanguageShare> = match cli.top {
+        Some(n) => shares.iter().take(n).collect(),
+        None => shares.iter().collect(),
+    };
+    let json = serde_json::to_string_pretty(&truncated)?;
+
+    match &cli.output {
+        Some(path) => std::fs::write(path, json)?,
+        None => println!("{json}"),
+    }
     Ok(())
 }

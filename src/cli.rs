@@ -68,6 +68,12 @@ pub struct Cli {
     /// (interactive) or abort (`--quiet`). Pair with `--quiet` in CI.
     #[arg(short = 'u', long)]
     pub unshallow: bool,
+
+    /// Fast filesystem-only language composition. Skips git entirely and
+    /// prints `[{"language", "percentage", ...}, ...]` JSON to stdout (or
+    /// `--output` file). All other report flags are ignored when this is set.
+    #[arg(long)]
+    pub quick_composition: bool,
 }
 
 impl Cli {
@@ -211,6 +217,7 @@ mod tests {
             batch_size: 64,
             object_cache_mb: 4,
             unshallow: false,
+            quick_composition: false,
         };
         let kinds = cli.parse_report_kinds().unwrap();
         assert_eq!(kinds, vec![ReportKind::Hotspots]);
@@ -233,6 +240,7 @@ mod tests {
             batch_size: 64,
             object_cache_mb: 4,
             unshallow: false,
+            quick_composition: false,
         };
         let kinds = cli.parse_report_kinds().unwrap();
         assert_eq!(

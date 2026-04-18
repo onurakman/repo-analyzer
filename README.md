@@ -49,6 +49,7 @@ repo-analyzer [OPTIONS] [PATH]
 | | | `--channel-capacity` | `4` | Bounded-channel slots between producer, workers, and SQLite writer. Lower (1–2) to tighten RAM on small pods; raise (8–32) on fast disks. |
 | | | `--batch-size` | `64` | Max parsed changes per batch flushed to the store. Smaller cuts in-flight memory on huge merge commits; larger amortizes SQLite transaction overhead. |
 | | | `--object-cache-mb` | `4` | Per-thread `gix` object cache size in MiB. Drop to `1` on tight pods; raise for very repo-heavy runs. |
+| | | `--quick-composition` | `false` | Fast filesystem-only language breakdown. Skips git entirely and prints a flat `[{"language","percentage",...}]` JSON array. All other report flags are ignored. |
 
 Duration suffixes: `d` (days), `w` (weeks), `m` (months, ~30 days), `y` (years, ~365 days).
 
@@ -80,7 +81,32 @@ repo-analyzer . -qu -f json -o report.json
 
 # Tight memory pod: smaller batch + smaller gix cache
 repo-analyzer . --batch-size 16 --object-cache-mb 1 --channel-capacity 2
+
+# Fast language composition (no git, pure filesystem walk, ~tens of ms)
+repo-analyzer . --quick-composition
+repo-analyzer /path/to/repo --quick-composition --top 5 -o comp.json
 ```
+
+### Quick composition (no git)
+
+`--quick-composition` is a shortcut for the common "what is this repo written in?" question. It bypasses the whole commit-history pipeline and walks the working tree directly, classifying each file with the same 460-language knowledge base used by the `composition` report. Typical runs finish in tens of milliseconds even on multi-thousand-file repos.
+
+Output is a flat JSON array, sorted descending by share of real code lines:
+
+```json
+[
+  { "language": "Rust",  "percentage": 76.02, "code_lines": 12795, "files": 72 },
+  { "language": "JSON5", "percentage": 15.61, "code_lines": 2627,  "files": 1  }
+]
+```
+
+Notes:
+
+- Skips `.git`, `node_modules`, `target`, `dist`, `build`, `venv`, `__pycache__`, `vendor`, and common IDE dirs.
+- Skips lockfiles (`package-lock.json`, `yarn.lock`, `Cargo.lock`, `go.sum`, …), manifests (`package.json`, `pom.xml`, `requirements.txt`, …), docs (`README`, `LICENSE`, `CHANGELOG`), and pure data/markup dialects (JSON, JSON5, YAML, TOML, XML, Markdown, INI, …) — same code-only filter the history-based metrics use.
+- Skips binaries (NUL-byte heuristic), empty files, and files above 2 MiB (usually minified/generated).
+- Percentages are computed from **code** lines — comments and blanks are excluded — and rounded to 2 decimals.
+- `--top` and `--output` are honored; other report flags (`--since`, `--from`/`--to`, `--only`, `--format`) are ignored.
 
 ## Reports
 
@@ -151,9 +177,15 @@ Files with unrecognized extensions are still tracked at the file level; they jus
 
 Cyclomatic complexity (`complexity` report) is available for: Rust, TypeScript, JavaScript, Python, Java, Go, Kotlin, Dart.
 
-The `composition` report uses a separate **460+ language** knowledge base (ported from [codestats](https://github.com/trypsynth/codestats), MIT) for language detection and accurate code / comment / blank line classification — the detection isn't limited to the list above.
+Language detection is delegated to [drshade/linguist](https://github.com/drshade/linguist) (GitHub Linguist data, MIT), so the `composition` / `quick-composition` / `debt_markers` / `large_sources` reports are not limited to the list above. Line classification (real code vs comment vs blank, nested block comments, shebangs) still uses the codestats-derived knowledge base ([trypsynth/codestats](https://github.com/trypsynth/codestats), MIT) — 460+ languages with their comment markers.
 
-Lock files (`Cargo.lock`, `package-lock.json`, `yarn.lock`, `bun.lock`, `uv.lock`, `pnpm-lock.yaml`, etc.) are automatically excluded from analysis.
+Code-focused reports (coupling, module coupling, outliers, silos, hotspots, …) route every file through a shared source filter that excludes:
+
+- Lock files (`Cargo.lock`, `package-lock.json`, `yarn.lock`, `bun.lock`, `uv.lock`, `pnpm-lock.yaml`, `go.sum`, …) and manifests (`package.json`, `pom.xml`, `requirements.txt`, …).
+- Docs (`README`, `LICENSE`, `CHANGELOG`) and markup / data dialects (JSON, YAML, TOML, XML, Markdown, INI, …).
+- Vendored / generated paths via Linguist's curated `vendor.yml`: `node_modules/`, `vendor/`, `bower_components/`, `*.min.js`, generated protobuf, test fixtures, Gradle/Cocoapods caches, and hundreds more patterns.
+
+This keeps architectural signals from being drowned out by bundled dependencies and generated output.
 
 ## Development
 

@@ -22,8 +22,9 @@ Git Walker -> Diff Extractor -> Tree-sitter Parser -> ChangeStore (SQLite)
 
 Auxiliary subsystems:
 
-- **`src/langs/`** + **`src/analysis/line_classifier.rs`** -- 460+ language detection and code/comment/blank line classification. Ported from [codestats](https://github.com/trypsynth/codestats) (MIT). Data lives in `languages.json5`; `build.rs` codegens a static `LANGUAGES` table at build time.
-- **`src/analysis/source_filter.rs`** -- Classifies paths as real source vs. non-code (lockfiles, generated bundles, docs, vendored assets). Most metrics (coupling, module coupling, outliers, silos, etc.) gate their work through `is_source_file()` so noise doesn't drown out real signals.
+- **`src/langs/`** + **`src/analysis/line_classifier.rs`** -- **Hybrid language pipeline.** Detection (`detect_language_info`) is delegated to [`linguist`](https://crates.io/crates/linguist) (GitHub Linguist YAML data, MIT): filename match → extension match → case-insensitive retry → `disambiguate()` content heuristics → shebang fallback. The detected name is mapped back to a codestats entry (460+ langs, `languages.json5` + `build.rs` codegen, ported from [trypsynth/codestats](https://github.com/trypsynth/codestats), MIT) so line classification (real code vs comment vs blank, nested block comments, shebang lines) keeps its full coverage. Known name mismatches between datasets live in a small alias table inside `src/langs/detection.rs` (e.g. `Shell→Bash`, `TSX→TypeScript`); extend it there when adding a language that Linguist and codestats spell differently.
+- **`src/analysis/source_filter.rs`** -- Classifies paths as real source vs. non-code (lockfiles, generated bundles, docs, vendored assets). Layered filter: (1) `*.lock` suffix, (2) hardcoded `NON_CODE_FILENAMES`, (3) `linguist::is_vendored()` (Linguist's `vendor.yml` — `node_modules/`, `vendor/`, `bower_components/`, `*.min.js`, generated protobuf, fixtures, …), (4) detected language in `NON_CODE_LANGUAGES`. Most metrics (coupling, module coupling, outliers, silos, etc.) gate their work through `is_source_file()` so noise doesn't drown out real signals.
+- **`src/quick_composition.rs`** -- Standalone filesystem-only language-share function (`repo_composition(&Path) -> Vec<LanguageShare>`). Bypasses the git-history pipeline entirely; wired to the CLI via `--quick-composition`. Uses `is_source_file` + `count_lines` with parallel classification via rayon.
 - **`src/interner.rs`** -- `DashSet<Arc<str>>` based string interner. Used for file paths and author emails that repeat heavily across commits. Must remain lock-free in the hot path.
 
 The pipeline is orchestrated by `src/pipeline/engine.rs`. Rayon is used for commit-parallel diff extraction; two bounded channels (`--channel-capacity`) feed producer → workers → SQLite writer so memory stays flat regardless of history length. Batch size and per-thread gix object cache size are also CLI-tunable (`--batch-size`, `--object-cache-mb`) for memory-constrained environments.
@@ -47,7 +48,7 @@ Do not consider any task complete until clippy passes with zero warnings. This a
 - **Error handling:**
   - `thiserror` for domain-specific error types inside modules.
   - `anyhow` in `main.rs` and at pipeline boundaries.
-- **Dependencies:** Justify new crate additions. Prefer the existing stack (serde, clap, comfy-table, indicatif, crossbeam, rayon, dashmap, rusqlite, aho-corasick, memchr, globset).
+- **Dependencies:** Justify new crate additions. Prefer the existing stack (serde, clap, comfy-table, indicatif, crossbeam, rayon, dashmap, rusqlite, aho-corasick, memchr, linguist).
 
 ## Naming Conventions
 
@@ -106,7 +107,7 @@ Language module files use the pattern `<language>.rs` (e.g., `rust_lang.rs`, `go
 5. To also support cyclomatic complexity for the language, add a `LangSpec` (function-kinds + decision-kinds) in `src/metrics/complexity.rs` and wire it into `SUPPORTED` and the `spec_for_path` extension map.
 6. Add tests for construct extraction in the language module.
 
-**Note:** The `composition` report does *not* need changes here — it uses the `languages.json5` knowledge base for 460+ languages independently of tree-sitter grammars.
+**Note:** The `composition` / `quick-composition` reports do *not* need changes here — language detection goes through Linguist (covers languages the tree-sitter registry doesn't parse) and line classification uses the codestats 460-language table independently of tree-sitter grammars.
 
 ## Adding a New Output Format
 
@@ -170,7 +171,7 @@ cargo test --test '*'   # Integration tests only
 ## Pipeline Rules
 
 - **Lock file exclusion:** The pipeline automatically skips known lock files (`Cargo.lock`, `package-lock.json`, `yarn.lock`, `bun.lock`, `uv.lock`, `pnpm-lock.yaml`, etc.). New lock files are added to `LOCK_FILE_NAMES` in `src/pipeline/engine.rs`.
-- **Source-only signal:** Most collectors gate per-file work through `analysis::source_filter::is_source_file()`. Non-code paths (docs, assets, generated bundles) are excluded so architectural signals like coupling aren't diluted. New rules go in `src/analysis/source_filter.rs`.
+- **Source-only signal:** Most collectors gate per-file work through `analysis::source_filter::is_source_file()`. Non-code paths (docs, assets, generated bundles, `node_modules/`, vendored libs, minified bundles) are excluded so architectural signals like coupling aren't diluted — the filter layers a hardcoded list, Linguist's `vendor.yml` via `linguist::is_vendored`, and language-class checks. New rules go in `src/analysis/source_filter.rs`.
 - **Author grouping:** Authors are grouped by **email**, not by name. This handles name variations across commits.
 - **Signed values:** Use `MetricValue::SignedCount(i64)` for values that can be negative (e.g., `net_change`). Never cast a signed value to `MetricValue::Count(u64)`.
 - **Default impls:** Every collector struct with a `pub fn new()` must also have a `Default` impl.
