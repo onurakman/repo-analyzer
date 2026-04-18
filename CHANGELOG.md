@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.9](https://github.com/onurakman/repo-analyzer/compare/v0.1.8...v0.1.9) (2026-04-18)
+
+
+### Features
+
+* Replace globset-based language detection with linguist for improved accuracy ([00df498](https://github.com/onurakman/repo-analyzer/commit/00df498e077990681cabcd96ef757aca4bddc93b))
+
 ## [0.1.8](https://github.com/onurakman/repo-analyzer/compare/v0.1.7...v0.1.8) (2026-04-18)
 
 
