@@ -1,8 +1,10 @@
 use clap::Parser;
 
+mod analysis;
 mod cli;
 mod git;
 mod interner;
+mod langs;
 mod metrics;
 mod output;
 mod parser;

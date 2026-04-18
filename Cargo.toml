@@ -9,7 +9,7 @@ description = "Git repository analysis tool with code-construct-level granularit
 gix = { version = "0.81", features = ["blocking-network-client", "blob-diff", "blame"] }
 
 # Parsing
-tree-sitter = "0.25"
+tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 tree-sitter-typescript = "0.23"
 tree-sitter-python = "0.25"
@@ -25,6 +25,8 @@ tree-sitter-css = "0.25"
 tree-sitter-bash = "0.25"
 tree-sitter-scala = "0.25"
 tree-sitter-swift = "0.7"
+tree-sitter-javascript = "0.25"
+tree-sitter-dart = "0.1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -36,7 +38,7 @@ csv = "1"
 
 # Output
 comfy-table = "7"
-indicatif = "0.17"
+indicatif = "0.18"
 
 # Pipeline
 crossbeam-channel = "0.5"
@@ -52,7 +54,17 @@ regex = "1.12.3"
 
 # Disk-backed change store — spills collector aggregation state to a temp
 # SQLite database so memory stays bounded on huge repos.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
+
+# Language detection / line classification (see `src/langs`, `src/analysis`).
+aho-corasick = "1.1"
+globset = "0.4"
+memchr = "2.8"
+
+[build-dependencies]
+indexmap = { version = "2", features = ["serde"] }
+json5 = "1"
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"

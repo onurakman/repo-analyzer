@@ -11,10 +11,10 @@ use crate::metrics::MetricCollector;
 use crate::metrics::age::AgeCollector;
 use crate::metrics::authors::AuthorsCollector;
 use crate::metrics::bloat::BloatCollector;
-use crate::metrics::branches::BranchesCollector;
 use crate::metrics::churn::ChurnCollector;
 use crate::metrics::churn_pareto::ChurnParetoCollector;
 use crate::metrics::complexity::ComplexityCollector;
+use crate::metrics::composition::CompositionCollector;
 use crate::metrics::construct_churn::ConstructChurnCollector;
 use crate::metrics::construct_ownership::ConstructOwnershipCollector;
 use crate::metrics::coupling::CouplingCollector;
@@ -121,7 +121,7 @@ impl Pipeline {
                     .template("{spinner:.green} {msg}")
                     .unwrap(),
             );
-            sp.set_message("Counting commits...");
+            sp.set_message("[1/5] Counting commits...");
             sp
         };
 
@@ -155,11 +155,13 @@ impl Pipeline {
             bar.set_style(
                 ProgressStyle::default_bar()
                     .template(
-                        "{pos}/{len} ({percent:>3}%) commits [{bar:40.cyan/blue}] {elapsed_precise} ETA {eta} {msg}",
+                        "{spinner:.green} {pos}/{len} ({percent:>3}%) commits [{bar:40.cyan/blue}] {elapsed_precise} ETA {eta} {msg}",
                     )
                     .unwrap()
                     .progress_chars("=> "),
             );
+            bar.set_message("[2/5] walking commits");
+            bar.enable_steady_tick(std::time::Duration::from_millis(120));
             bar
         });
 
@@ -263,6 +265,19 @@ impl Pipeline {
         // Close the channel by dropping the original sender (workers dropped their clones).
         drop(changes_tx);
 
+        // Commit walking is done. Swap to a spinner *before* we wait on the
+        // writer/producer threads so the bar doesn't sit at 100% looking
+        // finished while writer drain + index build are still running.
+        if !self.config.quiet {
+            pb.set_style(
+                ProgressStyle::default_spinner()
+                    .template("{spinner:.green} [{elapsed_precise}] {msg}")
+                    .unwrap(),
+            );
+            pb.enable_steady_tick(std::time::Duration::from_millis(120));
+            pb.set_message("[2/5] draining writer...");
+        }
+
         producer_handle
             .join()
             .map_err(|_| anyhow::anyhow!("commit producer thread panicked"))??;
@@ -272,29 +287,33 @@ impl Pipeline {
             .map_err(|_| anyhow::anyhow!("store writer thread panicked"))??;
 
         // All changes are now in the DB. Build indexes for the query phase.
-        if !self.config.quiet {
-            pb.println("Indexing change store...");
-        }
+        pb.set_message("[3/5] Indexing change store...");
         store.finalize_indexes()?;
 
-        // 8. Repo-level inspection (branches, bloat, complexity, …) — runs after commit walk.
-        // Progress is printed per collector so users can see which phase is active when
-        // memory or time balloons (these phases can be much heavier than commit walking).
+        // 8. Repo-level inspection (bloat, complexity, …) — runs after commit walk.
+        // A single-line status shows which phase is active when memory or
+        // time balloons (these phases can be much heavier than commit walking).
         let progress_bar_for_reporter = if self.config.quiet {
             None
         } else {
             Some(pb.as_ref().clone())
         };
         let reporter = crate::metrics::ProgressReporter::new(progress_bar_for_reporter);
+        let total_collectors = collectors.len();
         {
             let repo = thread_safe_repo.to_thread_local();
-            for collector in collectors.iter_mut() {
-                if !self.config.quiet {
-                    pb.println(format!("Inspecting repo: {}...", collector.name()));
-                }
+            for (idx, collector) in collectors.iter_mut().enumerate() {
+                pb.set_message(format!(
+                    "[4/5] Inspecting ({}/{}) {}...",
+                    idx + 1,
+                    total_collectors,
+                    collector.name()
+                ));
                 if let Err(e) = collector.inspect_repo(&repo, &reporter)
                     && !self.config.quiet
                 {
+                    // Warnings stay in the scrollback — one-off info the
+                    // user still needs to see after the bar is gone.
                     pb.println(format!(
                         "Warning: {} inspect_repo failed: {}",
                         collector.name(),
@@ -304,28 +323,33 @@ impl Pipeline {
             }
         }
 
-        pb.finish_with_message(format!(
-            "Analyzed {} commits in {}",
-            total,
-            HumanDuration(start.elapsed())
-        ));
-
         // 9. Finalize all collectors. Collectors that aggregate per-change data
         //    override `finalize_from_db` and query the change store; the rest
-        //    still compute in-memory in `finalize()`. A line is printed before
-        //    each collector runs so it's obvious which phase is executing
-        //    when a long-running or memory-hungry query is in flight.
+        //    still compute in-memory in `finalize()`.
         let mut results: Vec<MetricResult> = collectors
             .iter_mut()
-            .map(|c| {
-                if !self.config.quiet {
-                    pb.println(format!("Computing {}...", c.name()));
-                }
+            .enumerate()
+            .map(|(idx, c)| {
+                pb.set_message(format!(
+                    "[5/5] Computing ({}/{}) {}...",
+                    idx + 1,
+                    total_collectors,
+                    c.name()
+                ));
                 c.finalize_from_db(&store, &reporter)
                     .unwrap_or_else(|| c.finalize())
             })
             .collect();
         fill_column_labels(&mut results);
+
+        if !self.config.quiet {
+            pb.disable_steady_tick();
+        }
+        pb.finish_with_message(format!(
+            "Analyzed {} commits in {}",
+            total,
+            HumanDuration(start.elapsed())
+        ));
 
         Ok(results)
     }
@@ -343,11 +367,11 @@ impl Pipeline {
                 ReportKind::Coupling => Box::new(CouplingCollector::new()),
                 ReportKind::Patterns => Box::new(PatternsCollector::new()),
                 ReportKind::Age => Box::new(AgeCollector::new()),
-                ReportKind::Branches => Box::new(BranchesCollector::new()),
                 ReportKind::Bloat => Box::new(BloatCollector::new()),
                 ReportKind::Outliers => Box::new(OutliersCollector::new()),
                 ReportKind::Quality => Box::new(QualityCollector::new()),
                 ReportKind::Complexity => Box::new(ComplexityCollector::new()),
+                ReportKind::Composition => Box::new(CompositionCollector::new()),
                 ReportKind::ConstructChurn => Box::new(ConstructChurnCollector::new()),
                 ReportKind::HalfLife => Box::new(HalfLifeCollector::new()),
                 ReportKind::Succession => Box::new(SuccessionCollector::new()),

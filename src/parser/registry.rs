@@ -111,9 +111,11 @@ impl LanguageRegistry {
         use super::languages::cpp;
         use super::languages::csharp;
         use super::languages::css;
+        use super::languages::dart;
         use super::languages::go_lang;
         use super::languages::html_lang;
         use super::languages::java;
+        use super::languages::javascript;
         use super::languages::kotlin;
         use super::languages::php;
         use super::languages::python;
@@ -136,12 +138,22 @@ impl LanguageRegistry {
         );
 
         registry.register(
-            &["ts", "tsx", "js", "jsx"],
+            &["ts", "tsx"],
             LanguageConfig {
                 name: "TypeScript",
                 language: typescript::language(),
                 query: typescript::query(),
                 construct_mapper: typescript::map_constructs,
+            },
+        );
+
+        registry.register(
+            &["js", "jsx", "mjs", "cjs"],
+            LanguageConfig {
+                name: "JavaScript",
+                language: javascript::language(),
+                query: javascript::query(),
+                construct_mapper: javascript::map_constructs,
             },
         );
 
@@ -272,6 +284,16 @@ impl LanguageRegistry {
                 language: swift::language(),
                 query: swift::query(),
                 construct_mapper: swift::map_constructs,
+            },
+        );
+
+        registry.register(
+            &["dart"],
+            LanguageConfig {
+                name: "Dart",
+                language: dart::language(),
+                query: dart::query(),
+                construct_mapper: dart::map_constructs,
             },
         );
 

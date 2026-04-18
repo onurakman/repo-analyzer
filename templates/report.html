@@ -84,8 +84,11 @@
     @apply focus:border-indigo-400 focus:ring-indigo-400/20;
   }
 
-  .bars { @apply flex flex-col gap-1 mb-4; }
-  .bar-row { @apply grid grid-cols-[1fr_auto] gap-3 items-center py-0.5; }
+  /* One grid for all rows (subgrid) so the value column is the same width
+     across every row; otherwise each row's `auto` column sizes to its own
+     content and the bar track (`1fr`) ends up different widths per row. */
+  .bars { @apply grid grid-cols-[1fr_auto] gap-x-3 gap-y-1 mb-4; }
+  .bar-row { @apply col-span-2 grid grid-cols-subgrid items-center py-0.5; }
   .bar-row.extra-row { @apply hidden; }
   .bar-row.extra-row.visible { @apply grid; }
   .bar-track { @apply relative h-6 rounded overflow-hidden flex items-center bg-slate-100; }
@@ -108,9 +111,12 @@
     @apply border-b text-slate-500 bg-white sticky top-0;
   }
   html.dark thead th { @apply border-slate-700 text-slate-500 bg-[#11151c]; }
-  tbody td { @apply px-3 py-2 text-[12.5px] border-b border-slate-100; }
+  /* break-words (overflow-wrap: anywhere) lets long identifiers and file
+     paths wrap consistently across all cells, so rows stay short instead
+     of the first column wrapping while later columns push the row tall. */
+  tbody td { @apply px-3 py-2 text-[12.5px] border-b border-slate-100 break-words; overflow-wrap: anywhere; }
   html.dark tbody td { @apply border-slate-800; }
-  tbody td:first-child { @apply font-mono text-indigo-600 break-all; }
+  tbody td:first-child { @apply font-mono text-indigo-600; }
   html.dark tbody td:first-child { @apply text-indigo-300; }
   tbody tr:hover { @apply bg-slate-50; }
   html.dark tbody tr:hover { @apply bg-slate-800/40; }
@@ -244,11 +250,13 @@
   // Order reports from "most actionable / risk" at the top to plain descriptive
   // stats at the bottom. Readers typically care about problems first.
   const REPORT_ORDER = [
+    // Opening frame: what is the repo made of?
+    'composition',
     // Immediate risk / refactor candidates
     'outliers', 'knowledge_silos', 'succession', 'hotspots',
     'complexity', 'construct_ownership', 'construct_churn',
     // Codebase health / hygiene
-    'bloat', 'quality', 'branches', 'half_life',
+    'bloat', 'quality', 'half_life',
     // Architecture / relationships
     'coupling', 'module_coupling', 'fan_in_out', 'churn_pareto',
     // Plain history / descriptive
@@ -289,7 +297,7 @@
   const ICON_MAP = {
     authors: 'users', hotspots: 'flame', churn: 'activity',
     ownership: 'shield', coupling: 'link', patterns: 'clock',
-    age: 'calendar', branches: 'git-branch', bloat: 'hard-drive',
+    age: 'calendar', bloat: 'hard-drive', composition: 'pie-chart',
     outliers: 'triangle-alert', quality: 'check-circle', complexity: 'git-merge',
     construct_churn: 'code-2', construct_ownership: 'user-check',
     half_life: 'hourglass', succession: 'user-plus', knowledge_silos: 'lock',

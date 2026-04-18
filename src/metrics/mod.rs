@@ -1,10 +1,10 @@
 pub mod age;
 pub mod authors;
 pub mod bloat;
-pub mod branches;
 pub mod churn;
 pub mod churn_pareto;
 pub mod complexity;
+pub mod composition;
 pub mod construct_churn;
 pub mod construct_ownership;
 pub mod coupling;
@@ -38,10 +38,12 @@ impl ProgressReporter {
         Self { bar }
     }
 
-    /// Print one status line above the bar. No-op in quiet mode.
+    /// Update the bar's message in place. No-op in quiet mode. Replaces any
+    /// previous sub-status, so callers should publish a short, self-contained
+    /// phase label ("parsed N files", "pass 2/2"), not a scrolling log.
     pub fn status(&self, msg: &str) {
         if let Some(bar) = &self.bar {
-            bar.println(msg);
+            bar.set_message(msg.to_string());
         }
     }
 }

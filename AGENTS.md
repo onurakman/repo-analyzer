@@ -4,19 +4,26 @@ Coding standards and architectural rules for AI agents working on the `repo-anal
 
 ## Architecture
 
-The application follows a streaming pipeline pattern:
+The application follows a streaming pipeline pattern with a disk-backed aggregation store:
 
 ```
-Git Walker -> Diff Extractor -> Tree-sitter Parser -> Metric Collectors -> Report Writers
+Git Walker -> Diff Extractor -> Tree-sitter Parser -> ChangeStore (SQLite)
+                                                     \
+                                                      -> Metric Collectors -> Report Writers
 ```
 
 1. **Git Walker** (`src/git/walker.rs`) -- Iterates commits in the repository, filtered by time range.
 2. **Diff Extractor** (`src/git/diff.rs`) -- Extracts per-file diff records (added/removed lines) from each commit.
 3. **Language Registry** (`src/parser/registry.rs`) -- Maps file extensions to tree-sitter grammars and parses diffs into `CodeConstruct` values.
-4. **Metric Collectors** (`src/metrics/`) -- Each collector implements `MetricCollector`, receives `ParsedChange` structs one at a time, and produces a `MetricResult` on finalize.
-5. **Report Writers** (`src/output/`) -- Each writer implements `ReportWriter` and serializes `MetricResult` slices to a specific format.
+4. **Change Store** (`src/store.rs`) -- Parsed changes stream into a temp SQLite database via a dedicated writer thread. Keeps peak RAM bounded on huge histories; collectors that aggregate per-change data query the store at finalize time via `finalize_from_db()` instead of buffering in memory.
+5. **Metric Collectors** (`src/metrics/`) -- Each collector implements `MetricCollector`. In-memory collectors receive `ParsedChange` via `process()` and return a `MetricResult` from `finalize()`. DB-backed collectors skip `process()` and run SQL queries in `finalize_from_db()`. Repo-snapshot collectors (`bloat`, `complexity`, `composition`, `branches`) use `inspect_repo()` which walks the HEAD tree after commits are processed.
+6. **Report Writers** (`src/output/`) -- Each writer implements `ReportWriter` and serializes `MetricResult` slices to a specific format.
 
-The pipeline is orchestrated by `src/pipeline/engine.rs`. Rayon is used for thread pool configuration. Collectors are fed sequentially per commit but the design supports future parallelization.
+Auxiliary subsystems:
+
+- **`src/langs/`** + **`src/analysis/line_classifier.rs`** -- 460+ language detection and code/comment/blank line classification. Ported from [codestats](https://github.com/trypsynth/codestats) (MIT). Data lives in `languages.json5`; `build.rs` codegens a static `LANGUAGES` table at build time.
+
+The pipeline is orchestrated by `src/pipeline/engine.rs`. Rayon is used for commit-parallel diff extraction; a bounded channel feeds parsed changes into the SQLite writer thread so memory stays flat regardless of history length.
 
 ## Mandatory Verification
 
@@ -55,22 +62,24 @@ Language module files use the pattern `<language>.rs` (e.g., `rust_lang.rs`, `go
 ## Adding a New Metric
 
 1. Create `src/metrics/<name>.rs` with a struct (e.g., `FooCollector`).
-2. Implement `MetricCollector` for it:
+2. Implement `MetricCollector` for it. Pick the right finalize path:
+   - `process(&mut self, change: &ParsedChange)` + `finalize(&mut self) -> MetricResult` -- for in-memory collectors. Incrementally aggregate; do not store raw changes.
+   - `finalize_from_db(&mut self, store: &ChangeStore, ...) -> Option<MetricResult>` -- for aggregation queries. Skip `process()`. The pipeline uses `finalize_from_db` when it returns `Some`, otherwise falls back to `finalize()`.
+   - `inspect_repo(&mut self, repo: &gix::Repository, ...)` -- for HEAD-tree snapshots (bloat, complexity, composition). Runs once after the commit walk.
    - `name()` -- return a static string matching the report kind.
-   - `process(&mut self, change: &ParsedChange)` -- incrementally aggregate data. Do not store raw changes.
-   - `finalize(&mut self) -> MetricResult` -- return columns and entries.
 3. Add a variant to `ReportKind` in `src/types.rs`.
-4. Update `ReportKind::all()`, `ReportKind::parse()`, and `Display` impl in `src/types.rs`.
+4. Update `ReportKind::all()`, `ReportKind::parse()`, and `Display` impl in `src/types.rs`. `all()` also dictates the output order in the terminal/JSON/CSV writers; place the variant where it should appear.
 5. Update the `--only` help text in `src/cli.rs` to include the new name.
 6. Add a match arm in `Pipeline::create_collectors()` in `src/pipeline/engine.rs`.
 7. Add `pub mod <name>;` to `src/metrics/mod.rs`.
 8. Implement `Default` for the collector (delegates to `new()`).
 9. Sort entries descending by the primary metric in `finalize()`.
-10. Write unit tests in the same file. Write an integration test in `tests/`.
+10. Add the report to `REPORT_ORDER` and pick an icon in `ICON_MAP` in `templates/report.html` (otherwise the HTML output falls back to the generic `file-text` icon and trailing position).
+11. Write unit tests in the same file. Write an integration test in `tests/`.
 
 ## Adding a New Language
 
-1. Add the `tree-sitter-<lang>` crate to `[dependencies]` in `Cargo.toml`.
+1. Add the `tree-sitter-<lang>` crate to `[dependencies]` in `Cargo.toml`. Confirm it compiles against our pinned `tree-sitter` version — some grammars (older `tree-sitter-kotlin`, `tree-sitter-dart` 0.0.x) depend on an older `tree-sitter` and will fail the `links = "tree-sitter"` uniqueness check.
 2. Create `src/parser/languages/<name>.rs` exporting:
    - `pub fn language() -> Language`
    - `pub fn query() -> Query`
@@ -88,7 +97,10 @@ Language module files use the pattern `<language>.rs` (e.g., `rust_lang.rs`, `go
        },
    );
    ```
-5. Add tests for construct extraction in the language module.
+5. To also support cyclomatic complexity for the language, add a `LangSpec` (function-kinds + decision-kinds) in `src/metrics/complexity.rs` and wire it into `SUPPORTED` and the `spec_for_path` extension map.
+6. Add tests for construct extraction in the language module.
+
+**Note:** The `composition` report does *not* need changes here — it uses the `languages.json5` knowledge base for 460+ languages independently of tree-sitter grammars.
 
 ## Adding a New Output Format
 
@@ -145,8 +157,9 @@ cargo test --test '*'   # Integration tests only
 
 - **Streaming processing:** Collectors receive one `ParsedChange` at a time. Do not buffer all changes in memory.
 - **Incremental aggregation:** Collectors maintain running counters/maps, not raw data vectors.
+- **Disk-backed store:** Per-change data is written to a temp SQLite DB via `ChangeStore`. Collectors that need cross-change aggregation implement `finalize_from_db()` and run SQL there — this keeps peak RAM bounded on huge histories. See `src/store.rs`.
 - **Thread pool:** Rayon global thread pool is configured once via `--threads`. Default (`0`) lets Rayon auto-detect.
-- **Progress indication:** Use `indicatif` progress bars. Respect `--quiet` by using `ProgressBar::hidden()`.
+- **Progress indication:** Use `indicatif` progress bars. Respect `--quiet` by using `ProgressBar::hidden()`. Sub-phase status is published via `ProgressReporter::status()` which updates the bar message in place (never scrolls new lines).
 
 ## Pipeline Rules
 
@@ -182,9 +195,11 @@ cargo test --test '*'   # Integration tests only
 
 | Target | What it does | When to use |
 |---|---|---|
-| `make setup` | Installs `rustfmt` + `clippy` | After first clone |
+| `make setup` | Installs `rustfmt` + `clippy` + `cargo-edit` | After first clone |
 | `make pre-commit` | `fmt` + `clippy` + `test` | Before every commit |
 | `make ci` | `fmt-check` + `clippy` + `test` | To mirror GitHub Actions locally |
+| `make upgrade-check` | `cargo upgrade --incompatible --dry-run` (dev-deps excluded) | To preview dep upgrades |
+| `make upgrade` | Apply dep upgrades (dev-deps left untouched) + `cargo update` | When bumping deps |
 
 ## Commit Messages
 

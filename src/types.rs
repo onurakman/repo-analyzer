@@ -365,11 +365,11 @@ pub enum ReportKind {
     Coupling,
     Patterns,
     Age,
-    Branches,
     Bloat,
     Outliers,
     Quality,
     Complexity,
+    Composition,
     ConstructChurn,
     HalfLife,
     Succession,
@@ -398,6 +398,10 @@ impl ReportKind {
     /// All known report kinds.
     pub fn all() -> Vec<ReportKind> {
         vec![
+            // Language composition first — a snapshot of what the repo is
+            // made of is the natural opening frame before any history-driven
+            // metric.
+            Self::Composition,
             Self::Authors,
             Self::Hotspots,
             Self::Churn,
@@ -405,7 +409,6 @@ impl ReportKind {
             Self::Coupling,
             Self::Patterns,
             Self::Age,
-            Self::Branches,
             Self::Bloat,
             Self::Outliers,
             Self::Quality,
@@ -431,11 +434,11 @@ impl ReportKind {
             "coupling" => Some(Self::Coupling),
             "patterns" => Some(Self::Patterns),
             "age" => Some(Self::Age),
-            "branches" => Some(Self::Branches),
             "bloat" => Some(Self::Bloat),
             "outliers" => Some(Self::Outliers),
             "quality" => Some(Self::Quality),
             "complexity" => Some(Self::Complexity),
+            "composition" => Some(Self::Composition),
             "construct_churn" | "construct-churn" => Some(Self::ConstructChurn),
             "half_life" | "half-life" | "halflife" => Some(Self::HalfLife),
             "succession" => Some(Self::Succession),
@@ -459,11 +462,11 @@ impl fmt::Display for ReportKind {
             Self::Coupling => "coupling",
             Self::Patterns => "patterns",
             Self::Age => "age",
-            Self::Branches => "branches",
             Self::Bloat => "bloat",
             Self::Outliers => "outliers",
             Self::Quality => "quality",
             Self::Complexity => "complexity",
+            Self::Composition => "composition",
             Self::ConstructChurn => "construct_churn",
             Self::HalfLife => "half_life",
             Self::Succession => "succession",

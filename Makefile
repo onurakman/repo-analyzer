@@ -1,11 +1,12 @@
-.PHONY: build release test test-unit test-integration lint fmt fmt-check check clean install run help ci setup pre-commit
+.PHONY: build release test test-unit test-integration lint fmt fmt-check check clean install run help ci setup pre-commit upgrade-check upgrade
 
 # Default target
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-setup: ## Install required toolchain components (rustfmt, clippy)
+setup: ## Install required toolchain components (rustfmt, clippy) + cargo-edit for upgrade
 	rustup component add rustfmt clippy
+	cargo install cargo-edit --locked
 
 build: ## Build debug binary
 	cargo build
@@ -56,3 +57,10 @@ run-csv: build ## Run with CSV output
 ci: fmt-check lint test ## Run all CI checks (mirrors GitHub Actions)
 
 pre-commit: fmt lint test ## Format, lint, and test before committing
+
+upgrade-check: ## Show dep upgrades available (incl. major bumps), dev-deps excluded
+	cargo upgrade --incompatible --dry-run --exclude tempfile --exclude assert_cmd --exclude predicates
+
+upgrade: ## Apply dep upgrades (incl. major bumps), dev-deps left untouched
+	cargo upgrade --incompatible --exclude tempfile --exclude assert_cmd --exclude predicates
+	cargo update

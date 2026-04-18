@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use tree_sitter::{Language, Node, Parser};
 
+use crate::analysis::line_classifier::{CommentState, LineType, classify_line};
+use crate::langs::{LANGUAGES, Language as SourceLanguage};
 use crate::metrics::MetricCollector;
 use crate::types::{MetricEntry, MetricResult, MetricValue, ParsedChange};
 
@@ -98,16 +100,80 @@ const GO: LangSpec = LangSpec {
     ],
 };
 
-const SUPPORTED: &[LangSpec] = &[RUST, PYTHON, TYPESCRIPT, JAVA, GO];
+const JAVASCRIPT: LangSpec = LangSpec {
+    name: "JavaScript",
+    language: || tree_sitter_javascript::LANGUAGE.into(),
+    function_kinds: &[
+        "function_declaration",
+        "generator_function_declaration",
+        "method_definition",
+        "arrow_function",
+        "function_expression",
+    ],
+    decision_kinds: &[
+        "if_statement",
+        "while_statement",
+        "do_statement",
+        "for_statement",
+        "for_in_statement",
+        "switch_case",
+        "catch_clause",
+        "ternary_expression",
+    ],
+};
+
+const KOTLIN: LangSpec = LangSpec {
+    name: "Kotlin",
+    language: || tree_sitter_kotlin_ng::LANGUAGE.into(),
+    function_kinds: &[
+        "function_declaration",
+        "anonymous_function",
+        "lambda_literal",
+    ],
+    decision_kinds: &[
+        "if_expression",
+        "when_entry",
+        "while_statement",
+        "do_while_statement",
+        "for_statement",
+        "catch_block",
+    ],
+};
+
+const DART: LangSpec = LangSpec {
+    name: "Dart",
+    language: || tree_sitter_dart::LANGUAGE.into(),
+    function_kinds: &[
+        "function_signature",
+        "method_signature",
+        "function_expression",
+        "lambda_expression",
+    ],
+    decision_kinds: &[
+        "if_statement",
+        "while_statement",
+        "do_statement",
+        "for_statement",
+        "switch_statement_case",
+        "switch_expression_case",
+        "catch_clause",
+        "conditional_expression",
+    ],
+};
+
+const SUPPORTED: &[LangSpec] = &[RUST, PYTHON, TYPESCRIPT, JAVA, GO, JAVASCRIPT, KOTLIN, DART];
 
 fn spec_for_path(path: &str) -> Option<&'static LangSpec> {
     let ext = path.rsplit('.').next()?;
     let name = match ext {
         "rs" => "Rust",
         "py" | "pyi" => "Python",
-        "ts" | "tsx" | "js" | "jsx" => "TypeScript",
+        "ts" | "tsx" => "TypeScript",
+        "js" | "jsx" | "mjs" | "cjs" => "JavaScript",
         "java" => "Java",
         "go" => "Go",
+        "kt" | "kts" => "Kotlin",
+        "dart" => "Dart",
         _ => return None,
     };
     SUPPORTED.iter().find(|s| s.name == name)
@@ -249,7 +315,7 @@ impl MetricCollector for ComplexityCollector {
         MetricResult {
             name: "complexity".into(),
             display_name: "Cyclomatic Complexity".into(),
-            description: "Cyclomatic complexity per function — roughly, how many independent execution paths it has. CC under 5 is simple, 6-10 is OK, 11-20 is hard to test and reason about, 21+ is hard to even read safely. Functions at the top of this list are the best candidates to split into smaller pieces.".into(),
+            description: "Cyclomatic complexity per function — roughly, how many independent execution paths it has. CC under 5 is simple, 6-10 is OK, 11-20 is hard to test and reason about, 21+ is hard to even read safely. Functions at the top of this list are the best candidates to split into smaller pieces. `lines` counts executable code only (blanks and comments excluded) so a docstring-heavy function isn't flagged for length alone.".into(),
             entry_groups: vec![],
             column_labels: vec![],
             columns: vec![
@@ -353,7 +419,38 @@ fn analyze_source(
         return;
     };
     let root = tree.root_node();
-    visit(&root, spec, file_path, source, out);
+    let line_types = classify_file_lines(source, spec.name);
+    visit(&root, spec, file_path, source, &line_types, out);
+}
+
+/// Pre-classify every line of the file so each function metric can count
+/// *code* lines in its span (blanks and comment lines excluded). A single
+/// pass is needed for the whole file because block-comment state spans lines.
+fn classify_file_lines(source: &str, lang_name: &'static str) -> Vec<LineType> {
+    let lang = codestats_lang(lang_name);
+    let mut state = CommentState::new();
+    source
+        .lines()
+        .enumerate()
+        .map(|(idx, line)| classify_line(line, lang, &mut state, idx == 0))
+        .collect()
+}
+
+fn codestats_lang(name: &str) -> Option<&'static SourceLanguage> {
+    LANGUAGES.iter().find(|l| l.name == name)
+}
+
+/// Count code-only lines in the 1-based inclusive range `[start, end]`.
+fn count_code_lines(line_types: &[LineType], start: u32, end: u32) -> u32 {
+    let s = start.saturating_sub(1) as usize;
+    let e = (end as usize).min(line_types.len());
+    if s >= e {
+        return 0;
+    }
+    line_types[s..e]
+        .iter()
+        .filter(|t| matches!(t, LineType::Code))
+        .count() as u32
 }
 
 /// Recursively find function-like nodes and compute their cyclomatic complexity.
@@ -362,6 +459,7 @@ fn visit(
     spec: &'static LangSpec,
     file_path: &str,
     source: &str,
+    line_types: &[LineType],
     out: &mut Vec<FunctionMetric>,
 ) {
     let kind = node.kind();
@@ -374,7 +472,7 @@ fn visit(
             file: file_path.to_string(),
             name,
             start_line: start,
-            line_count: end.saturating_sub(start) + 1,
+            line_count: count_code_lines(line_types, start, end),
             cyclomatic,
             language: spec.name,
         });
@@ -382,7 +480,7 @@ fn visit(
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        visit(&child, spec, file_path, source, out);
+        visit(&child, spec, file_path, source, line_types, out);
     }
 }
 

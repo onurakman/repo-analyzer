@@ -1,6 +1,8 @@
+pub mod analysis;
 pub mod cli;
 pub mod git;
 pub mod interner;
+pub mod langs;
 pub mod metrics;
 pub mod output;
 pub mod parser;
