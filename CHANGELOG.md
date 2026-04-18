@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/onurakman/repo-analyzer/compare/v0.1.5...v0.1.6) (2026-04-18)
+
+
+### Features
+
+* Migrate Linux builds to use Zig and musl for static binaries ([2140374](https://github.com/onurakman/repo-analyzer/commit/21403740d982ac100326b8ebf7dc0c43ca9711cb))
+
 ## [0.1.5](https://github.com/onurakman/repo-analyzer/compare/v0.1.4...v0.1.5) (2026-04-18)
 
 
