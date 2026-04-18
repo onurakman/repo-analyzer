@@ -16,72 +16,114 @@
 <style type="text/tailwindcss">
 @custom-variant dark (&:where(.dark, .dark *));
 
-@theme {
+@theme static {
   --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+
+  /* Etiya brand palette — aligned with the main web app so the report
+     blends into the dashboard instead of looking like a stranger. */
+  --color-etiya: oklch(43.615% 0.09109 281.95);
+  --color-etiya-50:  oklch(0.948 0.008 286.39);
+  --color-etiya-100: oklch(0.898 0.015 286.17);
+  --color-etiya-200: oklch(0.796 0.032 285.67);
+  --color-etiya-300: oklch(0.691 0.05  285.05);
+  --color-etiya-400: oklch(0.59  0.067 284.17);
+  --color-etiya-500: oklch(0.489 0.078 283.15);
+  --color-etiya-600: oklch(0.385 0.074 282.37);
+  --color-etiya-700: oklch(0.276 0.053 282.36);
+  --color-etiya-800: oklch(0.226 0.044 282.29);
+  --color-etiya-900: oklch(0.178 0.035 282.32);
+  --color-etiya-950: oklch(0.153 0.028 282.64);
+
+  --color-brand-orange: #f58220;
+}
+
+/* Accent colour flips between Etiya purple (light) and brand orange (dark)
+   to match the main site. Plain CSS vars so they can toggle at runtime. */
+:root {
+  --color-primary:      var(--color-etiya-600);
+  --color-primary-soft: var(--color-etiya-500);
+  --color-primary-bg:   var(--color-etiya-100);
+}
+.dark {
+  --color-primary:      var(--color-brand-orange);
+  --color-primary-soft: var(--color-brand-orange);
+  --color-primary-bg:   color-mix(in oklab, var(--color-brand-orange) 14%, transparent);
 }
 
 @layer base {
   html { font-feature-settings: "cv11", "ss01"; }
-  body { @apply font-sans text-sm antialiased bg-slate-50 text-slate-900; }
-  html.dark body { @apply bg-[#0b0e14] text-slate-100; }
+  body { @apply font-sans text-sm antialiased bg-etiya-50 text-etiya-700; }
+  html.dark body { @apply bg-etiya-950 text-etiya-200; }
+
+  /* Scrollbars — match the main site. */
+  * { scrollbar-width: thin; scrollbar-color: var(--color-etiya-400) var(--color-etiya-100); }
+  *::-webkit-scrollbar { width: 8px; height: 8px; }
+  *::-webkit-scrollbar-thumb { background-color: var(--color-etiya-400); border-radius: 9999px; }
+  *::-webkit-scrollbar-thumb:hover { background-color: var(--color-etiya-600); }
+  *::-webkit-scrollbar-track { background-color: var(--color-etiya-100); }
+  .dark * { scrollbar-color: var(--color-etiya-500) var(--color-etiya-800); }
+  .dark *::-webkit-scrollbar-thumb { background-color: var(--color-etiya-600); }
+  .dark *::-webkit-scrollbar-thumb:hover { background-color: var(--color-etiya-400); }
+  .dark *::-webkit-scrollbar-track { background-color: var(--color-etiya-800); }
 }
 
 @layer components {
-  .card { @apply rounded-xl border shadow-sm bg-white border-slate-200; }
-  html.dark .card { @apply bg-[#11151c] border-slate-800; }
+  .card { @apply rounded-xl border shadow-sm bg-white border-etiya-100; }
+  html.dark .card { @apply bg-etiya-900 border-etiya-800; }
 
   .stat-card {
     @apply rounded-xl border shadow-sm p-4 flex flex-col gap-1;
-    @apply bg-white border-slate-200;
+    @apply bg-white border-etiya-100;
   }
-  html.dark .stat-card { @apply bg-[#11151c] border-slate-800; }
+  html.dark .stat-card { @apply bg-etiya-900 border-etiya-800; }
 
   .nav-link {
     @apply flex items-center justify-between gap-2 rounded-md px-3 py-2 text-[13px] transition-colors;
-    @apply text-slate-600 hover:bg-slate-100 hover:text-slate-900;
+    @apply text-etiya-600 hover:bg-etiya-100 hover:text-etiya-700;
   }
-  html.dark .nav-link { @apply text-slate-400 hover:bg-slate-800/60 hover:text-slate-100; }
-  .nav-link.active { @apply bg-indigo-50 text-indigo-700; }
-  html.dark .nav-link.active { @apply bg-indigo-500/10 text-indigo-300; }
+  html.dark .nav-link { @apply text-etiya-400 hover:bg-etiya-800/60 hover:text-etiya-100; }
+  .nav-link.active { background: var(--color-primary-bg); color: var(--color-primary); }
   .nav-badge {
-    @apply text-[10px] px-1.5 py-0.5 rounded-full tabular-nums bg-slate-200 text-slate-600;
+    @apply text-[10px] px-1.5 py-0.5 rounded-full tabular-nums bg-etiya-200 text-etiya-600;
   }
-  html.dark .nav-badge { @apply bg-slate-800 text-slate-400; }
+  html.dark .nav-badge { @apply bg-etiya-800 text-etiya-400; }
 
   .report-section {
     @apply rounded-xl border shadow-sm overflow-hidden scroll-mt-4;
-    @apply bg-white border-slate-200;
+    @apply bg-white border-etiya-100;
   }
-  html.dark .report-section { @apply bg-[#11151c] border-slate-800; }
+  html.dark .report-section { @apply bg-etiya-900 border-etiya-800; }
   .section-header {
     @apply flex items-center justify-between gap-3 cursor-pointer select-none px-5 py-4 transition-colors;
   }
-  .section-header:hover { @apply bg-slate-50; }
-  html.dark .section-header:hover { @apply bg-slate-800/40; }
+  .section-header:hover { @apply bg-etiya-50; }
+  html.dark .section-header:hover { @apply bg-etiya-800/40; }
   .section-header h2 { @apply flex items-center gap-2 text-base font-semibold; }
-  .section-header h2 svg { @apply text-indigo-500; }
+  .section-header h2 svg { color: var(--color-primary); }
   .entry-count {
-    @apply text-xs font-normal px-2 py-0.5 rounded-full tabular-nums bg-slate-100 text-slate-600;
+    @apply text-xs font-normal px-2 py-0.5 rounded-full tabular-nums bg-etiya-100 text-etiya-600;
   }
-  html.dark .entry-count { @apply bg-slate-800 text-slate-400; }
-  .toggle-chevron { @apply text-slate-400 transition-transform; }
-  .section-body { @apply px-5 pb-5 border-t border-slate-200; }
-  html.dark .section-body { @apply border-slate-800; }
+  html.dark .entry-count { @apply bg-etiya-800 text-etiya-400; }
+  .toggle-chevron { @apply text-etiya-400 transition-transform; }
+  .section-body { @apply px-5 pb-5 border-t border-etiya-100; }
+  html.dark .section-body { @apply border-etiya-800; }
   .section-body.collapsed { @apply hidden; }
   .section-desc {
-    @apply text-[13px] leading-6 py-3 text-slate-600 border-b border-dashed border-slate-200 mb-4;
+    @apply text-[13px] leading-6 py-3 text-etiya-600 border-b border-dashed border-etiya-100 mb-4;
   }
-  html.dark .section-desc { @apply text-slate-400 border-slate-800; }
+  html.dark .section-desc { @apply text-etiya-400 border-etiya-800; }
 
   .filter-input {
     @apply w-52 rounded-md border px-2.5 py-1.5 text-xs outline-none transition-all;
-    @apply bg-white border-slate-300 text-slate-800;
-    @apply focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20;
+    @apply bg-white border-etiya-200 text-etiya-700;
+  }
+  .filter-input:focus {
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-primary) 20%, transparent);
   }
   html.dark .filter-input {
-    @apply bg-slate-900 border-slate-700 text-slate-100;
-    @apply focus:border-indigo-400 focus:ring-indigo-400/20;
+    @apply bg-etiya-900 border-etiya-700 text-etiya-100;
   }
 
   /* One grid for all rows (subgrid) so the value column is the same width
@@ -91,48 +133,51 @@
   .bar-row { @apply col-span-2 grid grid-cols-subgrid items-center py-0.5; }
   .bar-row.extra-row { @apply hidden; }
   .bar-row.extra-row.visible { @apply grid; }
-  .bar-track { @apply relative h-6 rounded overflow-hidden flex items-center bg-slate-100; }
-  html.dark .bar-track { @apply bg-slate-800/60; }
+  .bar-track { @apply relative h-6 rounded overflow-hidden flex items-center bg-etiya-100; }
+  html.dark .bar-track { @apply bg-etiya-800/60; }
   .bar {
     @apply h-full min-w-[2px] transition-[width] duration-300;
-    background: linear-gradient(90deg, #6366f1 0%, #a855f7 100%);
+    background: linear-gradient(
+      90deg,
+      var(--color-primary) 0%,
+      color-mix(in oklab, var(--color-primary) 55%, var(--color-etiya-200)) 100%
+    );
   }
   .bar-label {
-    @apply absolute left-2 text-[11.5px] whitespace-nowrap overflow-hidden text-ellipsis max-w-[calc(100%-1rem)] z-10 font-mono text-slate-900;
+    @apply absolute left-2 text-[11.5px] whitespace-nowrap overflow-hidden text-ellipsis max-w-[calc(100%-1rem)] z-10 font-mono text-etiya-700;
     text-shadow: 0 0 4px rgba(255, 255, 255, 0.65);
   }
-  html.dark .bar-label { @apply text-slate-100; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6); }
-  .bar-value { @apply font-mono text-[11.5px] tabular-nums text-slate-500; }
-  html.dark .bar-value { @apply text-slate-400; }
+  html.dark .bar-label { @apply text-etiya-100; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6); }
+  .bar-value { @apply font-mono text-[11.5px] tabular-nums text-etiya-500; }
+  html.dark .bar-value { @apply text-etiya-400; }
 
   table { @apply w-full border-collapse tabular-nums; }
   thead th {
     @apply text-left px-3 py-2 text-[10.5px] font-semibold tracking-wider uppercase;
-    @apply border-b text-slate-500 bg-white sticky top-0;
+    @apply border-b text-etiya-500 bg-white sticky top-0 border-etiya-200;
   }
-  html.dark thead th { @apply border-slate-700 text-slate-500 bg-[#11151c]; }
+  html.dark thead th { @apply border-etiya-700 text-etiya-400 bg-etiya-900; }
   /* Health gauge — a circular 0-100 score indicator whose colour is
      interpolated from red to green via HSL (no JS library needed). */
   .health-hero { @apply flex items-center gap-6 mb-4 mt-2; }
   .gauge { @apply relative flex items-center justify-center flex-shrink-0; width: 140px; height: 140px; }
   .gauge svg { transform: rotate(-90deg); }
-  .gauge-track { stroke: rgba(100, 116, 139, 0.2); fill: none; }
+  .gauge-track { stroke: color-mix(in oklab, var(--color-etiya-400) 30%, transparent); fill: none; }
   .gauge-fill { fill: none; transition: stroke-dashoffset 700ms ease-out; stroke-linecap: round; }
   .gauge-label { @apply absolute inset-0 flex items-center justify-center font-mono; }
   .gauge-score { @apply text-5xl font-bold leading-none; }
   .health-text { @apply flex-1; }
-  .health-interp { @apply text-sm text-slate-600; }
-  html.dark .health-interp { @apply text-slate-300; }
+  .health-interp { @apply text-sm text-etiya-600; }
+  html.dark .health-interp { @apply text-etiya-300; }
 
   /* break-words (overflow-wrap: anywhere) lets long identifiers and file
      paths wrap consistently across all cells, so rows stay short instead
      of the first column wrapping while later columns push the row tall. */
-  tbody td { @apply px-3 py-2 text-[12.5px] border-b border-slate-100 break-words; overflow-wrap: anywhere; }
-  html.dark tbody td { @apply border-slate-800; }
-  tbody td:first-child { @apply font-mono text-indigo-600; }
-  html.dark tbody td:first-child { @apply text-indigo-300; }
-  tbody tr:hover { @apply bg-slate-50; }
-  html.dark tbody tr:hover { @apply bg-slate-800/40; }
+  tbody td { @apply px-3 py-2 text-[12.5px] border-b border-etiya-100 break-words; overflow-wrap: anywhere; }
+  html.dark tbody td { @apply border-etiya-800; }
+  tbody td:first-child { @apply font-mono; color: var(--color-primary); }
+  tbody tr:hover { @apply bg-etiya-50; }
+  html.dark tbody tr:hover { @apply bg-etiya-800/40; }
   tbody tr.extra-row { @apply hidden; }
   tbody tr.extra-row.visible { display: table-row; }
   .num { @apply text-right font-mono; }
@@ -147,26 +192,28 @@
 
   .show-more-btn {
     @apply inline-flex items-center gap-1.5 mt-3 rounded-md border px-3 py-1.5 text-[12px] cursor-pointer transition-colors;
-    @apply border-slate-300 text-indigo-600 hover:bg-slate-100;
+    @apply border-etiya-200 hover:bg-etiya-100;
+    color: var(--color-primary);
   }
   html.dark .show-more-btn {
-    @apply border-slate-700 text-indigo-300 hover:bg-slate-800;
+    @apply border-etiya-700 hover:bg-etiya-800;
   }
 
   .group-header {
     @apply flex items-center gap-2 mt-4 mb-2 pt-4 text-sm font-semibold capitalize;
-    @apply text-indigo-600 border-t border-dashed border-slate-200;
+    @apply border-t border-dashed border-etiya-100;
+    color: var(--color-primary);
   }
-  html.dark .group-header { @apply text-indigo-300 border-slate-800; }
+  html.dark .group-header { @apply border-etiya-800; }
   .group-header:first-child { @apply border-t-0 pt-0; }
-  .group-count { @apply text-xs font-normal ml-1.5 text-slate-500; }
-  html.dark .group-count { @apply text-slate-400; }
+  .group-count { @apply text-xs font-normal ml-1.5 text-etiya-500; }
+  html.dark .group-count { @apply text-etiya-400; }
 
   .icon-btn {
     @apply inline-flex items-center justify-center w-8 h-8 rounded-md transition-colors;
-    @apply text-slate-500 hover:bg-slate-200 hover:text-slate-800;
+    @apply text-etiya-500 hover:bg-etiya-200 hover:text-etiya-700;
   }
-  html.dark .icon-btn { @apply text-slate-400 hover:bg-slate-800 hover:text-slate-100; }
+  html.dark .icon-btn { @apply text-etiya-400 hover:bg-etiya-800 hover:text-etiya-100; }
 }
 </style>
 </head>
@@ -181,9 +228,9 @@
 <div class="min-h-screen max-w-[1400px] mx-auto flex gap-6 px-6 py-6 max-lg:flex-col max-lg:px-4 max-lg:py-4">
 
   <!-- Sidebar — sticky card next to the main content -->
-  <aside class="w-64 flex-shrink-0 sticky top-6 self-start max-h-[calc(100vh-3rem)] overflow-y-auto rounded-xl border shadow-sm bg-white border-slate-200 px-3 py-4 max-lg:static max-lg:w-full max-lg:max-h-none dark:bg-[#11151c] dark:border-slate-800">
+  <aside class="w-64 flex-shrink-0 sticky top-6 self-start max-h-[calc(100vh-3rem)] overflow-y-auto rounded-xl border shadow-sm bg-white border-etiya-100 px-3 py-4 max-lg:static max-lg:w-full max-lg:max-h-none dark:bg-etiya-900 dark:border-etiya-800">
     <div class="flex items-center justify-between px-2 mb-1">
-      <h1 class="flex items-center gap-2 text-indigo-600 dark:text-indigo-300 font-semibold text-[15px]">
+      <h1 class="flex items-center gap-2 font-semibold text-[15px]" style="color: var(--color-primary)">
         <i data-lucide="git-branch" class="w-4 h-4"></i> repo-analyzer
       </h1>
       <button id="theme-toggle" class="icon-btn" title="Toggle theme">
@@ -191,14 +238,14 @@
         <i data-lucide="moon" class="w-4 h-4 inline dark:hidden"></i>
       </button>
     </div>
-    <div class="text-[11px] px-2 text-slate-500 mb-5">Generated: <span id="generated-at" data-iso="{{GENERATED_AT}}">{{GENERATED_AT}}</span></div>
+    <div class="text-[11px] px-2 text-etiya-500 mb-5">Generated: <span id="generated-at" data-iso="{{GENERATED_AT}}">{{GENERATED_AT}}</span></div>
     <nav id="toc" class="flex flex-col gap-0.5"></nav>
 
-    <div class="mt-4 pt-3 border-t border-slate-200 dark:border-slate-800 flex gap-1.5 px-1">
-      <button id="expand-all" class="flex-1 inline-flex items-center justify-center gap-1 text-[11px] rounded-md py-1.5 border border-slate-300 text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors">
+    <div class="mt-4 pt-3 border-t border-etiya-100 dark:border-etiya-800 flex gap-1.5 px-1">
+      <button id="expand-all" class="flex-1 inline-flex items-center justify-center gap-1 text-[11px] rounded-md py-1.5 border border-etiya-200 text-etiya-600 hover:bg-etiya-100 dark:border-etiya-700 dark:text-etiya-300 dark:hover:bg-etiya-800 transition-colors">
         <i data-lucide="chevrons-down" class="w-3 h-3"></i> Expand all
       </button>
-      <button id="collapse-all" class="flex-1 inline-flex items-center justify-center gap-1 text-[11px] rounded-md py-1.5 border border-slate-300 text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800 transition-colors">
+      <button id="collapse-all" class="flex-1 inline-flex items-center justify-center gap-1 text-[11px] rounded-md py-1.5 border border-etiya-200 text-etiya-600 hover:bg-etiya-100 dark:border-etiya-700 dark:text-etiya-300 dark:hover:bg-etiya-800 transition-colors">
         <i data-lucide="chevrons-up" class="w-3 h-3"></i> Collapse all
       </button>
     </div>
@@ -210,7 +257,7 @@
     <!-- Hero -->
     <section class="mb-8">
       <h2 class="text-2xl font-semibold tracking-tight mb-1">Repository analysis</h2>
-      <p class="text-slate-500 dark:text-slate-400">Commit-history metrics, refactor candidates, and ownership insights.</p>
+      <p class="text-etiya-500 dark:text-etiya-400">Commit-history metrics, refactor candidates, and ownership insights.</p>
       <div id="stats" class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-5"></div>
     </section>
 
@@ -343,7 +390,7 @@
   function renderEntries(entries, columns, labels) {
     const container = el('div');
     if (!entries || entries.length === 0) {
-      container.append(el('p', { class: 'text-slate-500 italic text-[12px]', text: '(no entries)' }));
+      container.append(el('p', { class: 'text-etiya-500 italic text-[12px]', text: '(no entries)' }));
       return container;
     }
 
@@ -633,20 +680,24 @@
     return n;
   })();
 
-  const statCard = (icon, color, label, value) => {
+  const statCard = (icon, iconStyle, label, value) => {
     const c = el('div', { class: 'stat-card' });
     const header = el('div', { class: 'flex items-center gap-2' });
-    const ic = el('i'); ic.setAttribute('data-lucide', icon); ic.className = 'w-3.5 h-3.5 ' + color;
-    header.append(ic, el('span', { class: 'text-[10.5px] uppercase tracking-wider text-slate-500 dark:text-slate-400', text: label }));
+    const ic = el('i'); ic.setAttribute('data-lucide', icon);
+    ic.className = 'w-3.5 h-3.5';
+    if (iconStyle) ic.setAttribute('style', iconStyle);
+    header.append(ic, el('span', { class: 'text-[10.5px] uppercase tracking-wider text-etiya-500 dark:text-etiya-400', text: label }));
     c.append(header, el('div', { class: 'text-2xl font-semibold tabular-nums mt-0.5', text: String(value) }));
     return c;
   };
   const stats = document.getElementById('stats');
+  const primaryIcon = 'color: var(--color-primary)';
+  const dangerIcon  = 'color: #f43f5e'; // rose-500 stays semantic for risk
   stats.append(
-    statCard('layers', 'text-indigo-500', 'Reports', totalReports),
-    statCard('list', 'text-indigo-500', 'Rows', totalRows.toLocaleString()),
-    statCard('folder-tree', 'text-indigo-500', 'Groups', totalGroups),
-    statCard('triangle-alert', 'text-rose-500', 'Risk flags', riskCount),
+    statCard('layers', primaryIcon, 'Reports', totalReports),
+    statCard('list', primaryIcon, 'Rows', totalRows.toLocaleString()),
+    statCard('folder-tree', primaryIcon, 'Groups', totalGroups),
+    statCard('triangle-alert', dangerIcon, 'Risk flags', riskCount),
   );
 
   // ------------------------------------------------------------------
