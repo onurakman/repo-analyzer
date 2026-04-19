@@ -58,32 +58,30 @@ impl MetricCollector for CommitSizeCollector {
         // metadata for the anomaly list. Sort is done in-memory so we can
         // compute percentiles over the full distribution.
         let rows = store
-            .with_conn(
-                |conn| -> anyhow::Result<Vec<(String, i64, String, i64, String)>> {
-                    let mut stmt = conn.prepare(
-                        "SELECT commit_oid,
+            .with_conn(|conn| -> anyhow::Result<Vec<CommitRow>> {
+                let mut stmt = conn.prepare(
+                    "SELECT commit_oid,
                                 SUM(additions + deletions) AS size,
                                 MIN(email)                 AS email,
                                 MIN(commit_ts)             AS ts,
                                 COALESCE(MIN(message), '') AS message
                            FROM changes
                           GROUP BY commit_oid",
-                    )?;
-                    let it = stmt.query_map([], |row| {
-                        let oid: String = row.get(0)?;
-                        let size: i64 = row.get(1)?;
-                        let email: String = row.get(2)?;
-                        let ts: i64 = row.get(3)?;
-                        let msg: String = row.get(4)?;
-                        Ok((oid, size.max(0), email, ts, msg))
-                    })?;
-                    let mut out = Vec::new();
-                    for r in it {
-                        out.push(r?);
-                    }
-                    Ok(out)
-                },
-            )
+                )?;
+                let it = stmt.query_map([], |row| {
+                    let oid: String = row.get(0)?;
+                    let size: i64 = row.get(1)?;
+                    let email: String = row.get(2)?;
+                    let ts: i64 = row.get(3)?;
+                    let msg: String = row.get(4)?;
+                    Ok((oid, size.max(0), email, ts, msg))
+                })?;
+                let mut out = Vec::new();
+                for r in it {
+                    out.push(r?);
+                }
+                Ok(out)
+            })
             .ok()?
             .ok()?;
 
@@ -100,11 +98,11 @@ impl MetricCollector for CommitSizeCollector {
 
         // Filter + rank anomalies. The full `anomaly_count` goes into the
         // summary row; the detail list is capped at `MAX_ANOMALIES`.
-        let mut anomaly_rows: Vec<(String, i64, String, i64, String)> = rows
+        let mut anomaly_rows: Vec<CommitRow> = rows
             .into_iter()
             .filter(|(_, s, _, _, _)| (*s as u64) > threshold)
             .collect();
-        anomaly_rows.sort_by(|a, b| b.1.cmp(&a.1));
+        anomaly_rows.sort_by_key(|r| std::cmp::Reverse(r.1));
         let anomaly_count = anomaly_rows.len();
         anomaly_rows.truncate(MAX_ANOMALIES);
 
@@ -113,10 +111,8 @@ impl MetricCollector for CommitSizeCollector {
             values: summary_values(total_commits, &stats, anomaly_count),
         };
 
-        let anomaly_entries: Vec<MetricEntry> = anomaly_rows
-            .into_iter()
-            .map(to_anomaly_entry)
-            .collect();
+        let anomaly_entries: Vec<MetricEntry> =
+            anomaly_rows.into_iter().map(to_anomaly_entry).collect();
 
         Some(MetricResult {
             name: "commit_size".into(),
@@ -186,7 +182,11 @@ fn anomaly_threshold(stats: &Stats) -> u64 {
     ((stats.p95 as f64 * ANOMALY_P95_MULTIPLIER) as u64).max(stats.p99)
 }
 
-fn summary_values(total_commits: usize, stats: &Stats, anomaly_count: usize) -> HashMap<String, MetricValue> {
+fn summary_values(
+    total_commits: usize,
+    stats: &Stats,
+    anomaly_count: usize,
+) -> HashMap<String, MetricValue> {
     let mut v = HashMap::new();
     v.insert("commits".into(), MetricValue::Count(total_commits as u64));
     v.insert("mean".into(), MetricValue::Count(stats.mean));
@@ -201,7 +201,9 @@ fn summary_values(total_commits: usize, stats: &Stats, anomaly_count: usize) -> 
     v
 }
 
-fn to_anomaly_entry(row: (String, i64, String, i64, String)) -> MetricEntry {
+type CommitRow = (String, i64, String, i64, String);
+
+fn to_anomaly_entry(row: CommitRow) -> MetricEntry {
     let (oid, size, email, ts, msg) = row;
     let short_oid: String = oid.chars().take(12).collect();
     let first_line: String = msg.lines().next().unwrap_or("").chars().take(80).collect();

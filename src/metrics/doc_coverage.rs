@@ -163,11 +163,7 @@ const KOTLIN: DocSpec = DocSpec {
 const DART: DocSpec = DocSpec {
     name: "Dart",
     language: || tree_sitter_dart::LANGUAGE.into(),
-    item_kinds: &[
-        "function_signature",
-        "method_signature",
-        "class_definition",
-    ],
+    item_kinds: &["function_signature", "method_signature", "class_definition"],
     visibility: VisibilityRule::DartNotUnderscore,
     doc: DocRule::TripleSlashOrBlockDoc,
 };
@@ -451,7 +447,9 @@ fn node_text<'a>(node: &Node, source: &'a str) -> &'a str {
 
 fn is_public(node: &Node, source: &str, rule: VisibilityRule) -> bool {
     match rule {
-        VisibilityRule::RustPub => has_child_kind_with_text_prefix(node, "visibility_modifier", source, "pub"),
+        VisibilityRule::RustPub => {
+            has_child_kind_with_text_prefix(node, "visibility_modifier", source, "pub")
+        }
         VisibilityRule::PythonNotUnderscore | VisibilityRule::DartNotUnderscore => {
             match node.child_by_field_name("name") {
                 Some(n) => !node_text(&n, source).starts_with('_'),
@@ -508,12 +506,7 @@ fn is_public(node: &Node, source: &str, rule: VisibilityRule) -> bool {
     }
 }
 
-fn has_child_kind_with_text_prefix(
-    node: &Node,
-    kind: &str,
-    source: &str,
-    prefix: &str,
-) -> bool {
+fn has_child_kind_with_text_prefix(node: &Node, kind: &str, source: &str, prefix: &str) -> bool {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == kind && node_text(&child, source).trim_start().starts_with(prefix) {
@@ -546,8 +539,7 @@ fn has_doc(node: &Node, source: &str, rule: DocRule) -> bool {
         },
         DocRule::GoLineComment => match node.prev_named_sibling() {
             Some(prev) => {
-                prev.kind() == "comment"
-                    && node_text(&prev, source).trim_start().starts_with("//")
+                prev.kind() == "comment" && node_text(&prev, source).trim_start().starts_with("//")
             }
             None => false,
         },
@@ -609,8 +601,7 @@ mod tests {
 
     #[test]
     fn python_docstring_detected() {
-        let src =
-            "def foo():\n    \"\"\"I am a docstring.\"\"\"\n    pass\n\ndef bar():\n    pass\n\ndef _private():\n    pass\n";
+        let src = "def foo():\n    \"\"\"I am a docstring.\"\"\"\n    pass\n\ndef bar():\n    pass\n\ndef _private():\n    pass\n";
         let (public, documented) = scan(&PYTHON, src);
         // foo and bar are public; _private is not.
         assert_eq!(public, 2);

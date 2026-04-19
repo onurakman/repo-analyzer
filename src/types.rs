@@ -595,9 +595,7 @@ impl ReportKind {
             "commit_size" | "commit-size" | "commit_anomalies" | "commit-anomalies" => {
                 Some(Self::CommitSize)
             }
-            "doc_coverage" | "doc-coverage" | "docs" | "documentation" => {
-                Some(Self::DocCoverage)
-            }
+            "doc_coverage" | "doc-coverage" | "docs" | "documentation" => Some(Self::DocCoverage),
             "dead_code" | "dead-code" | "orphans" | "unused" => Some(Self::DeadCode),
             "clones" | "duplicates" | "duplication" => Some(Self::Clones),
             "test_ratio" | "test-ratio" | "tests" => Some(Self::TestRatio),

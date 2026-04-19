@@ -7,9 +7,9 @@
 //! regardless of variable names or literal values, which is the classic
 //! definition of a Type-2 clone.
 //!
-//! Memory profile: one fixed-size record per function (hash + file + name
-//! + line + size). At ~100 bytes per record, a 10k-function repo uses
-//! ~1 MB. Works out of RAM; no SQLite-backed storage needed at this scale.
+//! Memory profile: one fixed-size record per function (hash + file + name +
+//! line + size). At ~100 bytes per record, a 10k-function repo uses ~1 MB.
+//! Works out of RAM; no SQLite-backed storage needed at this scale.
 //!
 //! False positives are possible for very short functions that accidentally
 //! share shape (getters, one-liners). `MIN_CLONE_LINES` filters those out.
@@ -240,7 +240,12 @@ impl MetricCollector for ClonesCollector {
 
         let mut groups: Vec<Vec<FunctionRecord>> = by_hash
             .into_values()
-            .filter(|g| g.len() >= 2 && g.first().map(|r| r.size_lines >= MIN_CLONE_LINES).unwrap_or(false))
+            .filter(|g| {
+                g.len() >= 2
+                    && g.first()
+                        .map(|r| r.size_lines >= MIN_CLONE_LINES)
+                        .unwrap_or(false)
+            })
             .collect();
 
         // Rank by "refactor payoff": size_lines × (occurrences − 1). Extracting
@@ -266,12 +271,15 @@ impl MetricCollector for ClonesCollector {
                     .skip(1)
                     .map(|r| format!("{}::{}:{}", r.file, r.name, r.start_line))
                     .collect();
-                let key = format!("#{}: {}::{}:{}", idx + 1, first.file, first.name, first.start_line);
-                let mut values = HashMap::new();
-                values.insert(
-                    "occurrences".into(),
-                    MetricValue::Count(group.len() as u64),
+                let key = format!(
+                    "#{}: {}::{}:{}",
+                    idx + 1,
+                    first.file,
+                    first.name,
+                    first.start_line
                 );
+                let mut values = HashMap::new();
+                values.insert("occurrences".into(), MetricValue::Count(group.len() as u64));
                 values.insert(
                     "size_lines".into(),
                     MetricValue::Count(first.size_lines as u64),
@@ -327,7 +335,9 @@ fn walk_tree(
             if let Ok(subobj) = repo.find_object(id)
                 && let Ok(subtree) = subobj.try_into_tree()
             {
-                walk_tree(repo, &subtree, &full_path, parsers, records, scanned, progress);
+                walk_tree(
+                    repo, &subtree, &full_path, parsers, records, scanned, progress,
+                );
             }
         } else if mode.is_blob() {
             let Some(spec) = spec_for_path(&full_path) else {
@@ -474,8 +484,7 @@ mod tests {
     fn clones_differ_only_in_identifier_names_share_hash() {
         let a =
             "fn sum(xs: &[i32]) -> i32 { let mut total = 0; for x in xs { total += *x; } total }";
-        let b =
-            "fn fold(values: &[i32]) -> i32 { let mut acc = 0; for v in values { acc += *v; } acc }";
+        let b = "fn fold(values: &[i32]) -> i32 { let mut acc = 0; for v in values { acc += *v; } acc }";
         let ha = hash_of(&RUST, a);
         let hb = hash_of(&RUST, b);
         assert_eq!(ha, hb, "renamed variables must not change the hash");

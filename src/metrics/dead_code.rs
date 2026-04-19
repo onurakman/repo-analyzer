@@ -126,7 +126,10 @@ impl MetricCollector for DeadCodeCollector {
         let total = all_paths.len();
         for (idx, (path, oid, size)) in all_paths.iter().enumerate() {
             if idx.is_multiple_of(200) {
-                progress.status(&format!("  dead_code: {}/{total} files scanned...", idx + 1));
+                progress.status(&format!(
+                    "  dead_code: {}/{total} files scanned...",
+                    idx + 1
+                ));
             }
             if !is_source_file(path) {
                 continue;
@@ -147,10 +150,10 @@ impl MetricCollector for DeadCodeCollector {
                 continue;
             };
             for raw in extract_imports(lang, source) {
-                if let Some(target) = resolve_import(lang, &raw, path, &path_set) {
-                    if target != *path {
-                        *fan_in.entry(target).or_insert(0) += 1;
-                    }
+                if let Some(target) = resolve_import(lang, &raw, path, &path_set)
+                    && target != *path
+                {
+                    *fan_in.entry(target).or_insert(0) += 1;
                 }
             }
         }
@@ -187,17 +190,10 @@ impl MetricCollector for DeadCodeCollector {
         let entries: Vec<MetricEntry> = list
             .into_iter()
             .map(|path| {
-                let ext = path
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
+                let ext = path.rsplit('.').next().unwrap_or("").to_string();
                 let mut values = HashMap::new();
                 values.insert("extension".into(), MetricValue::Text(ext));
-                MetricEntry {
-                    key: path,
-                    values,
-                }
+                MetricEntry { key: path, values }
             })
             .collect();
 
