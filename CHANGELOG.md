@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.10](https://github.com/onurakman/repo-analyzer/compare/v0.1.9...v0.1.10) (2026-04-19)
+
+
+### Features
+
+* Add internationalization (i18n) support with locale-based message translation ([d1f464d](https://github.com/onurakman/repo-analyzer/commit/d1f464dcca535d96c0417f0a5656237d92f33b66))
+
 ## [0.1.9](https://github.com/onurakman/repo-analyzer/compare/v0.1.8...v0.1.9) (2026-04-18)
 
 
