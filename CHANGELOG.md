@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.13](https://github.com/onurakman/repo-analyzer/compare/v0.1.12...v0.1.13) (2026-04-19)
+
+
+### Features
+
+* Add `dead_code` and `commit_size` metrics with enhanced complexity reporting ([df713e6](https://github.com/onurakman/repo-analyzer/commit/df713e69f595990049d264ca694ac78ab9feb8fc))
+* Add cognitive complexity, maintainability index, and extended metrics ([588d9d5](https://github.com/onurakman/repo-analyzer/commit/588d9d53f8f5cf1c5aa99ac9e29201912297fe20))
+
 ## [0.1.12](https://github.com/onurakman/repo-analyzer/compare/v0.1.11...v0.1.12) (2026-04-19)
 
 
