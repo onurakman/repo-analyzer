@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.12](https://github.com/onurakman/repo-analyzer/compare/v0.1.11...v0.1.12) (2026-04-19)
+
+
+### Features
+
+* Filter non-source files across all collectors using `is_source_file` ([d1454d2](https://github.com/onurakman/repo-analyzer/commit/d1454d23c727d05118bec0d8b81e9a411fedd0a0))
+
 ## [0.1.11](https://github.com/onurakman/repo-analyzer/compare/v0.1.10...v0.1.11) (2026-04-19)
 
 
