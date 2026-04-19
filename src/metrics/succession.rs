@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use chrono::{Duration, Utc};
 
+use crate::analysis::source_filter::is_source_file;
 use crate::messages;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
@@ -95,6 +96,9 @@ impl MetricCollector for SuccessionCollector {
                     })?;
                     for r in rows {
                         let (file, email, commits, first_ts, last_ts) = r?;
+                        if !is_source_file(&file) {
+                            continue;
+                        }
                         let acc = files.entry(file).or_insert_with(|| FileAcc {
                             authors: HashMap::new(),
                             original_email: email.clone(),

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::analysis::source_filter::is_source_file;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
 use crate::types::{
@@ -88,6 +89,9 @@ impl MetricCollector for ConstructOwnershipCollector {
                 })?;
                 for r in rows {
                     let (file, qn, kind, email, touches) = r?;
+                    if !is_source_file(&file) {
+                        continue;
+                    }
                     let key = format!("{file}::{qn}");
                     let acc = per_key.entry(key).or_insert_with(|| Acc {
                         file: file.clone(),

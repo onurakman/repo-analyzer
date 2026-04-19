@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 
+use crate::analysis::source_filter::is_source_file;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
 use crate::types::{
@@ -73,6 +74,9 @@ impl MetricCollector for ConstructChurnCollector {
                 let mut out = Vec::new();
                 for r in rows {
                     let (file, qn, kind, changes, lines, authors, last_ts) = r?;
+                    if !is_source_file(&file) {
+                        continue;
+                    }
                     let mut values = HashMap::new();
                     values.insert("kind".into(), MetricValue::Text(kind));
                     values.insert("file".into(), MetricValue::Text(file.clone()));

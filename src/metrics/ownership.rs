@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::analysis::source_filter::is_source_file;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
 use crate::types::{
@@ -63,6 +64,9 @@ impl MetricCollector for OwnershipCollector {
         // pages so memory pressure here is only from the in-flight row set.
         let mut files: HashMap<String, HashMap<String, u64>> = HashMap::new();
         for (file, email, added) in rows {
+            if !is_source_file(&file) {
+                continue;
+            }
             *files.entry(file).or_default().entry(email).or_insert(0) += added;
         }
 

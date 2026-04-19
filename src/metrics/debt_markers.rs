@@ -6,6 +6,7 @@ use gix::bstr::BStr;
 use regex::Regex;
 
 use crate::analysis::line_classifier::{CommentState, LineType, classify_line};
+use crate::analysis::source_filter::is_source_file;
 use crate::langs::detect_language_info;
 use crate::messages;
 use crate::metrics::MetricCollector;
@@ -115,6 +116,9 @@ impl MetricCollector for DebtMarkersCollector {
         let mut enriched: Vec<EnrichedMarker> = Vec::with_capacity(self.hits.len());
 
         for (blamed_idx, (path, indices)) in files.iter().enumerate() {
+            if !is_source_file(path) {
+                continue;
+            }
             progress.status(&format!(
                 "  debt_markers: blame {}/{} {}...",
                 blamed_idx + 1,

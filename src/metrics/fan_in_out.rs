@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
+use crate::analysis::source_filter::is_source_file;
 use crate::messages;
 use crate::metrics::MetricCollector;
 use crate::types::{
@@ -69,6 +70,9 @@ impl MetricCollector for FanInOutCollector {
                     "  fan_in_out: pass 2/2 {}/{total} files...",
                     idx + 1
                 ));
+            }
+            if !is_source_file(path) {
+                continue;
             }
             if *size > MAX_BLOB_BYTES {
                 continue;

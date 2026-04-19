@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 
+use crate::analysis::source_filter::is_source_file;
 use crate::messages;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
@@ -89,6 +90,9 @@ impl MetricCollector for KnowledgeSilosCollector {
         }
         let mut per_file: HashMap<String, FileAcc> = HashMap::new();
         for (file, email, added, last_ts) in rows {
+            if !is_source_file(&file) {
+                continue;
+            }
             let acc = per_file.entry(file).or_insert_with(|| FileAcc {
                 lines_per_author: HashMap::new(),
                 last_per_author: HashMap::new(),

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use chrono::{Duration, Utc};
 use gix::bstr::BStr;
 
+use crate::analysis::source_filter::is_source_file;
 use crate::messages;
 use crate::metrics::MetricCollector;
 use crate::types::{
@@ -89,6 +90,9 @@ impl MetricCollector for HalfLifeCollector {
 
         let total_files = paths.len();
         for (idx, (path, _size)) in paths.into_iter().enumerate() {
+            if !is_source_file(&path) {
+                continue;
+            }
             progress.status(&format!(
                 "  half_life: blame {}/{total_files} {path}...",
                 idx + 1
