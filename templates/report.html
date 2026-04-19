@@ -322,7 +322,9 @@
     // Architecture / relationships
     'coupling', 'module_coupling', 'fan_in_out', 'churn_pareto',
     // Plain history / descriptive
-    'churn', 'age', 'ownership', 'authors', 'patterns',
+    'churn', 'age', 'ownership', 'authors', 'patterns', 'commit_velocity',
+    // Code shape
+    'test_ratio',
   ];
   const ORDER_INDEX = new Map(REPORT_ORDER.map((n, i) => [n, i]));
   DATA.sort((a, b) => {
@@ -364,7 +366,8 @@
     outliers: 'triangle-alert', quality: 'check-circle', complexity: 'git-merge',
     construct_churn: 'code-2', construct_ownership: 'user-check',
     half_life: 'hourglass', succession: 'user-plus', knowledge_silos: 'lock',
-    fan_in_out: 'share-2', module_coupling: 'boxes', churn_pareto: 'bar-chart-3'
+    fan_in_out: 'share-2', module_coupling: 'boxes', churn_pareto: 'bar-chart-3',
+    commit_velocity: 'trending-up', test_ratio: 'test-tube-2'
   };
   const ICON_DEFAULT = 'file-text';
 

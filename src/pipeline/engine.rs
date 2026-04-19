@@ -13,6 +13,7 @@ use crate::metrics::authors::AuthorsCollector;
 use crate::metrics::bloat::BloatCollector;
 use crate::metrics::churn::ChurnCollector;
 use crate::metrics::churn_pareto::ChurnParetoCollector;
+use crate::metrics::commit_velocity::CommitVelocityCollector;
 use crate::metrics::complexity::ComplexityCollector;
 use crate::metrics::composition::CompositionCollector;
 use crate::metrics::construct_churn::ConstructChurnCollector;
@@ -30,6 +31,7 @@ use crate::metrics::ownership::OwnershipCollector;
 use crate::metrics::patterns::PatternsCollector;
 use crate::metrics::quality::QualityCollector;
 use crate::metrics::succession::SuccessionCollector;
+use crate::metrics::test_ratio::TestRatioCollector;
 use crate::parser::registry::LanguageRegistry;
 use crate::types::{DiffRecord, MetricResult, ParsedChange, ReportKind, TimeRange};
 
@@ -446,6 +448,8 @@ impl Pipeline {
                 ReportKind::ModuleCoupling => Box::new(ModuleCouplingCollector::new()),
                 ReportKind::ChurnPareto => Box::new(ChurnParetoCollector::new()),
                 ReportKind::ConstructOwnership => Box::new(ConstructOwnershipCollector::new()),
+                ReportKind::CommitVelocity => Box::new(CommitVelocityCollector::new()),
+                ReportKind::TestRatio => Box::new(TestRatioCollector::new()),
             };
             collectors.push(collector);
         }

@@ -3,6 +3,7 @@ pub mod authors;
 pub mod bloat;
 pub mod churn;
 pub mod churn_pareto;
+pub mod commit_velocity;
 pub mod complexity;
 pub mod composition;
 pub mod construct_churn;
@@ -20,6 +21,7 @@ pub mod ownership;
 pub mod patterns;
 pub mod quality;
 pub mod succession;
+pub mod test_ratio;
 
 use indicatif::ProgressBar;
 

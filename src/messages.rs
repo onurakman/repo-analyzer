@@ -146,6 +146,30 @@ pub const HEALTH_HYGIENE_LARGE_GIT_DIR: &str = "health.hygiene.large_git_dir";
 pub const HEALTH_HYGIENE_FRAGMENTED_PACKS: &str = "health.hygiene.fragmented_packs";
 pub const HEALTH_HYGIENE_LOOSE_OBJECTS: &str = "health.hygiene.loose_objects";
 pub const HEALTH_HYGIENE_BLOAT_FINDING: &str = "health.hygiene.bloat_finding";
+pub const HEALTH_ACTION_INFO: &str = "health.action.info";
+pub const HEALTH_GROUP_INSIGHTS: &str = "health.group.insights";
+pub const HEALTH_INSIGHT_TEAM: &str = "health.insight.team";
+pub const HEALTH_INSIGHT_TEAM_NOTE: &str = "health.insight.team_note";
+pub const HEALTH_INSIGHT_OWNERSHIP: &str = "health.insight.ownership";
+pub const HEALTH_INSIGHT_OWNERSHIP_NOTE: &str = "health.insight.ownership_note";
+pub const HEALTH_INSIGHT_COUPLING: &str = "health.insight.coupling";
+pub const HEALTH_INSIGHT_COUPLING_NOTE: &str = "health.insight.coupling_note";
+pub const HEALTH_INSIGHT_MODULE_COUPLING: &str = "health.insight.module_coupling";
+pub const HEALTH_INSIGHT_MODULE_COUPLING_NOTE: &str = "health.insight.module_coupling_note";
+pub const HEALTH_INSIGHT_HUB: &str = "health.insight.hub";
+pub const HEALTH_INSIGHT_HUB_NOTE: &str = "health.insight.hub_note";
+pub const HEALTH_INSIGHT_CHURN_TREND: &str = "health.insight.churn_trend";
+pub const HEALTH_INSIGHT_ACTIVE_CLEANUP: &str = "health.insight.active_cleanup";
+pub const HEALTH_INSIGHT_GROWING_CODEBASE: &str = "health.insight.growing_codebase";
+pub const HEALTH_INSIGHT_HOTSPOTS: &str = "health.insight.hotspots";
+pub const HEALTH_INSIGHT_HOTSPOTS_NOTE: &str = "health.insight.hotspots_note";
+pub const HEALTH_GROUP_SCORES: &str = "health.group.scores";
+pub const HEALTH_SCORE_ARCHITECTURE: &str = "health.score.architecture";
+pub const HEALTH_SCORE_TEAM: &str = "health.score.team";
+pub const HEALTH_SCORE_ACTIVITY: &str = "health.score.activity";
+pub const HEALTH_SUMMARY_ARCHITECTURE: &str = "health.summary.architecture";
+pub const HEALTH_SUMMARY_TEAM: &str = "health.summary.team";
+pub const HEALTH_SUMMARY_ACTIVITY: &str = "health.summary.activity";
 
 // ---------------------------------------------------------------------------
 // hotspots
@@ -311,6 +335,30 @@ mod tests {
             HEALTH_HYGIENE_FRAGMENTED_PACKS,
             HEALTH_HYGIENE_LOOSE_OBJECTS,
             HEALTH_HYGIENE_BLOAT_FINDING,
+            HEALTH_ACTION_INFO,
+            HEALTH_GROUP_INSIGHTS,
+            HEALTH_INSIGHT_TEAM,
+            HEALTH_INSIGHT_TEAM_NOTE,
+            HEALTH_INSIGHT_OWNERSHIP,
+            HEALTH_INSIGHT_OWNERSHIP_NOTE,
+            HEALTH_INSIGHT_COUPLING,
+            HEALTH_INSIGHT_COUPLING_NOTE,
+            HEALTH_INSIGHT_MODULE_COUPLING,
+            HEALTH_INSIGHT_MODULE_COUPLING_NOTE,
+            HEALTH_INSIGHT_HUB,
+            HEALTH_INSIGHT_HUB_NOTE,
+            HEALTH_INSIGHT_CHURN_TREND,
+            HEALTH_INSIGHT_ACTIVE_CLEANUP,
+            HEALTH_INSIGHT_GROWING_CODEBASE,
+            HEALTH_INSIGHT_HOTSPOTS,
+            HEALTH_INSIGHT_HOTSPOTS_NOTE,
+            HEALTH_GROUP_SCORES,
+            HEALTH_SCORE_ARCHITECTURE,
+            HEALTH_SCORE_TEAM,
+            HEALTH_SCORE_ACTIVITY,
+            HEALTH_SUMMARY_ARCHITECTURE,
+            HEALTH_SUMMARY_TEAM,
+            HEALTH_SUMMARY_ACTIVITY,
             HOTSPOT_LEVEL_FILE,
             HOTSPOT_LEVEL_CONSTRUCT,
             KNOWLEDGE_SILO_RISK_AT_RISK,

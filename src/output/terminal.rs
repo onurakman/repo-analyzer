@@ -124,7 +124,9 @@ impl ReportWriter for TerminalWriter {
                         catalog.translate_code(&group.label),
                         group.entries.len()
                     );
-                    Self::render_table(&catalog, &group.entries, &columns, top_n);
+                    // Groups are curated, fixed-dimension buckets (health
+                    // pillars, actions, patterns hourly/daily) — never truncate.
+                    Self::render_table(&catalog, &group.entries, &columns, usize::MAX);
                 }
             }
         }

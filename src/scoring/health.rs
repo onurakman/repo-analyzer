@@ -50,8 +50,23 @@ pub fn compute_health(results: &[MetricResult], repo_path: &Path) -> Option<Metr
     };
 
     let hygiene = repo_hygiene_findings(repo_path, &by_name);
+    let insights = collect_insights(&by_name);
+    let supplementary: Vec<SupplementaryScore> = [
+        score_architecture(&by_name),
+        score_team_health(&by_name),
+        score_activity(&by_name),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
 
-    Some(build_result(overall_score, pillars, hygiene))
+    Some(build_result(
+        overall_score,
+        pillars,
+        hygiene,
+        insights,
+        supplementary,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +118,10 @@ fn critical() -> LocalizedMessage {
 
 fn warning() -> LocalizedMessage {
     LocalizedMessage::code(messages::HEALTH_ACTION_WARNING).with_severity(Severity::Warning)
+}
+
+fn info() -> LocalizedMessage {
+    LocalizedMessage::code(messages::HEALTH_ACTION_INFO).with_severity(Severity::Info)
 }
 
 fn level_for_score(score: f64) -> LocalizedMessage {
@@ -229,7 +248,33 @@ fn score_bus_factor(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
     // Up to 50 points off for heavy silo load, up to 30 for stale succession.
     let silo_penalty = (high_risk as f64 * 2.0).min(50.0);
     let stale_penalty = (stale as f64 * 1.5).min(30.0);
-    let score = (100.0 - silo_penalty - stale_penalty).max(MIN_PILLAR_SCORE);
+
+    // Positive: well-distributed ownership partially offsets silo risk.
+    let ownership_bonus = by_name
+        .get("ownership")
+        .map(|o| {
+            let total = o.entries.len();
+            if total == 0 {
+                return 0.0;
+            }
+            let well_owned = o
+                .entries
+                .iter()
+                .filter(|e| {
+                    matches!(e.values.get("bus_factor"), Some(MetricValue::Count(n)) if *n >= 3)
+                })
+                .count();
+            let pct = (well_owned * 100) as f64 / total as f64;
+            if pct > 60.0 {
+                ((pct - 60.0) * 0.125).min(5.0)
+            } else {
+                0.0
+            }
+        })
+        .unwrap_or(0.0);
+
+    let score =
+        (100.0 - silo_penalty - stale_penalty + ownership_bonus).clamp(MIN_PILLAR_SCORE, 100.0);
 
     let mut actions: Vec<Action> = Vec::new();
     for e in silos.iter().take(3) {
@@ -451,7 +496,35 @@ fn score_tidiness(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
         .unwrap_or(0);
 
     let penalty = (bloat_findings as f64 * 3.0).min(60.0) + (binary_files as f64 * 1.0).min(20.0);
-    let score = (100.0 - penalty).max(MIN_PILLAR_SCORE);
+
+    // Positive: active cleanup (high deletion ratio) suggests good housekeeping.
+    let cleanup_bonus = by_name
+        .get("churn")
+        .map(|c| {
+            let (added, deleted) = c.entries.iter().fold((0u64, 0u64), |(a, d), e| {
+                let a2 = match e.values.get("lines_added") {
+                    Some(MetricValue::Count(n)) => *n,
+                    _ => 0,
+                };
+                let d2 = match e.values.get("lines_deleted") {
+                    Some(MetricValue::Count(n)) => *n,
+                    _ => 0,
+                };
+                (a + a2, d + d2)
+            });
+            if added == 0 {
+                return 0.0;
+            }
+            let ratio = deleted as f64 / added as f64;
+            if ratio > 0.8 {
+                ((ratio - 0.8) * 25.0).min(5.0)
+            } else {
+                0.0
+            }
+        })
+        .unwrap_or(0.0);
+
+    let score = (100.0 - penalty + cleanup_bonus).clamp(MIN_PILLAR_SCORE, 100.0);
 
     let mut actions: Vec<Action> = Vec::new();
     for e in bloat.iter().take(3) {
@@ -643,6 +716,409 @@ struct HygieneFinding {
     history_rewrite: bool,
 }
 
+/// An informational finding that enriches the health report without affecting
+/// the score. Surfaced in the "Insights" group.
+struct Insight {
+    key: String,
+    detail: LocalizedMessage,
+    note: LocalizedMessage,
+}
+
+/// A supplementary 0-100 score that provides an additional dimension of
+/// information without affecting the overall health score.
+struct SupplementaryScore {
+    key: &'static str,
+    display: &'static str,
+    score: f64,
+    summary: LocalizedMessage,
+}
+
+/// Architecture score (0-100): how modular and decoupled is the codebase?
+/// Derived from coupling, module_coupling, and fan_in_out data.
+fn score_architecture(by_name: &HashMap<&str, &MetricResult>) -> Option<SupplementaryScore> {
+    let coupling = by_name.get("coupling");
+    let module_coupling = by_name.get("module_coupling");
+    let fio = by_name.get("fan_in_out");
+
+    // Need at least one source of data.
+    if coupling.is_none() && module_coupling.is_none() && fio.is_none() {
+        return None;
+    }
+
+    let tight_couples = coupling
+        .map(|c| {
+            c.entries
+                .iter()
+                .filter(
+                    |e| matches!(e.values.get("score"), Some(MetricValue::Float(s)) if *s > 0.7),
+                )
+                .count()
+        })
+        .unwrap_or(0);
+
+    let (hubs, high_instability) = fio
+        .map(|f| {
+            let h = f
+                .entries
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.values.get("role"),
+                        Some(MetricValue::Message(m)) if m.code == messages::FAN_IN_OUT_ROLE_HUB
+                    )
+                })
+                .count();
+            let hi = f
+                .entries
+                .iter()
+                .filter(
+                    |e| matches!(e.values.get("instability_pct"), Some(MetricValue::Count(p)) if *p > 80),
+                )
+                .count();
+            (h, hi)
+        })
+        .unwrap_or((0, 0));
+
+    let mc_pairs = module_coupling.map(|m| m.entries.len()).unwrap_or(0);
+
+    let penalty = (tight_couples as f64 * 4.0).min(30.0)
+        + (hubs as f64 * 3.0).min(20.0)
+        + (high_instability as f64 * 2.0).min(15.0)
+        + (mc_pairs as f64 * 2.0).min(15.0);
+    let score = (100.0 - penalty).max(MIN_PILLAR_SCORE);
+
+    Some(SupplementaryScore {
+        key: "architecture",
+        display: messages::HEALTH_SCORE_ARCHITECTURE,
+        score,
+        summary: LocalizedMessage::code(messages::HEALTH_SUMMARY_ARCHITECTURE)
+            .with_param("tight_couples", tight_couples as u64)
+            .with_param("hubs", hubs as u64)
+            .with_param("high_instability", high_instability as u64),
+    })
+}
+
+/// Team health score (0-100): how well-distributed is knowledge and ownership?
+/// Derived from authors and ownership data.
+fn score_team_health(by_name: &HashMap<&str, &MetricResult>) -> Option<SupplementaryScore> {
+    let authors = by_name.get("authors");
+    let ownership = by_name.get("ownership");
+
+    if authors.is_none() && ownership.is_none() {
+        return None;
+    }
+
+    let total_authors = authors.map(|a| a.entries.len()).unwrap_or(0);
+
+    let (well_owned_pct, single_owner_pct) = ownership
+        .map(|o| {
+            let total = o.entries.len();
+            if total == 0 {
+                return (0usize, 0usize);
+            }
+            let well = o
+                .entries
+                .iter()
+                .filter(|e| {
+                    matches!(e.values.get("bus_factor"), Some(MetricValue::Count(n)) if *n >= 3)
+                })
+                .count();
+            let single = o
+                .entries
+                .iter()
+                .filter(|e| {
+                    matches!(e.values.get("bus_factor"), Some(MetricValue::Count(n)) if *n <= 1)
+                })
+                .count();
+            (well * 100 / total, single * 100 / total)
+        })
+        .unwrap_or((0, 0));
+
+    // Start at 70 (neutral). Good signals push up, bad push down.
+    let mut score = 70.0;
+
+    // Positive: many contributors
+    if total_authors >= 10 {
+        score += 15.0;
+    } else if total_authors >= 5 {
+        score += 10.0;
+    } else if total_authors >= 3 {
+        score += 5.0;
+    }
+
+    // Positive: well-distributed ownership
+    score += (well_owned_pct as f64 * 0.15).min(10.0);
+
+    // Negative: too many single-owner files
+    if single_owner_pct > 50 {
+        score -= ((single_owner_pct - 50) as f64 * 0.5).min(25.0);
+    }
+
+    let score = score.clamp(MIN_PILLAR_SCORE, 100.0);
+
+    Some(SupplementaryScore {
+        key: "team_health",
+        display: messages::HEALTH_SCORE_TEAM,
+        score,
+        summary: LocalizedMessage::code(messages::HEALTH_SUMMARY_TEAM)
+            .with_param("total_authors", total_authors as u64)
+            .with_param("well_owned_pct", well_owned_pct as u64)
+            .with_param("single_owner_pct", single_owner_pct as u64),
+    })
+}
+
+/// Activity score (0-100): how actively and healthily is the codebase evolving?
+/// Derived from churn and hotspots data.
+fn score_activity(by_name: &HashMap<&str, &MetricResult>) -> Option<SupplementaryScore> {
+    let churn = by_name.get("churn");
+    let hotspots = by_name.get("hotspots");
+
+    if churn.is_none() && hotspots.is_none() {
+        return None;
+    }
+
+    let (total_added, total_deleted) = churn
+        .map(|c| {
+            c.entries.iter().fold((0u64, 0u64), |(a, d), e| {
+                let a2 = match e.values.get("lines_added") {
+                    Some(MetricValue::Count(n)) => *n,
+                    _ => 0,
+                };
+                let d2 = match e.values.get("lines_deleted") {
+                    Some(MetricValue::Count(n)) => *n,
+                    _ => 0,
+                };
+                (a + a2, d + d2)
+            })
+        })
+        .unwrap_or((0, 0));
+
+    let hot_count = hotspots
+        .map(|h| {
+            h.entries
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.values.get("level"),
+                        Some(MetricValue::Message(m)) if m.code == messages::HOTSPOT_LEVEL_FILE
+                    ) && matches!(
+                        e.values.get("score"),
+                        Some(MetricValue::Count(s)) if *s >= 100
+                    )
+                })
+                .count()
+        })
+        .unwrap_or(0);
+
+    // Start at 75 (neutral — some activity is expected).
+    let mut score = 75.0;
+
+    // Positive: active cleanup (deletion ratio > 0.5)
+    if total_added > 0 {
+        let ratio = total_deleted as f64 / total_added as f64;
+        score += (ratio * 10.0).min(15.0);
+    }
+
+    // Negative: many hotspots mean churn is concentrated and risky
+    score -= (hot_count as f64 * 1.5).min(20.0);
+
+    // Positive: some activity at all
+    if total_added + total_deleted > 1000 {
+        score += 5.0;
+    }
+
+    let score = score.clamp(MIN_PILLAR_SCORE, 100.0);
+
+    Some(SupplementaryScore {
+        key: "activity",
+        display: messages::HEALTH_SCORE_ACTIVITY,
+        score,
+        summary: LocalizedMessage::code(messages::HEALTH_SUMMARY_ACTIVITY)
+            .with_param("added", total_added)
+            .with_param("deleted", total_deleted)
+            .with_param("hotspots", hot_count as u64),
+    })
+}
+
+/// Gather informational findings from collectors that don't feed into the
+/// score but provide useful context (team shape, architecture signals, trends).
+fn collect_insights(by_name: &HashMap<&str, &MetricResult>) -> Vec<Insight> {
+    let mut out = Vec::new();
+
+    // -- Team size (from authors) --
+    if let Some(authors) = by_name.get("authors") {
+        let total = authors.entries.len();
+        if total > 0 {
+            out.push(Insight {
+                key: "team".into(),
+                detail: LocalizedMessage::code(messages::HEALTH_INSIGHT_TEAM)
+                    .with_param("total", total as u64),
+                note: LocalizedMessage::code(messages::HEALTH_INSIGHT_TEAM_NOTE),
+            });
+        }
+    }
+
+    // -- Ownership distribution (from ownership) --
+    if let Some(ownership) = by_name.get("ownership") {
+        let total_files = ownership.entries.len();
+        let well_owned = ownership
+            .entries
+            .iter()
+            .filter(
+                |e| matches!(e.values.get("bus_factor"), Some(MetricValue::Count(n)) if *n >= 3),
+            )
+            .count();
+        if let Some(pct) = (well_owned * 100).checked_div(total_files) {
+            out.push(Insight {
+                key: "ownership".into(),
+                detail: LocalizedMessage::code(messages::HEALTH_INSIGHT_OWNERSHIP)
+                    .with_param("well_owned_pct", pct as u64)
+                    .with_param("well_owned", well_owned as u64)
+                    .with_param("total_files", total_files as u64),
+                note: LocalizedMessage::code(messages::HEALTH_INSIGHT_OWNERSHIP_NOTE),
+            });
+        }
+    }
+
+    // -- Top coupling pairs (from coupling) --
+    if let Some(coupling) = by_name.get("coupling") {
+        for e in coupling.entries.iter().take(3) {
+            let (Some(MetricValue::Text(file_a)), Some(MetricValue::Text(file_b))) =
+                (e.values.get("file_a"), e.values.get("file_b"))
+            else {
+                continue;
+            };
+            let Some(MetricValue::Count(co_changes)) = e.values.get("co_changes") else {
+                continue;
+            };
+            let Some(MetricValue::Float(score)) = e.values.get("score") else {
+                continue;
+            };
+            out.push(Insight {
+                key: e.key.clone(),
+                detail: LocalizedMessage::code(messages::HEALTH_INSIGHT_COUPLING)
+                    .with_param("file_a", file_a.clone())
+                    .with_param("file_b", file_b.clone())
+                    .with_param("co_changes", *co_changes)
+                    .with_param("score", format!("{score:.2}")),
+                note: LocalizedMessage::code(messages::HEALTH_INSIGHT_COUPLING_NOTE),
+            });
+        }
+    }
+
+    // -- Top module coupling (from module_coupling) --
+    if let Some(mc) = by_name.get("module_coupling") {
+        for e in mc.entries.iter().take(2) {
+            let (Some(MetricValue::Text(module_a)), Some(MetricValue::Text(module_b))) =
+                (e.values.get("module_a"), e.values.get("module_b"))
+            else {
+                continue;
+            };
+            let Some(MetricValue::Count(co_changes)) = e.values.get("co_changes") else {
+                continue;
+            };
+            let Some(MetricValue::Float(score)) = e.values.get("score") else {
+                continue;
+            };
+            out.push(Insight {
+                key: e.key.clone(),
+                detail: LocalizedMessage::code(messages::HEALTH_INSIGHT_MODULE_COUPLING)
+                    .with_param("module_a", module_a.clone())
+                    .with_param("module_b", module_b.clone())
+                    .with_param("co_changes", *co_changes)
+                    .with_param("score", format!("{score:.2}")),
+                note: LocalizedMessage::code(messages::HEALTH_INSIGHT_MODULE_COUPLING_NOTE),
+            });
+        }
+    }
+
+    // -- Hub files (from fan_in_out) --
+    if let Some(fio) = by_name.get("fan_in_out") {
+        let mut hub_count = 0u32;
+        for e in &fio.entries {
+            let is_hub = matches!(
+                e.values.get("role"),
+                Some(MetricValue::Message(m)) if m.code == messages::FAN_IN_OUT_ROLE_HUB
+            );
+            if !is_hub {
+                continue;
+            }
+            hub_count += 1;
+            if hub_count > 3 {
+                continue;
+            }
+            let fan_in = match e.values.get("fan_in") {
+                Some(MetricValue::Count(n)) => *n,
+                _ => continue,
+            };
+            out.push(Insight {
+                key: e.key.clone(),
+                detail: LocalizedMessage::code(messages::HEALTH_INSIGHT_HUB)
+                    .with_param("fan_in", fan_in),
+                note: LocalizedMessage::code(messages::HEALTH_INSIGHT_HUB_NOTE),
+            });
+        }
+    }
+
+    // -- Churn trend (from churn) --
+    if let Some(churn) = by_name.get("churn") {
+        let (total_added, total_deleted) = churn.entries.iter().fold((0u64, 0u64), |(a, d), e| {
+            let a2 = match e.values.get("lines_added") {
+                Some(MetricValue::Count(n)) => *n,
+                _ => 0,
+            };
+            let d2 = match e.values.get("lines_deleted") {
+                Some(MetricValue::Count(n)) => *n,
+                _ => 0,
+            };
+            (a + a2, d + d2)
+        });
+        if total_added > 0 || total_deleted > 0 {
+            let net = total_added as i64 - total_deleted as i64;
+            let note_code = if net < 0 {
+                messages::HEALTH_INSIGHT_ACTIVE_CLEANUP
+            } else {
+                messages::HEALTH_INSIGHT_GROWING_CODEBASE
+            };
+            out.push(Insight {
+                key: "churn_trend".into(),
+                detail: LocalizedMessage::code(messages::HEALTH_INSIGHT_CHURN_TREND)
+                    .with_param("added", total_added)
+                    .with_param("deleted", total_deleted)
+                    .with_param("net", net),
+                note: LocalizedMessage::code(note_code),
+            });
+        }
+    }
+
+    // -- Hotspot density (from hotspots) --
+    if let Some(hotspots) = by_name.get("hotspots") {
+        let hot_count = hotspots
+            .entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.values.get("level"),
+                    Some(MetricValue::Message(m)) if m.code == messages::HOTSPOT_LEVEL_FILE
+                ) && matches!(
+                    e.values.get("score"),
+                    Some(MetricValue::Count(s)) if *s >= 100
+                )
+            })
+            .count();
+        if hot_count > 0 {
+            out.push(Insight {
+                key: "hotspots".into(),
+                detail: LocalizedMessage::code(messages::HEALTH_INSIGHT_HOTSPOTS)
+                    .with_param("count", hot_count as u64),
+                note: LocalizedMessage::code(messages::HEALTH_INSIGHT_HOTSPOTS_NOTE),
+            });
+        }
+    }
+
+    out
+}
+
 fn dir_size_bytes(path: &Path) -> Option<u64> {
     let mut total: u64 = 0;
     let mut stack = vec![path.to_path_buf()];
@@ -700,7 +1176,13 @@ fn count_loose_objects(git_dir: &Path) -> Option<usize> {
 // Result assembly
 // ---------------------------------------------------------------------------
 
-fn build_result(overall: u64, pillars: Vec<Pillar>, hygiene: Vec<HygieneFinding>) -> MetricResult {
+fn build_result(
+    overall: u64,
+    pillars: Vec<Pillar>,
+    hygiene: Vec<HygieneFinding>,
+    insights: Vec<Insight>,
+    supplementary: Vec<SupplementaryScore>,
+) -> MetricResult {
     let columns = vec![
         Column::in_report("health", "score"),
         Column::labeled(
@@ -796,6 +1278,31 @@ fn build_result(overall: u64, pillars: Vec<Pillar>, hygiene: Vec<HygieneFinding>
         label: messages::HEALTH_GROUP_PILLARS.into(),
         entries: pillar_entries,
     });
+    if !supplementary.is_empty() {
+        let score_entries: Vec<MetricEntry> = supplementary
+            .iter()
+            .map(|s| {
+                let mut v = values(
+                    Some(s.score.round() as u64),
+                    MetricValue::Message(s.summary.clone()),
+                    MetricValue::Message(LocalizedMessage::code(s.display)),
+                );
+                v.insert(
+                    "level".into(),
+                    MetricValue::Message(level_for_score(s.score)),
+                );
+                MetricEntry {
+                    key: s.key.to_string(),
+                    values: v,
+                }
+            })
+            .collect();
+        entry_groups.push(EntryGroup {
+            name: "scores".into(),
+            label: messages::HEALTH_GROUP_SCORES.into(),
+            entries: score_entries,
+        });
+    }
     if !action_entries.is_empty() {
         entry_groups.push(EntryGroup {
             name: "actions".into(),
@@ -808,6 +1315,29 @@ fn build_result(overall: u64, pillars: Vec<Pillar>, hygiene: Vec<HygieneFinding>
             name: "hygiene".into(),
             label: messages::HEALTH_GROUP_HYGIENE.into(),
             entries: hygiene_entries,
+        });
+    }
+
+    if !insights.is_empty() {
+        let insight_entries: Vec<MetricEntry> = insights
+            .into_iter()
+            .map(|i| {
+                let mut v = values(
+                    None,
+                    MetricValue::Message(i.detail),
+                    MetricValue::Message(i.note),
+                );
+                v.insert("level".into(), MetricValue::Message(info()));
+                MetricEntry {
+                    key: i.key,
+                    values: v,
+                }
+            })
+            .collect();
+        entry_groups.push(EntryGroup {
+            name: "insights".into(),
+            label: messages::HEALTH_GROUP_INSIGHTS.into(),
+            entries: insight_entries,
         });
     }
 

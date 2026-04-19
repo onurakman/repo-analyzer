@@ -502,6 +502,8 @@ pub enum ReportKind {
     ModuleCoupling,
     ChurnPareto,
     ConstructOwnership,
+    CommitVelocity,
+    TestRatio,
 }
 
 impl ReportKind {
@@ -550,6 +552,8 @@ impl ReportKind {
             Self::ModuleCoupling,
             Self::ChurnPareto,
             Self::ConstructOwnership,
+            Self::CommitVelocity,
+            Self::TestRatio,
         ]
     }
 
@@ -579,6 +583,8 @@ impl ReportKind {
             "module_coupling" | "module-coupling" => Some(Self::ModuleCoupling),
             "churn_pareto" | "churn-pareto" | "pareto" => Some(Self::ChurnPareto),
             "construct_ownership" | "construct-ownership" => Some(Self::ConstructOwnership),
+            "commit_velocity" | "commit-velocity" | "velocity" => Some(Self::CommitVelocity),
+            "test_ratio" | "test-ratio" | "tests" => Some(Self::TestRatio),
             _ => None,
         }
     }
@@ -610,6 +616,8 @@ impl fmt::Display for ReportKind {
             Self::ModuleCoupling => "module_coupling",
             Self::ChurnPareto => "churn_pareto",
             Self::ConstructOwnership => "construct_ownership",
+            Self::CommitVelocity => "commit_velocity",
+            Self::TestRatio => "test_ratio",
         };
         write!(f, "{s}")
     }
