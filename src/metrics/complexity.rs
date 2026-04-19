@@ -11,12 +11,19 @@ use crate::types::{
     report_description, report_display,
 };
 
-/// Per-language node-kind tables for cyclomatic complexity computation.
+/// Per-language node-kind tables for cyclomatic, cognitive, and function-shape
+/// metric computation.
 struct LangSpec {
     name: &'static str,
     language: fn() -> Language,
     function_kinds: &'static [&'static str],
+    /// Nodes that contribute to cyclomatic and cognitive complexity. Cognitive
+    /// also uses these to grow nesting depth when descended into.
     decision_kinds: &'static [&'static str],
+    /// Nodes that count as function exit points for NEXITS. Typically
+    /// `return_statement` / `return_expression`; Kotlin uses `jump_expression`
+    /// as an umbrella for return/break/continue.
+    exit_kinds: &'static [&'static str],
 }
 
 const RUST: LangSpec = LangSpec {
@@ -31,6 +38,7 @@ const RUST: LangSpec = LangSpec {
         "for_expression",
         "try_expression",
     ],
+    exit_kinds: &["return_expression"],
 };
 
 const PYTHON: LangSpec = LangSpec {
@@ -46,6 +54,7 @@ const PYTHON: LangSpec = LangSpec {
         "case_clause",
         "conditional_expression",
     ],
+    exit_kinds: &["return_statement"],
 };
 
 const TYPESCRIPT: LangSpec = LangSpec {
@@ -68,6 +77,7 @@ const TYPESCRIPT: LangSpec = LangSpec {
         "catch_clause",
         "ternary_expression",
     ],
+    exit_kinds: &["return_statement"],
 };
 
 const JAVA: LangSpec = LangSpec {
@@ -88,6 +98,7 @@ const JAVA: LangSpec = LangSpec {
         "catch_clause",
         "ternary_expression",
     ],
+    exit_kinds: &["return_statement"],
 };
 
 const GO: LangSpec = LangSpec {
@@ -102,6 +113,7 @@ const GO: LangSpec = LangSpec {
         "type_case",
         "communication_case",
     ],
+    exit_kinds: &["return_statement"],
 };
 
 const JAVASCRIPT: LangSpec = LangSpec {
@@ -124,6 +136,7 @@ const JAVASCRIPT: LangSpec = LangSpec {
         "catch_clause",
         "ternary_expression",
     ],
+    exit_kinds: &["return_statement"],
 };
 
 const KOTLIN: LangSpec = LangSpec {
@@ -142,6 +155,8 @@ const KOTLIN: LangSpec = LangSpec {
         "for_statement",
         "catch_block",
     ],
+    // tree-sitter-kotlin-ng groups return/break/continue under `jump_expression`.
+    exit_kinds: &["jump_expression"],
 };
 
 const DART: LangSpec = LangSpec {
@@ -163,6 +178,7 @@ const DART: LangSpec = LangSpec {
         "catch_clause",
         "conditional_expression",
     ],
+    exit_kinds: &["return_statement"],
 };
 
 const SUPPORTED: &[LangSpec] = &[RUST, PYTHON, TYPESCRIPT, JAVA, GO, JAVASCRIPT, KOTLIN, DART];
@@ -189,6 +205,20 @@ struct FunctionMetric {
     start_line: u32,
     line_count: u32,
     cyclomatic: u32,
+    /// Cognitive complexity (SonarSource spec, simplified). Weights each
+    /// decision by `1 + nesting_depth` instead of the flat `+1` that
+    /// cyclomatic uses. Better proxy for "hard to read" vs "many paths".
+    cognitive: u32,
+    /// Number of declared parameters. Derived from the function's
+    /// `parameters` / `parameter_list` / `formal_parameters` child.
+    nargs: u32,
+    /// Number of explicit exit points (return / equivalent). Implicit end-of-
+    /// function fall-through is not counted.
+    nexits: u32,
+    /// Maintainability Index (Microsoft variant, 0-100 scaled and clamped).
+    /// Composite of Halstead volume, cyclomatic complexity, and SLOC. Higher
+    /// is better; <65 often flagged as hard to maintain.
+    mi: u32,
     language: &'static str,
 }
 
@@ -306,7 +336,11 @@ impl MetricCollector for ComplexityCollector {
                 let key = format!("{}::{}:{}", m.file, m.name, m.start_line);
                 let mut values = HashMap::new();
                 values.insert("cyclomatic".into(), MetricValue::Count(m.cyclomatic as u64));
+                values.insert("cognitive".into(), MetricValue::Count(m.cognitive as u64));
+                values.insert("mi".into(), MetricValue::Count(m.mi as u64));
                 values.insert("lines".into(), MetricValue::Count(m.line_count as u64));
+                values.insert("args".into(), MetricValue::Count(m.nargs as u64));
+                values.insert("exits".into(), MetricValue::Count(m.nexits as u64));
                 values.insert("language".into(), MetricValue::Text(m.language.into()));
                 values.insert(
                     "recommendation".into(),
@@ -323,7 +357,11 @@ impl MetricCollector for ComplexityCollector {
             entry_groups: vec![],
             columns: vec![
                 Column::in_report("complexity", "cyclomatic"),
+                Column::in_report("complexity", "cognitive"),
+                Column::in_report("complexity", "mi"),
                 Column::in_report("complexity", "lines"),
+                Column::in_report("complexity", "args"),
+                Column::in_report("complexity", "exits"),
                 Column::in_report("complexity", "language"),
                 Column::in_report("complexity", "recommendation"),
             ],
@@ -477,14 +515,24 @@ fn visit(
         // decision scan cover the body.
         let scope = scope_for_decisions_and_span(node, spec, kind);
         let cyclomatic = 1 + count_decisions(&scope, spec.decision_kinds, spec.function_kinds);
+        let cognitive = count_cognitive(&scope, spec.decision_kinds, spec.function_kinds);
+        let nargs = count_params(node);
+        let nexits = count_exits(&scope, spec.exit_kinds, spec.function_kinds);
         let start = scope.start_position().row as u32 + 1;
         let end = scope.end_position().row as u32 + 1;
+        let line_count = count_code_lines(line_types, start, end);
+        let volume = halstead_volume(&scope, source, spec.function_kinds);
+        let mi = maintainability_index(volume, cyclomatic, line_count);
         out.push(FunctionMetric {
             file: file_path.to_string(),
             name,
             start_line: start,
-            line_count: count_code_lines(line_types, start, end),
+            line_count,
             cyclomatic,
+            cognitive,
+            nargs,
+            nexits,
+            mi,
             language: spec.name,
         });
         // Continue descending so nested functions/closures are also captured.
@@ -522,6 +570,169 @@ fn count_decisions(node: &Node, kinds: &[&str], func_kinds: &[&str]) -> u32 {
         count += count_decisions(&child, kinds, func_kinds);
     }
     count
+}
+
+/// Cognitive complexity (simplified SonarSource rubric). Each decision node
+/// contributes `1 + nesting_depth` where depth is the count of ancestor
+/// decisions on the path from the function root. This approximates the full
+/// spec (which distinguishes nesting-incrementing vs flat-incrementing kinds)
+/// well enough to produce meaningful relative signal for a single-column
+/// hotspot view. Nested functions are skipped so each gets its own entry.
+fn count_cognitive(node: &Node, kinds: &[&str], func_kinds: &[&str]) -> u32 {
+    fn walk(node: &Node, kinds: &[&str], func_kinds: &[&str], depth: u32) -> u32 {
+        let mut total = 0u32;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if func_kinds.contains(&child.kind()) {
+                continue;
+            }
+            if kinds.contains(&child.kind()) {
+                total = total.saturating_add(1 + depth);
+                total = total.saturating_add(walk(&child, kinds, func_kinds, depth + 1));
+            } else {
+                total = total.saturating_add(walk(&child, kinds, func_kinds, depth));
+            }
+        }
+        total
+    }
+    walk(node, kinds, func_kinds, 0)
+}
+
+/// Count declared parameters for a function node. Finds the first descendant
+/// whose kind name contains `parameter` (covers `parameters`,
+/// `formal_parameters`, `parameter_list`, `function_value_parameters`,
+/// `formal_parameter_list`) and returns its named-child count.
+fn count_params(func_node: &Node) -> u32 {
+    let mut cursor = func_node.walk();
+    for child in func_node.children(&mut cursor) {
+        let k = child.kind();
+        if k.contains("parameter") || k == "formal_parameters" {
+            return child.named_child_count() as u32;
+        }
+    }
+    0
+}
+
+/// Count explicit exit points (return / equivalent) inside the function's
+/// span, skipping nested functions so their returns don't leak in.
+fn count_exits(node: &Node, exit_kinds: &[&str], func_kinds: &[&str]) -> u32 {
+    let mut count = 0u32;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if func_kinds.contains(&child.kind()) {
+            continue;
+        }
+        if exit_kinds.contains(&child.kind()) {
+            count += 1;
+        }
+        count += count_exits(&child, exit_kinds, func_kinds);
+    }
+    count
+}
+
+/// Compute Halstead volume for a function scope.
+///
+/// Halstead separates the token stream into **operators** (keywords,
+/// punctuation, binary/unary ops) and **operands** (identifiers, literals).
+/// Using tree-sitter's named/unnamed distinction as a generic proxy:
+///   - `!is_named()` terminals → operators (covers `if`, `{`, `+`, `==` etc.)
+///   - `is_named()` leaves     → operands (identifiers, literals)
+///
+/// `Volume = (N1 + N2) * log2(n1 + n2)` where N1/N2 are total counts and
+/// n1/n2 are unique counts. Returns `0.0` when the scope has effectively
+/// no token vocabulary (empty body, parse failure).
+///
+/// Nested function bodies are skipped so each function owns its own volume.
+/// Comment nodes are excluded — Halstead measures semantic token density.
+fn halstead_volume(scope_node: &Node, source: &str, func_kinds: &[&str]) -> f64 {
+    let mut operators: HashMap<String, u32> = HashMap::new();
+    let mut operands: HashMap<String, u32> = HashMap::new();
+    let mut cursor = scope_node.walk();
+    for child in scope_node.children(&mut cursor) {
+        halstead_walk(&child, source, func_kinds, &mut operators, &mut operands);
+    }
+
+    let n1 = operators.len();
+    let n2 = operands.len();
+    let big_n1: u32 = operators.values().sum();
+    let big_n2: u32 = operands.values().sum();
+
+    let vocab = n1 + n2;
+    let length = big_n1 + big_n2;
+    if vocab <= 1 || length == 0 {
+        return 0.0;
+    }
+    (length as f64) * (vocab as f64).log2()
+}
+
+fn halstead_walk(
+    node: &Node,
+    source: &str,
+    func_kinds: &[&str],
+    operators: &mut HashMap<String, u32>,
+    operands: &mut HashMap<String, u32>,
+) {
+    let kind = node.kind();
+    if func_kinds.contains(&kind) {
+        // Nested function — its tokens belong to its own metric entry.
+        return;
+    }
+    if is_comment_kind(kind) {
+        return;
+    }
+    if node.child_count() == 0 {
+        let bytes = source.as_bytes();
+        let start = node.start_byte();
+        let end = node.end_byte();
+        if start > end || end > bytes.len() {
+            return;
+        }
+        let text = String::from_utf8_lossy(&bytes[start..end]).into_owned();
+        if text.is_empty() || text.chars().all(char::is_whitespace) {
+            return;
+        }
+        if node.is_named() {
+            *operands.entry(text).or_insert(0) += 1;
+        } else {
+            *operators.entry(text).or_insert(0) += 1;
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        halstead_walk(&child, source, func_kinds, operators, operands);
+    }
+}
+
+/// Tree-sitter grammars name comment nodes inconsistently; this covers the
+/// common variants across our supported languages.
+fn is_comment_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "comment"
+            | "line_comment"
+            | "block_comment"
+            | "documentation_comment"
+            | "doc_comment"
+    )
+}
+
+/// Maintainability Index (Microsoft variant), scaled to 0-100.
+///
+/// ```text
+/// raw = 171 - 5.2*ln(volume) - 0.23*cyclomatic - 16.2*ln(sloc)
+/// mi  = clamp(raw * 100 / 171, 0, 100)
+/// ```
+///
+/// Interpretation (common convention): ≥85 = highly maintainable, 65-84 =
+/// moderate, <65 = hard to maintain. Returns a rounded `u32` for display.
+fn maintainability_index(volume: f64, cyclomatic: u32, sloc: u32) -> u32 {
+    let effective_sloc = sloc.max(1) as f64;
+    let ln_v = if volume > 0.0 { volume.ln() } else { 0.0 };
+    let raw =
+        171.0 - 5.2 * ln_v - 0.23 * (cyclomatic as f64) - 16.2 * effective_sloc.ln();
+    let scaled = (raw * 100.0 / 171.0).clamp(0.0, 100.0);
+    scaled.round() as u32
 }
 
 /// Best-effort function name extraction via the `name` field, if present.
@@ -690,6 +901,159 @@ mod tests {
     #[test]
     fn dart_spec_resolves() {
         assert_eq!(spec_for_path("lib/main.dart").unwrap().name, "Dart");
+    }
+
+    #[test]
+    fn cognitive_nested_decisions_weighted() {
+        // Nested if-in-for-in-function:
+        //   for { if { ... } }
+        // depth 0 decision: for  → +1
+        // depth 1 decision: if   → +2
+        // cognitive = 3; cyclomatic = 3 (base 1 + for + if).
+        let src = "fn f(xs: &[i32]) { for x in xs { if *x > 0 { println!(\"{}\", x); } } }";
+        let m = analyze(&RUST, src);
+        let entry = m.iter().find(|x| x.name == "f").unwrap();
+        assert_eq!(entry.cyclomatic, 3);
+        assert_eq!(entry.cognitive, 3);
+    }
+
+    #[test]
+    fn cognitive_flat_decisions_match_cyclomatic() {
+        // Sequential (non-nested) decisions: depth stays 0, so cognitive
+        // and (cyclomatic - 1) should match.
+        let src = "fn f(x: i32) -> i32 { if x > 0 { return 1; } if x < 0 { return -1; } 0 }";
+        let m = analyze(&RUST, src);
+        let e = m.iter().find(|x| x.name == "f").unwrap();
+        // cyclomatic: 1 + 2 ifs = 3. Cognitive: two flat +1 = 2.
+        assert_eq!(e.cyclomatic, 3);
+        assert_eq!(e.cognitive, 2);
+    }
+
+    #[test]
+    fn cognitive_deep_nesting_blows_up() {
+        // if { if { if { ... } } } at depths 0, 1, 2 → 1 + 2 + 3 = 6.
+        let src = "fn f(a: bool, b: bool, c: bool) { if a { if b { if c { println!(\"x\"); } } } }";
+        let m = analyze(&RUST, src);
+        let e = m.iter().find(|x| x.name == "f").unwrap();
+        assert_eq!(e.cyclomatic, 4); // base + 3 ifs
+        assert_eq!(e.cognitive, 6);
+    }
+
+    #[test]
+    fn nargs_counts_declared_parameters() {
+        let rust_src = "fn f(a: i32, b: &str, c: bool) {}";
+        let m = analyze(&RUST, rust_src);
+        assert_eq!(m.iter().find(|x| x.name == "f").unwrap().nargs, 3);
+
+        let py_src = "def f(self, x, y, *args, **kwargs):\n    pass\n";
+        let m = analyze(&PYTHON, py_src);
+        assert_eq!(m.iter().find(|x| x.name == "f").unwrap().nargs, 5);
+
+        let go_src = "package p\nfunc f(a int, b string) {}\n";
+        let m = analyze(&GO, go_src);
+        assert_eq!(m.iter().find(|x| x.name == "f").unwrap().nargs, 2);
+    }
+
+    #[test]
+    fn nargs_zero_for_noarg_functions() {
+        let src = "fn f() {}";
+        let m = analyze(&RUST, src);
+        assert_eq!(m.iter().find(|x| x.name == "f").unwrap().nargs, 0);
+    }
+
+    #[test]
+    fn nexits_counts_return_points() {
+        let src = "fn f(x: i32) -> i32 { if x > 0 { return 1; } if x < 0 { return -1; } return 0; }";
+        let m = analyze(&RUST, src);
+        assert_eq!(m.iter().find(|x| x.name == "f").unwrap().nexits, 3);
+    }
+
+    #[test]
+    fn nexits_zero_when_no_explicit_return() {
+        // Implicit Rust expression-value return is not counted.
+        let src = "fn f(x: i32) -> i32 { x + 1 }";
+        let m = analyze(&RUST, src);
+        assert_eq!(m.iter().find(|x| x.name == "f").unwrap().nexits, 0);
+    }
+
+    #[test]
+    fn nested_function_exits_dont_leak() {
+        // The closure's return should not count toward the outer function's
+        // exits, mirroring how nested-function decisions are isolated.
+        let src = "fn outer() { let inner = || { return 42; }; let _ = inner(); }";
+        let m = analyze(&RUST, src);
+        let outer = m.iter().find(|x| x.name == "outer").unwrap();
+        assert_eq!(outer.nexits, 0);
+        let closure = m.iter().find(|x| x.name == "<anonymous>").unwrap();
+        assert_eq!(closure.nexits, 1);
+    }
+
+    #[test]
+    fn maintainability_index_formula_clamps_and_scales() {
+        // Pathological inputs: huge volume + CC + sloc must clamp to 0.
+        let mi_worst = maintainability_index(1e9, 1000, 10_000);
+        assert_eq!(mi_worst, 0);
+        // Tiny inputs: should saturate near 100.
+        let mi_best = maintainability_index(1.0, 1, 1);
+        assert!(mi_best >= 99, "expected near-100, got {mi_best}");
+        // Zero-volume edge case (empty body).
+        let mi_zero_vol = maintainability_index(0.0, 1, 1);
+        assert!(mi_zero_vol >= 99);
+    }
+
+    #[test]
+    fn mi_simple_function_high() {
+        // Empty body → volume 0, cc 1, sloc ~1 → MI should be near 100.
+        let src = "fn f() {}";
+        let m = analyze(&RUST, src);
+        let e = m.iter().find(|x| x.name == "f").unwrap();
+        assert!(e.mi >= 90, "expected >= 90 for trivial fn, got {}", e.mi);
+    }
+
+    #[test]
+    fn mi_complex_function_lower_than_simple() {
+        // A trivial function and a branchy function should rank in that
+        // order: trivial.mi > complex.mi.
+        let trivial = "fn a() {}";
+        let complex = "fn b(x: i32) -> i32 {
+            if x > 100 { if x > 1000 { if x > 10000 { return 4; } else { return 3; } }
+            else { return 2; } } else if x > 10 { return 1; } else if x > 0 { return 0; }
+            else if x < -10 { return -1; } else { return -2; }
+        }";
+        let m_trivial = analyze(&RUST, trivial);
+        let m_complex = analyze(&RUST, complex);
+        let mi_a = m_trivial.iter().find(|x| x.name == "a").unwrap().mi;
+        let mi_b = m_complex.iter().find(|x| x.name == "b").unwrap().mi;
+        assert!(mi_a > mi_b, "trivial MI {mi_a} should exceed complex MI {mi_b}");
+    }
+
+    #[test]
+    fn halstead_volume_non_negative_and_scales_with_length() {
+        // Build a minimal Rust AST via parser so we can call the helper directly.
+        let src_short = "fn f() { let a = 1; }";
+        let src_long = "fn f() { let a = 1; let b = 2; let c = 3; let d = 4; }";
+        let mut parsers = HashMap::new();
+        parsers.entry("Rust").or_insert_with(|| {
+            let mut p = Parser::new();
+            let _ = p.set_language(&tree_sitter_rust::LANGUAGE.into());
+            p
+        });
+        let mut vol = |src: &str| -> f64 {
+            let parser = parsers.get_mut("Rust").unwrap();
+            let tree = parser.parse(src, None).unwrap();
+            let func = tree
+                .root_node()
+                .child(0)
+                .expect("source_file should have a child");
+            halstead_volume(&func, src, RUST.function_kinds)
+        };
+        let v_short = vol(src_short);
+        let v_long = vol(src_long);
+        assert!(v_short > 0.0);
+        assert!(
+            v_long > v_short,
+            "longer body should have larger volume: {v_long} vs {v_short}"
+        );
     }
 
     #[test]

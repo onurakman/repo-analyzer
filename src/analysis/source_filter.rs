@@ -50,24 +50,50 @@ const NON_CODE_LANGUAGES: &[&str] = &[
     "YAML",
 ];
 
-/// Path segments that indicate generated, vendored, or asset-pipeline content
-/// regardless of file extension or language detection. Matched as substrings
-/// against the path with a synthetic leading `/`, so top-level directories
-/// like `assets/` and nested ones like `packages/foo/assets/` both hit.
+/// Path segments that indicate generated, vendored, cache, or asset-pipeline
+/// content regardless of file extension or language detection. Matched as
+/// substrings against the path with a synthetic leading `/`, so top-level
+/// directories like `assets/` and nested ones like `packages/foo/assets/`
+/// both hit.
 ///
 /// Known false positive: Rails projects put authored stylesheets under
 /// `app/assets/stylesheets/`; those will be filtered out here. A future
 /// CLI `--include-pattern` flag is the intended override.
+///
+/// `/bin/` and `/obj/` are deliberately NOT included — they collide with
+/// Rust's `src/bin/` convention. .NET repos should use `--exclude-pattern`.
 const NON_CODE_PATH_SEGMENTS: &[&str] = &[
+    // Asset pipelines / static serving
     "/assets/",
     "/static/",
     "/public/",
+    // Generic build / dist output
     "/dist/",
     "/build/",
-    "/.next/",
     "/out/",
     "/coverage/",
-    "/target/",
+    // Language-specific build roots
+    "/target/",     // Rust / Java (maven)
+    "/.next/",      // Next.js build
+    "/.gradle/",    // Gradle cache
+    "/.dart_tool/", // Dart build
+    "/.pub-cache/", // Dart / Flutter pub
+    // Python caches and virtualenvs
+    "/__pycache__/",
+    "/.pytest_cache/",
+    "/.mypy_cache/",
+    "/.ruff_cache/",
+    "/.venv/",
+    "/venv/",
+    "/.tox/",
+    // JS/TS ecosystem caches
+    "/.turbo/",
+    "/.parcel-cache/",
+    "/.pnpm-store/",
+    "/.yarn/",
+    // Editor / tooling state
+    "/.idea/",
+    "/.cache/",
 ];
 
 /// Exact filenames that are never source code regardless of extension-based
@@ -384,5 +410,44 @@ mod tests {
         assert!(!is_source_file("assets/main.css"));
         assert!(!is_source_file("dist/bundle.js"));
         assert!(!is_source_file("public/favicon.ico"));
+    }
+
+    #[test]
+    fn python_caches_and_virtualenvs_rejected() {
+        assert!(!is_source_file("src/foo/__pycache__/bar.cpython-311.pyc"));
+        assert!(!is_source_file(".pytest_cache/v/cache/lastfailed"));
+        assert!(!is_source_file(".mypy_cache/3.11/os/path.data.json"));
+        assert!(!is_source_file(".ruff_cache/0.1.0/stats"));
+        assert!(!is_source_file(".venv/lib/site-packages/foo.py"));
+        assert!(!is_source_file("venv/lib/python3.11/site-packages/x.py"));
+        assert!(!is_source_file(".tox/py311/lib/x.py"));
+    }
+
+    #[test]
+    fn js_ecosystem_caches_rejected() {
+        assert!(!is_source_file(".turbo/cache/abc"));
+        assert!(!is_source_file("web/.parcel-cache/entries.json"));
+        assert!(!is_source_file(".pnpm-store/v3/files/abc"));
+        assert!(!is_source_file(".yarn/cache/foo.zip"));
+    }
+
+    #[test]
+    fn editor_and_build_tool_dirs_rejected() {
+        assert!(!is_source_file(".idea/workspace.xml"));
+        assert!(!is_source_file(".cache/foo.json"));
+        assert!(!is_source_file(".gradle/build-scan-data/scan.json"));
+        assert!(!is_source_file("app/.dart_tool/package_config.json"));
+        assert!(!is_source_file(".pub-cache/hosted/pub.dev/foo.dart"));
+    }
+
+    #[test]
+    fn dotnet_bin_obj_not_filtered_by_path() {
+        // Rust `src/bin/` is legitimate source code; .NET `bin`/`obj`
+        // overlap creates ambiguity, so we do NOT path-filter them here.
+        // .NET users must use an exclude pattern instead.
+        assert!(is_source_file("src/bin/cli.rs"));
+        assert!(is_source_file("cmd/bin/main.rs"));
+        // .NET bin/obj paths would technically pass here — intentional
+        // tradeoff. `gitignore` usually keeps them out of history anyway.
     }
 }

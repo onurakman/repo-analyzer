@@ -42,7 +42,11 @@
   "report.complexity.display_name": "Cyclomatic Complexity",
   "report.complexity.description": "Cyclomatic complexity per function — roughly, how many independent execution paths it has. CC under 5 is simple, 6-10 is OK, 11-20 is hard to test and reason about, 21+ is hard to even read safely. Functions at the top of this list are the best candidates to split into smaller pieces. `lines` counts executable code only (blanks and comments excluded) so a docstring-heavy function isn't flagged for length alone.",
   "report.complexity.column.cyclomatic": "Cyclomatic",
+  "report.complexity.column.cognitive": "Cognitive",
+  "report.complexity.column.mi": "MI",
   "report.complexity.column.lines": "Lines",
+  "report.complexity.column.args": "Args",
+  "report.complexity.column.exits": "Exits",
   "report.complexity.column.language": "Language",
   "report.complexity.column.recommendation": "Recommendation",
 
