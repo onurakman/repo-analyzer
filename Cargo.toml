@@ -1,6 +1,6 @@
 [package]
 name = "repo-analyzer"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 description = "Git repository analysis tool with code-construct-level granularity"
 
