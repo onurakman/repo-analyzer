@@ -160,6 +160,73 @@ cargo test --test '*'   # Integration tests only
 - Return `Option<T>` for lookups that may legitimately find nothing (e.g., `LanguageRegistry::get_for_file`).
 - Never panic in library code. Reserve `unwrap()` / `expect()` for test code only.
 
+## Internationalization (i18n)
+
+Every user-facing string in report output goes through the localization pipeline. No collector should emit raw English text into `MetricEntry` values.
+
+### Key components
+
+| Component | Role |
+|---|---|
+| `src/messages.rs` | `pub const` constants for stable message codes (closed-set values) |
+| `src/i18n.rs` | `Catalog` — loads locale JSON, translates `LocalizedMessage` → `String` |
+| `locales/en.json` | Source-of-truth locale file; keys are dotted snake_case codes |
+| `LocalizedMessage` (`src/types.rs`) | Structured message: `code` + optional `severity` + `params` map |
+| `Severity` (`src/types.rs`) | `Info`, `Warning`, `Error`, `Critical` — drives UI badges |
+
+### Two approaches for message codes
+
+1. **Constants** (`messages.rs`) — for **closed-set** values where every possible variant is known at compile time (severity levels, risk categories, recommendations). Provides typo protection, dead-code analysis, IDE navigation, and the `all_codes()` test.
+   ```rust
+   // Closed set — use a constant
+   LocalizedMessage::code(messages::BLOAT_RECOMMENDATION_OK)
+   ```
+
+2. **Dynamic `format!`** — for **structural patterns** derived from an existing enum or config value (report names, column names). The input is already constrained by the type system.
+   ```rust
+   // Open pattern — enum-driven, use format!
+   LocalizedMessage::code(format!("report.{name}.display_name"))
+   ```
+
+**Rule of thumb:** if you can enumerate all variants in a `match` arm, use a constant. If the key is derived from a variable that's already type-checked elsewhere, use `format!`.
+
+### Adding a new message code
+
+1. Add a `pub const` to the appropriate collector section in `src/messages.rs`.
+2. Add the constant to the `all_codes()` vec in the module's test (maintains the audit trail).
+3. Add the English translation to `locales/en.json` with the same dotted key.
+4. Use `LocalizedMessage::code(messages::YOUR_CONST)` in the collector, chaining `.with_severity()` and `.with_param()` as needed.
+5. Store the result as `MetricValue::Message(msg)` in the entry's values map — never as `MetricValue::Text` for translatable content.
+
+### Locale file conventions
+
+- Keys are **dotted snake_case**: `collector.category.variant` (e.g. `bloat.recommendation.large_file`).
+- Report metadata follows the pattern `report.{name}.display_name`, `report.{name}.description`, `report.{name}.column.{value}`.
+- Templates use `{{param_name}}` for substitution placeholders.
+- `en.json` is the canonical source; other locales are translated copies with identical keys.
+
+### Translation at output time
+
+- **Terminal / CSV writers** translate via `Catalog` at render time (`catalog.translate(&msg)` for `LocalizedMessage`, `catalog.translate_code(&label)` for plain code strings like `EntryGroup.label`).
+- **JSON / HTML writers** pass `LocalizedMessage` structs through as-is (serialized via serde). Downstream consumers (web UI, scripts) translate on their side using the locale file.
+- **`"type": "i18n"` tagging:** `LocalizedMessage` uses a custom `Serialize` impl that emits `"type": "i18n"` as the first JSON field. This lets consumers distinguish translatable values from plain primitives without inspecting the shape: `value.type === "i18n"` means "look up `value.code` in the locale file and substitute `value.params`". Plain `MetricValue` variants (`Count`, `Text`, `Float`, `Date`) remain untagged scalars.
+- Missing keys render the code verbatim — failures are visible, never silent.
+
+### Severity assignment guidelines
+
+| Severity | When to use |
+|---|---|
+| `None` | Informational data, no badge (e.g. "Simple", "Stable core") |
+| `Info` | Noteworthy but not actionable (e.g. large file within threshold) |
+| `Warning` | Should be addressed eventually (e.g. high complexity, stale TODOs) |
+| `Error` | Needs attention soon (e.g. orphaned ownership, very high CC) |
+| `Critical` | Urgent action required (e.g. health action with major risk) |
+
+### Column constructors
+
+- `Column::in_report(report, value)` — standard: derives label code as `report.{report}.column.{value}`.
+- `Column::labeled(value, label)` — when the label code doesn't follow the standard pattern (e.g. a column shared across entry groups with a custom locale key).
+
 ## Performance
 
 - **Streaming processing:** Collectors receive one `ParsedChange` at a time. Do not buffer all changes in memory.

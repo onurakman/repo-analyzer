@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 
 use crate::analysis::source_filter::is_source_file;
+use crate::messages;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
-use crate::types::{MetricEntry, MetricResult, MetricValue};
+use crate::types::{
+    Column, LocalizedMessage, MetricEntry, MetricResult, MetricValue, report_description,
+    report_display,
+};
 
 pub struct ChurnParetoCollector;
 
@@ -78,13 +82,23 @@ impl MetricCollector for ChurnParetoCollector {
             values.insert("churn".into(), MetricValue::Count(total_churn));
             values.insert(
                 "pct_of_total".into(),
-                MetricValue::Text(format!("{p50}/{total_files} files = {p50_pct}% reach 50%")),
+                MetricValue::Message(
+                    LocalizedMessage::code(messages::CHURN_PARETO_SUMMARY_PCT)
+                        .with_param("p50", p50)
+                        .with_param("total", total_files)
+                        .with_param("p50_pct", p50_pct),
+                ),
             );
             values.insert(
                 "cumulative_pct".into(),
-                MetricValue::Text(format!(
-                    "{p80}/{total_files} = {p80_pct}% → 80% | {p90}/{total_files} = {p90_pct}% → 90%"
-                )),
+                MetricValue::Message(
+                    LocalizedMessage::code(messages::CHURN_PARETO_SUMMARY_CUMULATIVE)
+                        .with_param("p80", p80)
+                        .with_param("total", total_files)
+                        .with_param("p80_pct", p80_pct)
+                        .with_param("p90", p90)
+                        .with_param("p90_pct", p90_pct),
+                ),
             );
             entries.push(MetricEntry {
                 key: "<summary>".into(),
@@ -110,15 +124,14 @@ impl MetricCollector for ChurnParetoCollector {
 
         Some(MetricResult {
             name: "churn_pareto".into(),
-            display_name: "Churn Distribution (Pareto)".into(),
-            description: "Distribution of churn across files (the 80/20 rule applied to your codebase). Almost always a small fraction of files takes the lion's share of all changes. The summary row shows exactly how concentrated yours is — that small fraction is where to focus refactoring effort, code review attention, and test coverage.".into(),
+            display_name: report_display("churn_pareto"),
+            description: report_description("churn_pareto"),
             entry_groups: vec![],
-            column_labels: vec![],
             columns: vec![
-                "rank".into(),
-                "churn".into(),
-                "pct_of_total".into(),
-                "cumulative_pct".into(),
+                Column::in_report("churn_pareto", "rank"),
+                Column::in_report("churn_pareto", "churn"),
+                Column::in_report("churn_pareto", "pct_of_total"),
+                Column::in_report("churn_pareto", "cumulative_pct"),
             ],
             entries,
         })
@@ -147,10 +160,9 @@ fn pct(part: u64, whole: u64) -> u64 {
 fn empty_result() -> MetricResult {
     MetricResult {
         name: "churn_pareto".into(),
-        display_name: "Churn Distribution (Pareto)".into(),
-        description: String::new(),
+        display_name: report_display("churn_pareto"),
+        description: report_description("churn_pareto"),
         entry_groups: vec![],
-        column_labels: vec![],
         columns: vec![],
         entries: vec![],
     }

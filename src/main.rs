@@ -3,8 +3,10 @@ use clap::Parser;
 mod analysis;
 mod cli;
 mod git;
+mod i18n;
 mod interner;
 mod langs;
+mod messages;
 mod metrics;
 mod output;
 mod parser;
@@ -75,6 +77,7 @@ fn main() -> anyhow::Result<()> {
         output_path: cli.output.clone(),
         top: cli.top,
         quiet: cli.quiet,
+        locale: cli.locale.clone(),
     };
 
     let writer: Box<dyn ReportWriter> = match cli.format {

@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use crate::analysis::source_filter::is_source_file;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
-use crate::types::{MetricEntry, MetricResult, MetricValue};
+use crate::types::{
+    Column, MetricEntry, MetricResult, MetricValue, report_description, report_display,
+};
 
 /// Disk-backed churn collector. No per-change state is kept in RAM — the
 /// aggregation runs as a single SQL query against the shared change store
@@ -92,17 +94,16 @@ impl MetricCollector for ChurnCollector {
 
         Some(MetricResult {
             name: "churn".into(),
-            display_name: "File Churn".into(),
-            description: "How much each file has been rewritten over time — total lines added, deleted, and net change. High churn means a file keeps getting reworked, usually a sign of unstable design or unclear requirements. Files at the top deserve a closer look.".into(),
+            display_name: report_display("churn"),
+            description: report_description("churn"),
             entry_groups: vec![],
-            column_labels: vec![],
             columns: vec![
-                "lines_added".into(),
-                "lines_deleted".into(),
-                "net_change".into(),
-                "total_churn".into(),
-                "change_count".into(),
-                "churn_rate".into(),
+                Column::in_report("churn", "lines_added"),
+                Column::in_report("churn", "lines_deleted"),
+                Column::in_report("churn", "net_change"),
+                Column::in_report("churn", "total_churn"),
+                Column::in_report("churn", "change_count"),
+                Column::in_report("churn", "churn_rate"),
             ],
             entries,
         })
@@ -112,10 +113,9 @@ impl MetricCollector for ChurnCollector {
 fn empty_result() -> MetricResult {
     MetricResult {
         name: "churn".into(),
-        display_name: "File Churn".into(),
-        description: String::new(),
+        display_name: report_display("churn"),
+        description: report_description("churn"),
         entry_groups: vec![],
-        column_labels: vec![],
         columns: vec![],
         entries: vec![],
     }

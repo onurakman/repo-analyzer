@@ -2,9 +2,13 @@ use std::collections::HashMap;
 
 use chrono::{Duration, Utc};
 
+use crate::messages;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
-use crate::types::{MetricEntry, MetricResult, MetricValue};
+use crate::types::{
+    Column, LocalizedMessage, MetricEntry, MetricResult, MetricValue, Severity, report_description,
+    report_display,
+};
 
 const INACTIVE_DAYS: i64 = 180;
 
@@ -157,16 +161,12 @@ impl MetricCollector for SuccessionCollector {
                 );
                 values.insert(
                     "original_active".into(),
-                    MetricValue::Text(if original_active {
-                        "yes".into()
-                    } else {
-                        "no".into()
-                    }),
+                    MetricValue::Count(u64::from(original_active)),
                 );
                 values.insert("current_top".into(), MetricValue::Text(current_top));
                 values.insert("total_authors".into(), MetricValue::Count(total_authors));
                 values.insert("successors".into(), MetricValue::Count(successor_count));
-                values.insert("status".into(), MetricValue::Text(status.into()));
+                values.insert("status".into(), MetricValue::Message(status));
 
                 MetricEntry { key: path, values }
             })
@@ -177,46 +177,55 @@ impl MetricCollector for SuccessionCollector {
 
         Some(MetricResult {
             name: "succession".into(),
-            display_name: "Author Succession".into(),
-            description: "Per-file author succession: was the original author still active recently, and if not, who took over? Files marked 'Orphaned' (no active successor) or 'Knowledge transfer needed' (single successor) have lost their maintainer — if something breaks, no one alive in the project knows the original intent.".into(),
+            display_name: report_display("succession"),
+            description: report_description("succession"),
             entry_groups: vec![],
-            column_labels: vec![],
             columns: vec![
-                "original_author".into(),
-                "original_active".into(),
-                "current_top".into(),
-                "total_authors".into(),
-                "successors".into(),
-                "status".into(),
+                Column::in_report("succession", "original_author"),
+                Column::in_report("succession", "original_active"),
+                Column::in_report("succession", "current_top"),
+                Column::in_report("succession", "total_authors"),
+                Column::in_report("succession", "successors"),
+                Column::in_report("succession", "status"),
             ],
             entries,
         })
     }
 }
 
-fn classify(original_active: bool, successors: u64, total_authors: u64) -> &'static str {
-    if original_active {
+fn classify(original_active: bool, successors: u64, total_authors: u64) -> LocalizedMessage {
+    let (code, severity) = if original_active {
         if total_authors >= 3 {
-            "Healthy — original active, multiple authors"
+            (messages::SUCCESSION_STATUS_HEALTHY, None)
         } else {
-            "Owned — original active"
+            (messages::SUCCESSION_STATUS_OWNED, None)
         }
     } else if successors == 0 {
-        "Orphaned — original inactive, no successor"
+        (messages::SUCCESSION_STATUS_ORPHANED, Some(Severity::Error))
     } else if successors == 1 {
-        "Knowledge transfer needed — single successor"
+        (
+            messages::SUCCESSION_STATUS_KNOWLEDGE_TRANSFER_NEEDED,
+            Some(Severity::Warning),
+        )
     } else {
-        "Handed off — multiple successors"
+        (messages::SUCCESSION_STATUS_HANDED_OFF, None)
+    };
+    let mut msg = LocalizedMessage::code(code)
+        .with_param("successors", successors)
+        .with_param("total_authors", total_authors);
+    if let Some(s) = severity {
+        msg = msg.with_severity(s);
     }
+    msg
 }
 
 fn status_rank(entry: &MetricEntry) -> u8 {
     match entry.values.get("status") {
-        Some(MetricValue::Text(s)) => match s.as_str() {
-            "Orphaned — original inactive, no successor" => 4,
-            "Knowledge transfer needed — single successor" => 3,
-            "Handed off — multiple successors" => 2,
-            "Owned — original active" => 1,
+        Some(MetricValue::Message(m)) => match m.code.as_str() {
+            c if c == messages::SUCCESSION_STATUS_ORPHANED => 4,
+            c if c == messages::SUCCESSION_STATUS_KNOWLEDGE_TRANSFER_NEEDED => 3,
+            c if c == messages::SUCCESSION_STATUS_HANDED_OFF => 2,
+            c if c == messages::SUCCESSION_STATUS_OWNED => 1,
             _ => 0,
         },
         _ => 0,
@@ -226,10 +235,9 @@ fn status_rank(entry: &MetricEntry) -> u8 {
 fn empty_result() -> MetricResult {
     MetricResult {
         name: "succession".into(),
-        display_name: "Author Succession".into(),
-        description: String::new(),
+        display_name: report_display("succession"),
+        description: report_description("succession"),
         entry_groups: vec![],
-        column_labels: vec![],
         columns: vec![],
         entries: vec![],
     }

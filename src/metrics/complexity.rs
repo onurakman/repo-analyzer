@@ -4,8 +4,12 @@ use tree_sitter::{Language, Node, Parser};
 
 use crate::analysis::line_classifier::{CommentState, LineType, classify_line};
 use crate::langs::{LANGUAGES, Language as SourceLanguage};
+use crate::messages;
 use crate::metrics::MetricCollector;
-use crate::types::{MetricEntry, MetricResult, MetricValue, ParsedChange};
+use crate::types::{
+    Column, LocalizedMessage, MetricEntry, MetricResult, MetricValue, ParsedChange, Severity,
+    report_description, report_display,
+};
 
 /// Per-language node-kind tables for cyclomatic complexity computation.
 struct LangSpec {
@@ -306,7 +310,7 @@ impl MetricCollector for ComplexityCollector {
                 values.insert("language".into(), MetricValue::Text(m.language.into()));
                 values.insert(
                     "recommendation".into(),
-                    MetricValue::Text(recommendation.into()),
+                    MetricValue::Message(recommendation),
                 );
                 MetricEntry { key, values }
             })
@@ -314,27 +318,30 @@ impl MetricCollector for ComplexityCollector {
 
         MetricResult {
             name: "complexity".into(),
-            display_name: "Cyclomatic Complexity".into(),
-            description: "Cyclomatic complexity per function — roughly, how many independent execution paths it has. CC under 5 is simple, 6-10 is OK, 11-20 is hard to test and reason about, 21+ is hard to even read safely. Functions at the top of this list are the best candidates to split into smaller pieces. `lines` counts executable code only (blanks and comments excluded) so a docstring-heavy function isn't flagged for length alone.".into(),
+            display_name: report_display("complexity"),
+            description: report_description("complexity"),
             entry_groups: vec![],
-            column_labels: vec![],
             columns: vec![
-                "cyclomatic".into(),
-                "lines".into(),
-                "language".into(),
-                "recommendation".into(),
+                Column::in_report("complexity", "cyclomatic"),
+                Column::in_report("complexity", "lines"),
+                Column::in_report("complexity", "language"),
+                Column::in_report("complexity", "recommendation"),
             ],
             entries,
         }
     }
 }
 
-fn classify(cc: u32) -> &'static str {
+fn classify(cc: u32) -> LocalizedMessage {
     match cc {
-        0..=5 => "Simple",
-        6..=10 => "OK",
-        11..=20 => "High — refactor candidate",
-        _ => "Very high — split urgently",
+        0..=5 => LocalizedMessage::code(messages::COMPLEXITY_RECOMMENDATION_SIMPLE),
+        6..=10 => LocalizedMessage::code(messages::COMPLEXITY_RECOMMENDATION_OK),
+        11..=20 => LocalizedMessage::code(messages::COMPLEXITY_RECOMMENDATION_HIGH)
+            .with_severity(Severity::Warning)
+            .with_param("cyclomatic", cc),
+        _ => LocalizedMessage::code(messages::COMPLEXITY_RECOMMENDATION_VERY_HIGH)
+            .with_severity(Severity::Error)
+            .with_param("cyclomatic", cc),
     }
 }
 
@@ -585,10 +592,13 @@ mod tests {
 
     #[test]
     fn classify_thresholds() {
-        assert_eq!(classify(1), "Simple");
-        assert_eq!(classify(7), "OK");
-        assert_eq!(classify(15), "High — refactor candidate");
-        assert_eq!(classify(50), "Very high — split urgently");
+        assert_eq!(classify(1).code, messages::COMPLEXITY_RECOMMENDATION_SIMPLE);
+        assert_eq!(classify(7).code, messages::COMPLEXITY_RECOMMENDATION_OK);
+        assert_eq!(classify(15).code, messages::COMPLEXITY_RECOMMENDATION_HIGH);
+        assert_eq!(
+            classify(50).code,
+            messages::COMPLEXITY_RECOMMENDATION_VERY_HIGH
+        );
     }
 
     #[test]

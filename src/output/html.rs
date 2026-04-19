@@ -180,12 +180,12 @@ mod tests {
 
     #[test]
     fn test_html_output_contains_sections() {
+        use crate::types::{Column, report_description, report_display};
         let result = MetricResult {
             name: "authors".to_string(),
-            display_name: "Authors".to_string(),
-            description: "Top authors by commits".to_string(),
-            columns: vec!["commits".to_string()],
-            column_labels: vec!["Commits".to_string()],
+            display_name: report_display("authors"),
+            description: report_description("authors"),
+            columns: vec![Column::in_report("authors", "commits")],
             entry_groups: vec![],
             entries: vec![
                 MetricEntry {
@@ -207,6 +207,7 @@ mod tests {
             output_path: Some(path.clone()),
             top: None,
             quiet: false,
+            locale: "en".into(),
         };
 
         let writer = HtmlWriter;
@@ -214,9 +215,10 @@ mod tests {
 
         let content = fs::read_to_string(&path).unwrap();
         // The HTML embeds the report data as JSON inside a <script> tag.
+        // display_name is a LocalizedMessage object carrying the stable code.
         assert!(
-            content.contains("\"display_name\":\"Authors\""),
-            "should include display_name in embedded JSON"
+            content.contains("\"code\":\"report.authors.display_name\""),
+            "should include display_name code in embedded JSON"
         );
         assert!(content.contains("alice"), "should contain entry data");
         assert!(content.contains("bob"), "should contain entry data");

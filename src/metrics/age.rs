@@ -4,7 +4,9 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
-use crate::types::{MetricEntry, MetricResult, MetricValue};
+use crate::types::{
+    Column, MetricEntry, MetricResult, MetricValue, report_description, report_display,
+};
 
 pub struct AgeCollector;
 
@@ -107,17 +109,16 @@ impl MetricCollector for AgeCollector {
 
         Some(MetricResult {
             name: "age".into(),
-            display_name: "File Age".into(),
-            description: "When each file was first introduced, when it was last modified, and how many times it changed in between. Old files that are still actively touched = mature core. Old files untouched for years = candidates for archival, deletion, or 'might be safe to delete' review.".into(),
+            display_name: report_display("age"),
+            description: report_description("age"),
             entry_groups: vec![],
-            column_labels: vec![],
             columns: vec![
-                "age_days".into(),
-                "first_seen".into(),
-                "last_modified".into(),
-                "days_since_last_change".into(),
-                "change_count".into(),
-                "changes_per_year".into(),
+                Column::in_report("age", "age_days"),
+                Column::in_report("age", "first_seen"),
+                Column::in_report("age", "last_modified"),
+                Column::in_report("age", "days_since_last_change"),
+                Column::in_report("age", "change_count"),
+                Column::in_report("age", "changes_per_year"),
             ],
             entries,
         })
@@ -132,10 +133,9 @@ fn ts_to_date(ts: i64) -> NaiveDate {
 fn empty_result() -> MetricResult {
     MetricResult {
         name: "age".into(),
-        display_name: "File Age".into(),
-        description: String::new(),
+        display_name: report_display("age"),
+        description: report_description("age"),
         entry_groups: vec![],
-        column_labels: vec![],
         columns: vec![],
         entries: vec![],
     }

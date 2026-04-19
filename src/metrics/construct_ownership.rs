@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
-use crate::types::{MetricEntry, MetricResult, MetricValue};
+use crate::types::{
+    Column, MetricEntry, MetricResult, MetricValue, report_description, report_display,
+};
 
 /// Only the top-N constructs (by total lines touched) are materialized for the
 /// per-author breakdown. Beyond that, blowing up memory isn't worth it — the
@@ -151,18 +153,17 @@ impl MetricCollector for ConstructOwnershipCollector {
 
                 Ok(MetricResult {
                     name: "construct_ownership".into(),
-                    display_name: "Function Ownership".into(),
-                    description: "Function-level ownership and bus factor — finer than file-level ownership. Even if a file has many contributors, individual functions inside it may have only one author. Bus factor of 1 on a critical function (e.g. payment processing) is a real risk even when the surrounding file looks healthy.".into(),
+                    display_name: report_display("construct_ownership"),
+                    description: report_description("construct_ownership"),
                     entry_groups: vec![],
-                    column_labels: vec![],
                     columns: vec![
-                        "kind".into(),
-                        "file".into(),
-                        "top_author".into(),
-                        "top_pct".into(),
-                        "total_authors".into(),
-                        "bus_factor".into(),
-                        "touches".into(),
+                        Column::in_report("construct_ownership", "kind"),
+                        Column::in_report("construct_ownership", "file"),
+                        Column::in_report("construct_ownership", "top_author"),
+                        Column::in_report("construct_ownership", "top_pct"),
+                        Column::in_report("construct_ownership", "total_authors"),
+                        Column::in_report("construct_ownership", "bus_factor"),
+                        Column::in_report("construct_ownership", "touches"),
                     ],
                     entries,
                 })
@@ -194,10 +195,9 @@ fn compute_bus_factor(authors: &HashMap<String, u64>, total: u64) -> u64 {
 fn empty_result() -> MetricResult {
     MetricResult {
         name: "construct_ownership".into(),
-        display_name: "Function Ownership".into(),
-        description: String::new(),
+        display_name: report_display("construct_ownership"),
+        description: report_description("construct_ownership"),
         entry_groups: vec![],
-        column_labels: vec![],
         columns: vec![],
         entries: vec![],
     }

@@ -1,8 +1,10 @@
 pub mod analysis;
 pub mod cli;
 pub mod git;
+pub mod i18n;
 pub mod interner;
 pub mod langs;
+pub mod messages;
 pub mod metrics;
 pub mod output;
 pub mod parser;

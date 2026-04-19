@@ -3,8 +3,12 @@ use std::collections::HashMap;
 use chrono::{Duration, Utc};
 use gix::bstr::BStr;
 
+use crate::messages;
 use crate::metrics::MetricCollector;
-use crate::types::{MetricEntry, MetricResult, MetricValue, ParsedChange};
+use crate::types::{
+    Column, LocalizedMessage, MetricEntry, MetricResult, MetricValue, ParsedChange, Severity,
+    report_description, report_display,
+};
 
 /// Files larger than this (in bytes) are skipped — blame on huge files is
 /// extremely expensive, often allocating GBs per file in long histories.
@@ -159,7 +163,7 @@ impl MetricCollector for HalfLifeCollector {
                 );
                 values.insert(
                     "recommendation".into(),
-                    MetricValue::Text(recommendation.into()),
+                    MetricValue::Message(recommendation),
                 );
                 MetricEntry { key: path, values }
             })
@@ -180,31 +184,40 @@ impl MetricCollector for HalfLifeCollector {
 
         MetricResult {
             name: "half_life".into(),
-            display_name: "Code Half-Life".into(),
-            description: format!(
-                "Per-file code longevity: what fraction of the current code was written more than {ANCIENT_MONTHS} months ago. High percentage = stable, mature code that has stood the test of time. Low percentage = file is constantly rewritten, handle changes here with extra care."
-            ),
+            display_name: report_display("half_life"),
+            description: report_description("half_life")
+                .with_param("ancient_months", ANCIENT_MONTHS),
             entry_groups: vec![],
-            column_labels: vec![],
             columns: vec![
-                "total_lines".into(),
-                "ancient_lines".into(),
-                "ancient_pct".into(),
-                "oldest_age_days".into(),
-                "recommendation".into(),
+                Column::in_report("half_life", "total_lines"),
+                Column::in_report("half_life", "ancient_lines"),
+                Column::in_report("half_life", "ancient_pct"),
+                Column::in_report("half_life", "oldest_age_days"),
+                Column::in_report("half_life", "recommendation"),
             ],
             entries,
         }
     }
 }
 
-fn classify(pct: u64) -> &'static str {
-    match pct {
-        0..=20 => "Hot zone — frequent rewrites",
-        21..=50 => "Aging steadily",
-        51..=80 => "Mostly stable",
-        _ => "Stable core",
+fn classify(pct: u64) -> LocalizedMessage {
+    let (code, severity) = match pct {
+        0..=20 => (
+            messages::HALF_LIFE_RECOMMENDATION_HOT,
+            Some(Severity::Warning),
+        ),
+        21..=50 => (
+            messages::HALF_LIFE_RECOMMENDATION_AGING,
+            Some(Severity::Info),
+        ),
+        51..=80 => (messages::HALF_LIFE_RECOMMENDATION_STABLE, None),
+        _ => (messages::HALF_LIFE_RECOMMENDATION_CORE, None),
+    };
+    let mut msg = LocalizedMessage::code(code).with_param("ancient_pct", pct);
+    if let Some(s) = severity {
+        msg = msg.with_severity(s);
     }
+    msg
 }
 
 fn commit_timestamp(repo: &gix::Repository, oid: gix::ObjectId) -> Option<i64> {
@@ -266,11 +279,11 @@ mod tests {
 
     #[test]
     fn classify_thresholds() {
-        assert_eq!(classify(0), "Hot zone — frequent rewrites");
-        assert_eq!(classify(15), "Hot zone — frequent rewrites");
-        assert_eq!(classify(35), "Aging steadily");
-        assert_eq!(classify(70), "Mostly stable");
-        assert_eq!(classify(95), "Stable core");
+        assert_eq!(classify(0).code, messages::HALF_LIFE_RECOMMENDATION_HOT);
+        assert_eq!(classify(15).code, messages::HALF_LIFE_RECOMMENDATION_HOT);
+        assert_eq!(classify(35).code, messages::HALF_LIFE_RECOMMENDATION_AGING);
+        assert_eq!(classify(70).code, messages::HALF_LIFE_RECOMMENDATION_STABLE);
+        assert_eq!(classify(95).code, messages::HALF_LIFE_RECOMMENDATION_CORE);
     }
 
     #[test]
@@ -283,13 +296,12 @@ mod tests {
 
     #[test]
     fn classify_boundaries_exact() {
-        // boundary exactly on inclusive end of "Hot zone" (20)
-        assert_eq!(classify(20), "Hot zone — frequent rewrites");
-        assert_eq!(classify(21), "Aging steadily");
-        assert_eq!(classify(50), "Aging steadily");
-        assert_eq!(classify(51), "Mostly stable");
-        assert_eq!(classify(80), "Mostly stable");
-        assert_eq!(classify(81), "Stable core");
+        assert_eq!(classify(20).code, messages::HALF_LIFE_RECOMMENDATION_HOT);
+        assert_eq!(classify(21).code, messages::HALF_LIFE_RECOMMENDATION_AGING);
+        assert_eq!(classify(50).code, messages::HALF_LIFE_RECOMMENDATION_AGING);
+        assert_eq!(classify(51).code, messages::HALF_LIFE_RECOMMENDATION_STABLE);
+        assert_eq!(classify(80).code, messages::HALF_LIFE_RECOMMENDATION_STABLE);
+        assert_eq!(classify(81).code, messages::HALF_LIFE_RECOMMENDATION_CORE);
     }
 
     #[test]

@@ -2,9 +2,13 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 
+use crate::messages;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
-use crate::types::{MetricEntry, MetricResult, MetricValue};
+use crate::types::{
+    Column, LocalizedMessage, MetricEntry, MetricResult, MetricValue, Severity, report_description,
+    report_display,
+};
 
 const SILO_PCT: u64 = 80;
 const IDLE_DAYS: i64 = 180;
@@ -118,9 +122,14 @@ impl MetricCollector for KnowledgeSilosCollector {
             let owner_idle_days = ((now - owner_last) / 86_400).max(0);
             let owner_inactive = owner_idle_days >= IDLE_DAYS;
             let risk = if owner_inactive {
-                "At risk — silo + owner idle"
+                LocalizedMessage::code(messages::KNOWLEDGE_SILO_RISK_AT_RISK)
+                    .with_severity(Severity::Error)
+                    .with_param("idle_days", owner_idle_days)
+                    .with_param("ownership_pct", ownership_pct)
             } else {
-                "Single-owner — bus factor 1"
+                LocalizedMessage::code(messages::KNOWLEDGE_SILO_RISK_SINGLE_OWNER)
+                    .with_severity(Severity::Warning)
+                    .with_param("ownership_pct", ownership_pct)
             };
 
             let mut values = HashMap::new();
@@ -135,7 +144,7 @@ impl MetricCollector for KnowledgeSilosCollector {
                 MetricValue::Count(owner_idle_days as u64),
             );
             values.insert("total_lines".into(), MetricValue::Count(total_lines));
-            values.insert("risk".into(), MetricValue::Text(risk.into()));
+            values.insert("risk".into(), MetricValue::Message(risk));
             entries.push(MetricEntry { key: path, values });
         }
 
@@ -159,19 +168,18 @@ impl MetricCollector for KnowledgeSilosCollector {
 
         Some(MetricResult {
             name: "knowledge_silos".into(),
-            display_name: "Knowledge Silos".into(),
-            description: format!(
-                "Files where one person wrote at least {SILO_PCT}% of the code, AND that person hasn't touched the file in the last {IDLE_DAYS} days. If they go on vacation or leave the company, no one else can confidently change this code. Treat 'At risk' files as urgent knowledge-transfer items — pair-program a change, write docs, or split the file."
-            ),
+            display_name: report_display("knowledge_silos"),
+            description: report_description("knowledge_silos")
+                .with_param("silo_pct", SILO_PCT)
+                .with_param("idle_days", IDLE_DAYS),
             entry_groups: vec![],
-            column_labels: vec![],
             columns: vec![
-                "owner".into(),
-                "ownership_pct".into(),
-                "owner_last_touch".into(),
-                "owner_idle_days".into(),
-                "total_lines".into(),
-                "risk".into(),
+                Column::in_report("knowledge_silos", "owner"),
+                Column::in_report("knowledge_silos", "ownership_pct"),
+                Column::in_report("knowledge_silos", "owner_last_touch"),
+                Column::in_report("knowledge_silos", "owner_idle_days"),
+                Column::in_report("knowledge_silos", "total_lines"),
+                Column::in_report("knowledge_silos", "risk"),
             ],
             entries,
         })
@@ -180,8 +188,8 @@ impl MetricCollector for KnowledgeSilosCollector {
 
 fn risk_rank(entry: &MetricEntry) -> u8 {
     match entry.values.get("risk") {
-        Some(MetricValue::Text(s)) if s.starts_with("At risk") => 2,
-        Some(MetricValue::Text(s)) if s.starts_with("Single-owner") => 1,
+        Some(MetricValue::Message(m)) if m.code == messages::KNOWLEDGE_SILO_RISK_AT_RISK => 2,
+        Some(MetricValue::Message(m)) if m.code == messages::KNOWLEDGE_SILO_RISK_SINGLE_OWNER => 1,
         _ => 0,
     }
 }
@@ -194,10 +202,9 @@ fn ts_to_date(ts: i64) -> NaiveDate {
 fn empty_result() -> MetricResult {
     MetricResult {
         name: "knowledge_silos".into(),
-        display_name: "Knowledge Silos".into(),
-        description: String::new(),
+        display_name: report_display("knowledge_silos"),
+        description: report_description("knowledge_silos"),
         entry_groups: vec![],
-        column_labels: vec![],
         columns: vec![],
         entries: vec![],
     }

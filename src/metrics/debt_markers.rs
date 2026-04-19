@@ -7,8 +7,12 @@ use regex::Regex;
 
 use crate::analysis::line_classifier::{CommentState, LineType, classify_line};
 use crate::langs::detect_language_info;
+use crate::messages;
 use crate::metrics::MetricCollector;
-use crate::types::{MetricEntry, MetricResult, MetricValue, ParsedChange};
+use crate::types::{
+    Column, LocalizedMessage, MetricEntry, MetricResult, MetricValue, ParsedChange, Severity,
+    report_description, report_display,
+};
 
 /// Files above this size are skipped — TODO scanning is cheap but blame on a
 /// 10-MB vendored file is not worth the latency.
@@ -211,7 +215,7 @@ impl MetricCollector for DebtMarkersCollector {
                 );
                 values.insert(
                     "recommendation".into(),
-                    MetricValue::Text(classify(e.age_days).into()),
+                    MetricValue::Message(classify(e.age_days)),
                 );
                 MetricEntry {
                     key: format!("{}:{}", e.hit.file, e.hit.line),
@@ -224,17 +228,16 @@ impl MetricCollector for DebtMarkersCollector {
 
         MetricResult {
             name: "debt_markers".into(),
-            display_name: "Debt Markers (TODO / FIXME / HACK / XXX)".into(),
-            description: "Every TODO, FIXME, HACK, and XXX comment found at HEAD, enriched with git blame to show how long it has been sitting in the code and who wrote it. Oldest markers come first — these are the ones most likely to have been forgotten. If a TODO has outlived the problem it describes, delete it; if it still matters, schedule the work.".into(),
+            display_name: report_display("debt_markers"),
+            description: report_description("debt_markers"),
             entry_groups: vec![],
-            column_labels: vec![],
             columns: vec![
-                "marker".into(),
-                "age_days".into(),
-                "author".into(),
-                "owner".into(),
-                "text".into(),
-                "recommendation".into(),
+                Column::in_report("debt_markers", "marker"),
+                Column::in_report("debt_markers", "age_days"),
+                Column::in_report("debt_markers", "author"),
+                Column::in_report("debt_markers", "owner"),
+                Column::in_report("debt_markers", "text"),
+                Column::in_report("debt_markers", "recommendation"),
             ],
             entries,
         }
@@ -378,14 +381,28 @@ fn blame_for_line(
     Some((email, age))
 }
 
-fn classify(age_days: i64) -> &'static str {
-    match age_days {
-        i64::MIN..=-1 => "age unknown",
-        0..=29 => "Fresh — recently added",
-        30..=179 => "Aging",
-        180..=364 => "Stale — schedule or drop",
-        _ => "Rotten — delete or act",
+fn classify(age_days: i64) -> LocalizedMessage {
+    let (code, severity) = match age_days {
+        i64::MIN..=-1 => (messages::DEBT_MARKERS_RECOMMENDATION_AGE_UNKNOWN, None),
+        0..=29 => (messages::DEBT_MARKERS_RECOMMENDATION_FRESH, None),
+        30..=179 => (
+            messages::DEBT_MARKERS_RECOMMENDATION_AGING,
+            Some(Severity::Info),
+        ),
+        180..=364 => (
+            messages::DEBT_MARKERS_RECOMMENDATION_STALE,
+            Some(Severity::Warning),
+        ),
+        _ => (
+            messages::DEBT_MARKERS_RECOMMENDATION_ROTTEN,
+            Some(Severity::Error),
+        ),
+    };
+    let mut msg = LocalizedMessage::code(code).with_param("age_days", age_days.max(0));
+    if let Some(s) = severity {
+        msg = msg.with_severity(s);
     }
+    msg
 }
 
 fn truncate_snippet(text: &str) -> String {
@@ -436,11 +453,27 @@ mod tests {
 
     #[test]
     fn classify_age_bands() {
-        assert_eq!(classify(-1), "age unknown");
-        assert_eq!(classify(5), "Fresh — recently added");
-        assert_eq!(classify(45), "Aging");
-        assert_eq!(classify(200), "Stale — schedule or drop");
-        assert_eq!(classify(500), "Rotten — delete or act");
+        assert_eq!(
+            classify(-1).code,
+            messages::DEBT_MARKERS_RECOMMENDATION_AGE_UNKNOWN
+        );
+        assert_eq!(
+            classify(5).code,
+            messages::DEBT_MARKERS_RECOMMENDATION_FRESH
+        );
+        assert_eq!(
+            classify(45).code,
+            messages::DEBT_MARKERS_RECOMMENDATION_AGING
+        );
+        assert_eq!(
+            classify(200).code,
+            messages::DEBT_MARKERS_RECOMMENDATION_STALE
+        );
+        assert_eq!(
+            classify(500).code,
+            messages::DEBT_MARKERS_RECOMMENDATION_ROTTEN
+        );
+        assert_eq!(classify(500).severity, Some(Severity::Error));
     }
 
     #[test]

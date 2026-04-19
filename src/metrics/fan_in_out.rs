@@ -3,8 +3,12 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
+use crate::messages;
 use crate::metrics::MetricCollector;
-use crate::types::{MetricEntry, MetricResult, MetricValue, ParsedChange};
+use crate::types::{
+    Column, LocalizedMessage, MetricEntry, MetricResult, MetricValue, ParsedChange,
+    report_description, report_display,
+};
 
 /// Skip files larger than this when scanning for imports.
 const MAX_BLOB_BYTES: u64 = 200 * 1024;
@@ -116,7 +120,7 @@ impl MetricCollector for FanInOutCollector {
                 values.insert("fan_in".into(), MetricValue::Count(c.fan_in));
                 values.insert("fan_out".into(), MetricValue::Count(c.fan_out));
                 values.insert("instability_pct".into(), MetricValue::Count(instability));
-                values.insert("role".into(), MetricValue::Text(role.into()));
+                values.insert("role".into(), MetricValue::Message(role));
                 MetricEntry { key: path, values }
             })
             .collect();
@@ -137,15 +141,14 @@ impl MetricCollector for FanInOutCollector {
 
         MetricResult {
             name: "fan_in_out".into(),
-            display_name: "Import Graph (Fan-in / Fan-out)".into(),
-            description: "How files depend on each other through imports. fan_in = how many other files import this one (high = critical hub, change carefully because many files depend on it). fan_out = how many files this one imports (high = orchestrator, may be doing too much and worth splitting).".into(),
+            display_name: report_display("fan_in_out"),
+            description: report_description("fan_in_out"),
             entry_groups: vec![],
-            column_labels: vec![],
             columns: vec![
-                "fan_in".into(),
-                "fan_out".into(),
-                "instability_pct".into(),
-                "role".into(),
+                Column::in_report("fan_in_out", "fan_in"),
+                Column::in_report("fan_in_out", "fan_out"),
+                Column::in_report("fan_in_out", "instability_pct"),
+                Column::in_report("fan_in_out", "role"),
             ],
             entries,
         }
@@ -169,18 +172,21 @@ fn detect_lang(path: &str) -> Option<Lang> {
     }
 }
 
-fn classify(fan_in: u64, fan_out: u64) -> &'static str {
-    if fan_in >= 5 && fan_out <= 2 {
-        "Hub — heavily depended on"
+fn classify(fan_in: u64, fan_out: u64) -> LocalizedMessage {
+    let code = if fan_in >= 5 && fan_out <= 2 {
+        messages::FAN_IN_OUT_ROLE_HUB
     } else if fan_out >= 5 && fan_in <= 1 {
-        "Orchestrator — pulls many modules"
+        messages::FAN_IN_OUT_ROLE_ORCHESTRATOR
     } else if fan_in == 0 && fan_out > 0 {
-        "Leaf entry-point"
+        messages::FAN_IN_OUT_ROLE_LEAF
     } else if fan_out == 0 && fan_in > 0 {
-        "Pure dependency"
+        messages::FAN_IN_OUT_ROLE_PURE_DEP
     } else {
-        "Mixed"
-    }
+        messages::FAN_IN_OUT_ROLE_MIXED
+    };
+    LocalizedMessage::code(code)
+        .with_param("fan_in", fan_in)
+        .with_param("fan_out", fan_out)
 }
 
 fn collect_blobs(
@@ -468,9 +474,9 @@ mod tests {
 
     #[test]
     fn classify_hub_vs_orchestrator() {
-        assert!(classify(10, 1).starts_with("Hub"));
-        assert!(classify(0, 8).starts_with("Orchestrator"));
-        assert_eq!(classify(0, 0), "Mixed");
+        assert_eq!(classify(10, 1).code, messages::FAN_IN_OUT_ROLE_HUB);
+        assert_eq!(classify(0, 8).code, messages::FAN_IN_OUT_ROLE_ORCHESTRATOR);
+        assert_eq!(classify(0, 0).code, messages::FAN_IN_OUT_ROLE_MIXED);
     }
 
     #[test]

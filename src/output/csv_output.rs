@@ -2,19 +2,21 @@ use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::i18n::Catalog;
 use crate::output::ReportWriter;
 use crate::types::{MetricEntry, MetricResult, MetricValue, OutputConfig};
 
 pub struct CsvWriter;
 
 impl CsvWriter {
-    fn format_value(value: &MetricValue) -> String {
+    fn format_value(catalog: &Catalog, value: &MetricValue) -> String {
         match value {
             MetricValue::Count(n) => n.to_string(),
             MetricValue::SignedCount(n) => n.to_string(),
             MetricValue::Float(v) => format!("{v:.2}"),
             MetricValue::Text(s) => s.clone(),
             MetricValue::Date(d) => d.to_string(),
+            MetricValue::Message(m) => catalog.translate(m),
             MetricValue::List(items) => {
                 let parts: Vec<String> = items.iter().map(|i| i.to_string()).collect();
                 format!("[{}]", parts.join(", "))
@@ -24,7 +26,7 @@ impl CsvWriter {
 
     fn get_columns(result: &MetricResult) -> Vec<String> {
         if !result.columns.is_empty() {
-            return result.columns.clone();
+            return result.columns.iter().map(|c| c.value.clone()).collect();
         }
         if let Some(first) = result.entries.first() {
             let mut cols: Vec<String> = first.values.keys().cloned().collect();
@@ -36,6 +38,7 @@ impl CsvWriter {
     }
 
     fn write_entries<W: io::Write>(
+        catalog: &Catalog,
         entries: &[MetricEntry],
         columns: &[String],
         csv_writer: &mut csv::Writer<W>,
@@ -46,7 +49,7 @@ impl CsvWriter {
                 let val = entry
                     .values
                     .get(col)
-                    .map(Self::format_value)
+                    .map(|v| Self::format_value(catalog, v))
                     .unwrap_or_default();
                 row.push(val);
             }
@@ -56,6 +59,7 @@ impl CsvWriter {
     }
 
     fn write_result_to_writer<W: io::Write>(
+        catalog: &Catalog,
         result: &MetricResult,
         writer: W,
         top: Option<usize>,
@@ -64,21 +68,16 @@ impl CsvWriter {
         let mut csv_writer = csv::Writer::from_writer(writer);
 
         if result.entry_groups.is_empty() {
-            // Header: "name" + column names
             let mut header = vec!["name".to_string()];
             header.extend(columns.iter().cloned());
             csv_writer.write_record(&header)?;
 
-            // `--top` clips the list in place. CSV has no metadata channel
-            // for "total" — consumers read the row count directly — so the
-            // truncation is silent here.
             let slice: &[MetricEntry] = match top {
                 Some(n) if n < result.entries.len() => &result.entries[..n],
                 _ => &result.entries[..],
             };
-            Self::write_entries(slice, &columns, &mut csv_writer)?;
+            Self::write_entries(catalog, slice, &columns, &mut csv_writer)?;
         } else {
-            // Header: "group" + "name" + column names
             let mut header = vec!["group".to_string(), "name".to_string()];
             header.extend(columns.iter().cloned());
             csv_writer.write_record(&header)?;
@@ -90,7 +89,7 @@ impl CsvWriter {
                         let val = entry
                             .values
                             .get(col)
-                            .map(Self::format_value)
+                            .map(|v| Self::format_value(catalog, v))
                             .unwrap_or_default();
                         row.push(val);
                     }
@@ -121,32 +120,29 @@ impl CsvWriter {
 impl ReportWriter for CsvWriter {
     fn write(&self, results: &[MetricResult], config: &OutputConfig) -> anyhow::Result<()> {
         let top = config.top;
+        let catalog = Catalog::load(&config.locale);
         match (&config.output_path, results.len()) {
-            // Single report to file
             (Some(path), 1) => {
                 let file = File::create(path)?;
-                Self::write_result_to_writer(&results[0], file, top)?;
+                Self::write_result_to_writer(&catalog, &results[0], file, top)?;
             }
-            // Multiple reports to separate files
             (Some(path), _) => {
                 for result in results {
                     let file_path = Self::multi_report_path(path, &result.name);
                     let file = File::create(&file_path)?;
-                    Self::write_result_to_writer(result, file, top)?;
+                    Self::write_result_to_writer(&catalog, result, file, top)?;
                 }
             }
-            // Single report to stdout
             (None, 1) => {
                 let stdout = io::stdout();
-                Self::write_result_to_writer(&results[0], stdout.lock(), top)?;
+                Self::write_result_to_writer(&catalog, &results[0], stdout.lock(), top)?;
             }
-            // Multiple reports to stdout with separators
             (None, _) => {
                 for result in results {
                     let name = result.name.to_lowercase().replace(' ', "_");
                     println!("--- {name} ---");
                     let stdout = io::stdout();
-                    Self::write_result_to_writer(result, stdout.lock(), top)?;
+                    Self::write_result_to_writer(&catalog, result, stdout.lock(), top)?;
                     println!();
                 }
             }
@@ -165,12 +161,15 @@ mod tests {
     use tempfile::TempDir;
 
     fn sample_result(name: &str) -> MetricResult {
+        use crate::types::{Column, report_description, report_display};
         MetricResult {
             name: name.to_string(),
-            display_name: name.to_string(),
-            description: format!("{name} description"),
-            columns: vec!["commits".to_string(), "lines".to_string()],
-            column_labels: vec!["Commits".to_string(), "Lines".to_string()],
+            display_name: report_display(name),
+            description: report_description(name),
+            columns: vec![
+                Column::in_report(name, "commits"),
+                Column::in_report(name, "lines"),
+            ],
             entry_groups: vec![],
             entries: vec![
                 MetricEntry {
@@ -202,6 +201,7 @@ mod tests {
             output_path: Some(path_str),
             top: None,
             quiet: false,
+            locale: "en".into(),
         };
 
         let result = sample_result("Authors");
@@ -225,6 +225,7 @@ mod tests {
             output_path: Some(path_str),
             top: None,
             quiet: false,
+            locale: "en".into(),
         };
 
         let results = vec![sample_result("Authors"), sample_result("Churn")];

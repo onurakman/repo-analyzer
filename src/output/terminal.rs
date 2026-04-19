@@ -1,18 +1,20 @@
 use comfy_table::{Cell, CellAlignment, Color, Table};
 
+use crate::i18n::Catalog;
 use crate::output::ReportWriter;
-use crate::types::{MetricEntry, MetricResult, MetricValue, OutputConfig};
+use crate::types::{Column, MetricEntry, MetricResult, MetricValue, OutputConfig, humanize};
 
 pub struct TerminalWriter;
 
 impl TerminalWriter {
-    fn format_value(value: &MetricValue) -> String {
+    fn format_value(catalog: &Catalog, value: &MetricValue) -> String {
         match value {
             MetricValue::Count(n) => n.to_string(),
             MetricValue::SignedCount(n) => n.to_string(),
             MetricValue::Float(v) => format!("{v:.2}"),
             MetricValue::Text(s) => s.clone(),
             MetricValue::Date(d) => d.to_string(),
+            MetricValue::Message(m) => catalog.translate(m),
             MetricValue::List(items) => {
                 let parts: Vec<String> = items.iter().map(|i| i.to_string()).collect();
                 format!("[{}]", parts.join(", "))
@@ -20,15 +22,19 @@ impl TerminalWriter {
         }
     }
 
-    fn get_columns(result: &MetricResult) -> Vec<String> {
+    fn get_columns(result: &MetricResult) -> Vec<Column> {
         if !result.columns.is_empty() {
             return result.columns.clone();
         }
-        // Fallback: derive from first entry's value keys (sorted)
+        // Fallback: derive from first entry's value keys (sorted). Label is
+        // a generic code since we don't know the owning report; writers then
+        // humanise the code when translation is missing.
         if let Some(first) = result.entries.first() {
-            let mut cols: Vec<String> = first.values.keys().cloned().collect();
-            cols.sort();
-            cols
+            let mut keys: Vec<String> = first.values.keys().cloned().collect();
+            keys.sort();
+            keys.into_iter()
+                .map(|k| Column::in_report(&result.name, k))
+                .collect()
         } else {
             vec![]
         }
@@ -36,18 +42,21 @@ impl TerminalWriter {
 }
 
 impl TerminalWriter {
-    fn render_table(entries: &[MetricEntry], columns: &[String], labels: &[String], top_n: usize) {
+    fn render_table(catalog: &Catalog, entries: &[MetricEntry], columns: &[Column], top_n: usize) {
         let mut table = Table::new();
 
-        // Header row uses human-friendly labels (parallel to `columns`).
-        // Falls back to the raw column key if a label is missing.
         let mut header_cells = vec![
             Cell::new("Name")
                 .fg(Color::Cyan)
                 .set_alignment(CellAlignment::Left),
         ];
-        for (i, col) in columns.iter().enumerate() {
-            let label = labels.get(i).map(String::as_str).unwrap_or(col);
+        for col in columns {
+            let mut label = catalog.translate(&col.label);
+            if label == col.label.code {
+                // No catalog hit — fall back to the snake_case value turned
+                // into Title Case so terminal output still looks readable.
+                label = humanize(&col.value);
+            }
             header_cells.push(
                 Cell::new(label)
                     .fg(Color::Cyan)
@@ -56,15 +65,14 @@ impl TerminalWriter {
         }
         table.set_header(header_cells);
 
-        // Data rows — value lookup still uses the snake_case column key.
         let display_count = entries.len().min(top_n);
         for entry in entries.iter().take(display_count) {
             let mut row = vec![entry.key.clone()];
             for col in columns {
                 let val = entry
                     .values
-                    .get(col)
-                    .map(Self::format_value)
+                    .get(&col.value)
+                    .map(|v| Self::format_value(catalog, v))
                     .unwrap_or_default();
                 row.push(val);
             }
@@ -85,43 +93,38 @@ impl TerminalWriter {
 impl ReportWriter for TerminalWriter {
     fn write(&self, results: &[MetricResult], config: &OutputConfig) -> anyhow::Result<()> {
         let top_n = config.top.unwrap_or(usize::MAX);
+        let catalog = Catalog::load(&config.locale);
 
         for result in results {
-            // Print header
             println!("\n{}", "=".repeat(60));
-            let title = if result.display_name.is_empty() {
-                &result.name
-            } else {
-                &result.display_name
-            };
+            let mut title = catalog.translate(&result.display_name);
+            if title == result.display_name.code {
+                title = result.name.clone();
+            }
             println!("  {title}");
             println!("{}", "=".repeat(60));
 
-            if !result.description.is_empty() {
-                println!("  {}\n", result.description);
+            let description = catalog.translate(&result.description);
+            if description != result.description.code && !description.is_empty() {
+                println!("  {description}\n");
             }
 
             let columns = Self::get_columns(result);
-            let labels = if result.column_labels.is_empty() {
-                columns.clone()
-            } else {
-                result.column_labels.clone()
-            };
 
             if result.entry_groups.is_empty() {
                 if columns.is_empty() && result.entries.is_empty() {
                     println!("  (no data)");
                     continue;
                 }
-                Self::render_table(&result.entries, &columns, &labels, top_n);
+                Self::render_table(&catalog, &result.entries, &columns, top_n);
             } else {
                 for group in &result.entry_groups {
                     println!(
                         "\n  -- {} ({} entries) --",
-                        group.label,
+                        catalog.translate_code(&group.label),
                         group.entries.len()
                     );
-                    Self::render_table(&group.entries, &columns, &labels, top_n);
+                    Self::render_table(&catalog, &group.entries, &columns, top_n);
                 }
             }
         }
@@ -138,12 +141,15 @@ mod tests {
 
     #[test]
     fn test_terminal_writer_no_panic() {
+        use crate::types::{report_description, report_display};
         let result = MetricResult {
             name: "test_metric".to_string(),
-            display_name: "Test Metric".to_string(),
-            description: "A test metric".to_string(),
-            columns: vec!["commits".to_string(), "lines".to_string()],
-            column_labels: vec!["Commits".to_string(), "Lines".to_string()],
+            display_name: report_display("test_metric"),
+            description: report_description("test_metric"),
+            columns: vec![
+                Column::in_report("test_metric", "commits"),
+                Column::in_report("test_metric", "lines"),
+            ],
             entry_groups: vec![],
             entries: vec![MetricEntry {
                 key: "alice".to_string(),
@@ -159,6 +165,7 @@ mod tests {
             output_path: None,
             top: Some(10),
             quiet: false,
+            locale: "en".into(),
         };
 
         let writer = TerminalWriter;

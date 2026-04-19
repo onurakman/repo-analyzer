@@ -1,6 +1,6 @@
 use chrono::{DateTime, FixedOffset, NaiveDate};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
@@ -283,6 +283,7 @@ pub enum MetricValue {
     Float(f64),
     Text(String),
     Date(NaiveDate),
+    Message(LocalizedMessage),
     #[allow(dead_code)]
     List(Vec<MetricValue>),
 }
@@ -295,6 +296,9 @@ impl fmt::Display for MetricValue {
             Self::Float(v) => write!(f, "{v:.2}"),
             Self::Text(s) => write!(f, "{s}"),
             Self::Date(d) => write!(f, "{d}"),
+            // Default CLI rendering is the stable code — writers that want
+            // localized text use their own catalog lookup before formatting.
+            Self::Message(m) => write!(f, "{}", m.code),
             Self::List(items) => {
                 let parts: Vec<String> = items.iter().map(|i| i.to_string()).collect();
                 write!(f, "{}", parts.join(", "))
@@ -320,6 +324,117 @@ pub struct EntryGroup {
     pub entries: Vec<MetricEntry>,
 }
 
+/// Severity level attached to a [`LocalizedMessage`]. `None` severity means the
+/// message is plain informational data with no badge in the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    Info,
+    Warning,
+    Error,
+    Critical,
+}
+
+/// A structured, localizable message.
+///
+/// `code` is a stable snake_case dotted identifier (e.g.
+/// `hotspot.recommendation.high_churn`) consumers translate via their own
+/// catalog. `params` holds substitution values referenced by the translation.
+/// `severity` drives UI badges; `None` means no badge.
+#[derive(Debug, Clone)]
+pub struct LocalizedMessage {
+    pub code: String,
+    pub severity: Option<Severity>,
+    pub params: BTreeMap<String, serde_json::Value>,
+}
+
+impl Serialize for LocalizedMessage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+        // Count fields: type + code + optional severity + optional params
+        let len = 2 + usize::from(self.severity.is_some()) + usize::from(!self.params.is_empty());
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry("type", "i18n")?;
+        map.serialize_entry("code", &self.code)?;
+        if let Some(ref s) = self.severity {
+            map.serialize_entry("severity", s)?;
+        }
+        if !self.params.is_empty() {
+            map.serialize_entry("params", &self.params)?;
+        }
+        map.end()
+    }
+}
+
+impl LocalizedMessage {
+    /// Bare message with no params and no severity — plain localized text.
+    pub fn code(code: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            severity: None,
+            params: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_severity(mut self, severity: Severity) -> Self {
+        self.severity = Some(severity);
+        self
+    }
+
+    pub fn with_param(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<serde_json::Value>,
+    ) -> Self {
+        self.params.insert(key.into(), value.into());
+        self
+    }
+}
+
+/// A table column descriptor. `value` is the snake_case key used to look up
+/// `MetricEntry.values`; `label` is a [`LocalizedMessage`] that points at a
+/// catalog key like `report.bloat.column.size_bytes`.
+#[derive(Debug, Clone, Serialize)]
+pub struct Column {
+    pub value: String,
+    pub label: LocalizedMessage,
+}
+
+impl Column {
+    /// Column whose label code is derived from the owning report + value.
+    /// The resulting code is `report.{report}.column.{value}`.
+    pub fn in_report(report: &str, value: impl Into<String>) -> Self {
+        let value = value.into();
+        let code = format!("report.{report}.column.{value}");
+        Self {
+            value,
+            label: LocalizedMessage::code(code),
+        }
+    }
+
+    /// Column with an explicit label message.
+    pub fn labeled(value: impl Into<String>, label: LocalizedMessage) -> Self {
+        Self {
+            value: value.into(),
+            label,
+        }
+    }
+}
+
+/// Localized message code for a report's display name. Consumers translate
+/// `report.{name}.display_name` via the catalog.
+pub fn report_display(name: &str) -> LocalizedMessage {
+    LocalizedMessage::code(format!("report.{name}.display_name"))
+}
+
+/// Localized message code for a report's description.
+pub fn report_description(name: &str) -> LocalizedMessage {
+    LocalizedMessage::code(format!("report.{name}.description"))
+}
+
 /// The result of one metric collector's run.
 ///
 /// When `entry_groups` is non-empty, entries are organized into named groups
@@ -327,18 +442,15 @@ pub struct EntryGroup {
 /// each group separately. The flat `entries` field is ignored in this case.
 ///
 /// `name` is the snake_case identifier used in code and CLI flags;
-/// `display_name` is the human-friendly title shown in reports.
-/// `columns` holds snake_case keys (used to look up `MetricEntry.values`);
-/// `column_labels` holds the human-friendly column headers, parallel to `columns`.
-/// If a collector leaves `column_labels` empty, the pipeline auto-fills it from
-/// `columns` via [`humanize`].
+/// `display_name` and `description` are [`LocalizedMessage`]s whose codes
+/// follow the `report.{name}.display_name` / `report.{name}.description`
+/// convention. Writers that translate consult a [`crate::i18n::Catalog`].
 #[derive(Debug, Clone, Serialize)]
 pub struct MetricResult {
     pub name: String,
-    pub display_name: String,
-    pub description: String,
-    pub columns: Vec<String>,
-    pub column_labels: Vec<String>,
+    pub display_name: LocalizedMessage,
+    pub description: LocalizedMessage,
+    pub columns: Vec<Column>,
     pub entries: Vec<MetricEntry>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub entry_groups: Vec<EntryGroup>,
@@ -530,6 +642,21 @@ pub struct OutputConfig {
     pub top: Option<usize>,
     #[allow(dead_code)]
     pub quiet: bool,
+    /// Short locale code (`en`, `tr`, ...) used by terminal/CSV/HTML writers.
+    /// JSON writer ignores this field and always emits raw message codes.
+    pub locale: String,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            format: OutputFormat::default(),
+            output_path: None,
+            top: None,
+            quiet: false,
+            locale: "en".to_string(),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -4,7 +4,9 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
-use crate::types::{MetricEntry, MetricResult, MetricValue};
+use crate::types::{
+    Column, MetricEntry, MetricResult, MetricValue, report_description, report_display,
+};
 
 pub struct ConstructChurnCollector;
 
@@ -93,17 +95,16 @@ impl MetricCollector for ConstructChurnCollector {
 
         Some(MetricResult {
             name: "construct_churn".into(),
-            display_name: "Function Churn".into(),
-            description: "Per-function (not per-file) churn — how often each individual function or method has been changed. Bugs almost always cluster in 3-5 specific functions inside a hot file rather than spreading evenly. Use this to pinpoint exactly which function inside a busy file keeps breaking.".into(),
+            display_name: report_display("construct_churn"),
+            description: report_description("construct_churn"),
             entry_groups: vec![],
-            column_labels: vec![],
             columns: vec![
-                "kind".into(),
-                "file".into(),
-                "changes".into(),
-                "lines_touched".into(),
-                "unique_authors".into(),
-                "last_modified".into(),
+                Column::in_report("construct_churn", "kind"),
+                Column::in_report("construct_churn", "file"),
+                Column::in_report("construct_churn", "changes"),
+                Column::in_report("construct_churn", "lines_touched"),
+                Column::in_report("construct_churn", "unique_authors"),
+                Column::in_report("construct_churn", "last_modified"),
             ],
             entries,
         })
@@ -118,10 +119,9 @@ fn ts_to_date(ts: i64) -> NaiveDate {
 fn empty_result() -> MetricResult {
     MetricResult {
         name: "construct_churn".into(),
-        display_name: "Function Churn".into(),
-        description: String::new(),
+        display_name: report_display("construct_churn"),
+        description: report_description("construct_churn"),
         entry_groups: vec![],
-        column_labels: vec![],
         columns: vec![],
         entries: vec![],
     }

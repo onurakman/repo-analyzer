@@ -31,7 +31,7 @@ use crate::metrics::patterns::PatternsCollector;
 use crate::metrics::quality::QualityCollector;
 use crate::metrics::succession::SuccessionCollector;
 use crate::parser::registry::LanguageRegistry;
-use crate::types::{DiffRecord, MetricResult, ParsedChange, ReportKind, TimeRange, humanize};
+use crate::types::{DiffRecord, MetricResult, ParsedChange, ReportKind, TimeRange};
 
 /// Known lock file names that should be excluded from analysis.
 const LOCK_FILE_NAMES: &[&str] = &[
@@ -180,9 +180,8 @@ impl Pipeline {
         if total == 0 {
             // No commits to analyze; return empty results from collectors
             let mut collectors = self.create_collectors();
-            let mut empty_results: Vec<MetricResult> =
+            let empty_results: Vec<MetricResult> =
                 collectors.iter_mut().map(|c| c.finalize()).collect();
-            fill_column_labels(&mut empty_results);
             return Ok(empty_results);
         }
 
@@ -387,18 +386,16 @@ impl Pipeline {
                     .unwrap_or_else(|| c.finalize())
             })
             .collect();
-        fill_column_labels(&mut results);
 
         // Health is a synthesis pass, not a collector — it reads the other
         // finalized reports and derives a score + action list. Prepend it so
         // it appears first in the output.
         if self.config.report_kinds.contains(&ReportKind::Health) {
             pb.set_message("[5/5] Computing health score...");
-            if let Some(mut health) = crate::scoring::health::compute_health(
+            if let Some(health) = crate::scoring::health::compute_health(
                 &results,
                 std::path::Path::new(&self.config.repo_path),
             ) {
-                fill_column_labels(std::slice::from_mut(&mut health));
                 results.insert(0, health);
             }
         }
@@ -521,18 +518,6 @@ fn get_file_content_at_commit(
         .ok_or_else(|| anyhow::anyhow!("path not found in tree: {}", file_path))?;
     let object = entry.object()?;
     Ok(String::from_utf8_lossy(&object.data).to_string())
-}
-
-/// Auto-populate `column_labels` for any result that left it empty.
-/// Each label is derived from the corresponding snake_case `columns` entry via
-/// [`humanize`], so writers can show readable headers without each collector
-/// having to spell them out.
-fn fill_column_labels(results: &mut [MetricResult]) {
-    for r in results.iter_mut() {
-        if r.column_labels.is_empty() {
-            r.column_labels = r.columns.iter().map(|c| humanize(c)).collect();
-        }
-    }
 }
 
 /// Look up a blob's size in the tree at `oid` without loading its contents.

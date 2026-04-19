@@ -4,7 +4,9 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
-use crate::types::{MetricEntry, MetricResult, MetricValue};
+use crate::types::{
+    Column, MetricEntry, MetricResult, MetricValue, report_description, report_display,
+};
 
 pub struct AuthorsCollector;
 
@@ -88,16 +90,15 @@ impl MetricCollector for AuthorsCollector {
 
         Some(MetricResult {
             name: "authors".into(),
-            display_name: "Authors".into(),
-            description: "Who has contributed to this repository, how much each person wrote, and when they were active. Use this to spot the most active people, identify newcomers, or find authors who haven't touched the project in a long time.".into(),
-            column_labels: vec![],
+            display_name: report_display("authors"),
+            description: report_description("authors"),
             columns: vec![
-                "commits".into(),
-                "lines_added".into(),
-                "lines_deleted".into(),
-                "active_days".into(),
-                "first_commit".into(),
-                "last_commit".into(),
+                Column::in_report("authors", "commits"),
+                Column::in_report("authors", "lines_added"),
+                Column::in_report("authors", "lines_deleted"),
+                Column::in_report("authors", "active_days"),
+                Column::in_report("authors", "first_commit"),
+                Column::in_report("authors", "last_commit"),
             ],
             entries,
             entry_groups: vec![],
@@ -113,9 +114,8 @@ fn ts_to_date(ts: i64) -> NaiveDate {
 fn empty_result() -> MetricResult {
     MetricResult {
         name: "authors".into(),
-        display_name: "Authors".into(),
-        description: String::new(),
-        column_labels: vec![],
+        display_name: report_display("authors"),
+        description: report_description("authors"),
         columns: vec![],
         entries: vec![],
         entry_groups: vec![],

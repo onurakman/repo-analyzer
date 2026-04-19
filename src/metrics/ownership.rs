@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
-use crate::types::{MetricEntry, MetricResult, MetricValue};
+use crate::types::{
+    Column, MetricEntry, MetricResult, MetricValue, report_description, report_display,
+};
 
 pub struct OwnershipCollector;
 
@@ -99,15 +101,14 @@ impl MetricCollector for OwnershipCollector {
 
         Some(MetricResult {
             name: "ownership".into(),
-            display_name: "File Ownership".into(),
-            description: "Who 'owns' each file (wrote the most lines), how many people contributed, and the bus factor — the minimum number of people that would need to leave for the file to lose more than 50% of its knowledge. Bus factor of 1 on a critical file is a real risk: if that one person leaves, no one else can safely change it.".into(),
+            display_name: report_display("ownership"),
+            description: report_description("ownership"),
             entry_groups: vec![],
-            column_labels: vec![],
             columns: vec![
-                "total_authors".into(),
-                "bus_factor".into(),
-                "top_author".into(),
-                "total_lines".into(),
+                Column::in_report("ownership", "total_authors"),
+                Column::in_report("ownership", "bus_factor"),
+                Column::in_report("ownership", "top_author"),
+                Column::in_report("ownership", "total_lines"),
             ],
             entries,
         })
@@ -134,10 +135,9 @@ fn compute_bus_factor(authors: &HashMap<String, u64>, total_lines: u64) -> u64 {
 fn empty_result() -> MetricResult {
     MetricResult {
         name: "ownership".into(),
-        display_name: "File Ownership".into(),
-        description: String::new(),
+        display_name: report_display("ownership"),
+        description: report_description("ownership"),
         entry_groups: vec![],
-        column_labels: vec![],
         columns: vec![],
         entries: vec![],
     }

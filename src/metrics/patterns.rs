@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
-use crate::types::{EntryGroup, MetricEntry, MetricResult, MetricValue};
+use crate::types::{
+    Column, EntryGroup, MetricEntry, MetricResult, MetricValue, report_description, report_display,
+};
 
 pub struct PatternsCollector;
 
@@ -99,10 +101,12 @@ impl MetricCollector for PatternsCollector {
 
         Some(MetricResult {
             name: "patterns".into(),
-            display_name: "Commit Patterns".into(),
-            description: "When commits happen — broken down by hour of day and day of week. Reveals team work patterns. Lots of late-night or weekend commits may indicate burnout, deadline pressure, or single-person bottlenecks. A healthy team usually shows a clear weekday daytime pattern.".into(),
-            columns: vec!["order".into(), "commits".into()],
-            column_labels: vec![],
+            display_name: report_display("patterns"),
+            description: report_description("patterns"),
+            columns: vec![
+                Column::in_report("patterns", "order"),
+                Column::in_report("patterns", "commits"),
+            ],
             entries: vec![],
             entry_groups: vec![
                 EntryGroup {
@@ -123,10 +127,9 @@ impl MetricCollector for PatternsCollector {
 fn empty_result() -> MetricResult {
     MetricResult {
         name: "patterns".into(),
-        display_name: "Commit Patterns".into(),
-        description: String::new(),
+        display_name: report_display("patterns"),
+        description: report_description("patterns"),
         columns: vec![],
-        column_labels: vec![],
         entries: vec![],
         entry_groups: vec![],
     }

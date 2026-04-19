@@ -2,9 +2,13 @@ use std::collections::HashMap;
 
 use gix::prelude::HeaderExt;
 
+use crate::messages;
 use crate::metrics::MetricCollector;
 use crate::metrics::large_sources::is_source_path;
-use crate::types::{MetricEntry, MetricResult, MetricValue, ParsedChange};
+use crate::types::{
+    Column, LocalizedMessage, MetricEntry, MetricResult, MetricValue, ParsedChange, Severity,
+    report_description, report_display,
+};
 
 /// Source files above this are absurd even for auto-generated code and
 /// warrant a bloat flag. Below this, source files are the
@@ -14,19 +18,19 @@ const SOURCE_BLOAT_THRESHOLD: u64 = 20 * 1024 * 1024;
 
 /// Patterns for files that are commonly committed by mistake.
 const SUSPICIOUS_PATTERNS: &[(&str, &str)] = &[
-    (".min.js", "Minified bundle — should be build artifact"),
-    (".min.css", "Minified bundle — should be build artifact"),
-    ("node_modules/", "Vendored dependencies — add to .gitignore"),
-    ("dist/", "Build output — should be generated, not committed"),
+    (".min.js", messages::BLOAT_RECOMMENDATION_MINIFIED_BUNDLE),
+    (".min.css", messages::BLOAT_RECOMMENDATION_MINIFIED_BUNDLE),
     (
-        "build/",
-        "Build output — should be generated, not committed",
+        "node_modules/",
+        messages::BLOAT_RECOMMENDATION_VENDORED_DEPS,
     ),
-    ("target/", "Rust build output — should be in .gitignore"),
-    ("vendor/", "Vendored deps — review if needed in repo"),
-    (".DS_Store", "OS metadata — add to global gitignore"),
-    (".idea/", "IDE config — usually not checked in"),
-    (".vscode/", "IDE config — usually not checked in"),
+    ("dist/", messages::BLOAT_RECOMMENDATION_BUILD_OUTPUT),
+    ("build/", messages::BLOAT_RECOMMENDATION_BUILD_OUTPUT),
+    ("target/", messages::BLOAT_RECOMMENDATION_RUST_BUILD_OUTPUT),
+    ("vendor/", messages::BLOAT_RECOMMENDATION_VENDORED_DEPS),
+    (".DS_Store", messages::BLOAT_RECOMMENDATION_OS_METADATA),
+    (".idea/", messages::BLOAT_RECOMMENDATION_IDE_CONFIG),
+    (".vscode/", messages::BLOAT_RECOMMENDATION_IDE_CONFIG),
 ];
 
 const LARGE_FILE_THRESHOLD: u64 = 500 * 1024; // 500 KB
@@ -77,7 +81,9 @@ impl MetricCollector for BloatCollector {
         for (path, size) in self.files.iter().take(30) {
             let recommendation = classify(path, *size);
             // Skip tiny files unless they match a suspicious pattern
-            if *size < LARGE_FILE_THRESHOLD && recommendation == "OK" {
+            if *size < LARGE_FILE_THRESHOLD
+                && recommendation.code == messages::BLOAT_RECOMMENDATION_OK
+            {
                 continue;
             }
 
@@ -86,7 +92,7 @@ impl MetricCollector for BloatCollector {
             values.insert("size_human".into(), MetricValue::Text(human_size(*size)));
             values.insert(
                 "recommendation".into(),
-                MetricValue::Text(recommendation.into()),
+                MetricValue::Message(recommendation),
             );
             entries.push(MetricEntry {
                 key: path.clone(),
@@ -100,11 +106,11 @@ impl MetricCollector for BloatCollector {
                 continue;
             }
             let rec = classify(path, *size);
-            if rec != "OK" {
+            if rec.code != messages::BLOAT_RECOMMENDATION_OK {
                 let mut values = HashMap::new();
                 values.insert("size_bytes".into(), MetricValue::Count(*size));
                 values.insert("size_human".into(), MetricValue::Text(human_size(*size)));
-                values.insert("recommendation".into(), MetricValue::Text(rec.into()));
+                values.insert("recommendation".into(), MetricValue::Message(rec));
                 entries.push(MetricEntry {
                     key: path.clone(),
                     values,
@@ -126,14 +132,13 @@ impl MetricCollector for BloatCollector {
 
         MetricResult {
             name: "bloat".into(),
-            display_name: "Repository Bloat".into(),
-            description: "Large files and committed artifacts that probably shouldn't be in git — minified bundles, build outputs, vendored dependencies, IDE configs, OS metadata. Removing or git-ignoring these (and rewriting history) shrinks the repository for everyone who clones it.".into(),
+            display_name: report_display("bloat"),
+            description: report_description("bloat"),
             entry_groups: vec![],
-            column_labels: vec![],
             columns: vec![
-                "size_bytes".into(),
-                "size_human".into(),
-                "recommendation".into(),
+                Column::in_report("bloat", "size_bytes"),
+                Column::in_report("bloat", "size_human"),
+                Column::in_report("bloat", "recommendation"),
             ],
             entries,
         }
@@ -178,18 +183,22 @@ fn walk_tree(repo: &gix::Repository, tree: &gix::Tree, prefix: &str, out: &mut V
     }
 }
 
-fn classify(path: &str, size: u64) -> &'static str {
-    for (pat, rec) in SUSPICIOUS_PATTERNS {
+fn classify(path: &str, size: u64) -> LocalizedMessage {
+    for (pat, code) in SUSPICIOUS_PATTERNS {
         if path.contains(pat) {
-            return rec;
+            return LocalizedMessage::code(*code).with_severity(Severity::Warning);
         }
     }
     if size >= 5 * 1024 * 1024 {
-        "Very large — investigate; use Git LFS if needed"
+        LocalizedMessage::code(messages::BLOAT_RECOMMENDATION_VERY_LARGE_FILE)
+            .with_severity(Severity::Warning)
+            .with_param("size_bytes", size)
     } else if size >= LARGE_FILE_THRESHOLD {
-        "Large — verify intentional, consider LFS"
+        LocalizedMessage::code(messages::BLOAT_RECOMMENDATION_LARGE_FILE)
+            .with_severity(Severity::Info)
+            .with_param("size_bytes", size)
     } else {
-        "OK"
+        LocalizedMessage::code(messages::BLOAT_RECOMMENDATION_OK)
     }
 }
 
@@ -221,16 +230,25 @@ mod tests {
 
     #[test]
     fn test_classify() {
-        assert_eq!(classify("normal.rs", 100), "OK");
         assert_eq!(
-            classify("normal.rs", 600 * 1024),
-            "Large — verify intentional, consider LFS"
+            classify("normal.rs", 100).code,
+            messages::BLOAT_RECOMMENDATION_OK
         );
         assert_eq!(
-            classify("big.bin", 10 * 1024 * 1024),
-            "Very large — investigate; use Git LFS if needed"
+            classify("normal.rs", 600 * 1024).code,
+            messages::BLOAT_RECOMMENDATION_LARGE_FILE
         );
-        assert!(classify("src/app.min.js", 10).contains("Minified"));
-        assert!(classify("node_modules/foo", 10).contains("Vendored"));
+        assert_eq!(
+            classify("big.bin", 10 * 1024 * 1024).code,
+            messages::BLOAT_RECOMMENDATION_VERY_LARGE_FILE
+        );
+        assert_eq!(
+            classify("src/app.min.js", 10).code,
+            messages::BLOAT_RECOMMENDATION_MINIFIED_BUNDLE
+        );
+        assert_eq!(
+            classify("node_modules/foo", 10).code,
+            messages::BLOAT_RECOMMENDATION_VENDORED_DEPS
+        );
     }
 }

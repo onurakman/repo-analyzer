@@ -42,6 +42,12 @@ pub struct Cli {
     #[arg(short, long)]
     pub quiet: bool,
 
+    /// Locale for translated terminal/CSV/HTML output. JSON output is always
+    /// emitted raw (message codes + params) regardless of this flag so
+    /// downstream consumers can localise themselves. Defaults to `en`.
+    #[arg(long, default_value = "en")]
+    pub locale: String,
+
     /// Number of threads for parallel processing (0 = auto)
     #[arg(long, default_value_t = 0)]
     pub threads: usize,
@@ -212,6 +218,7 @@ mod tests {
             top: None,
             output: None,
             quiet: false,
+            locale: "en".into(),
             threads: 0,
             channel_capacity: 4,
             batch_size: 64,
@@ -235,6 +242,7 @@ mod tests {
             top: None,
             output: None,
             quiet: false,
+            locale: "en".into(),
             threads: 0,
             channel_capacity: 4,
             batch_size: 64,

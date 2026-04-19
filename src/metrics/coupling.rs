@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use crate::analysis::source_filter::is_source_file;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
-use crate::types::{MetricEntry, MetricResult, MetricValue};
+use crate::types::{
+    Column, MetricEntry, MetricResult, MetricValue, report_description, report_display,
+};
 
 const MIN_COUPLING_COUNT: u64 = 3;
 const MIN_COUPLING_SCORE: f64 = 0.3;
@@ -103,9 +105,7 @@ impl MetricCollector for CouplingCollector {
 
                 // Pre-load per-file total commit counts (needed for scoring).
                 let mut per_file: HashMap<String, u64> = HashMap::new();
-                let mut stmt_totals = conn.prepare(
-                    "SELECT file, cnt FROM __coupling_files",
-                )?;
+                let mut stmt_totals = conn.prepare("SELECT file, cnt FROM __coupling_files")?;
                 let totals = stmt_totals.query_map([], |row| {
                     let p: String = row.get(0)?;
                     let n: i64 = row.get(1)?;
@@ -165,15 +165,14 @@ impl MetricCollector for CouplingCollector {
 
                 Ok(MetricResult {
                     name: "coupling".into(),
-                    display_name: "File Coupling".into(),
-                    description: "Pairs of files that tend to change together in the same commits. Strong coupling between files in different modules suggests a hidden dependency or missing abstraction — every time you touch A you're forced to touch B. Use this to find architectural seams to clean up.".into(),
+                    display_name: report_display("coupling"),
+                    description: report_description("coupling"),
                     entry_groups: vec![],
-                    column_labels: vec![],
                     columns: vec![
-                        "file_a".into(),
-                        "file_b".into(),
-                        "co_changes".into(),
-                        "score".into(),
+                        Column::in_report("coupling", "file_a"),
+                        Column::in_report("coupling", "file_b"),
+                        Column::in_report("coupling", "co_changes"),
+                        Column::in_report("coupling", "score"),
                     ],
                     entries,
                 })
@@ -186,10 +185,9 @@ impl MetricCollector for CouplingCollector {
 fn empty_result() -> MetricResult {
     MetricResult {
         name: "coupling".into(),
-        display_name: "File Coupling".into(),
-        description: String::new(),
+        display_name: report_display("coupling"),
+        description: report_description("coupling"),
         entry_groups: vec![],
-        column_labels: vec![],
         columns: vec![],
         entries: vec![],
     }

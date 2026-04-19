@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 use crate::analysis::source_filter::is_source_file;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
-use crate::types::{MetricEntry, MetricResult, MetricValue};
+use crate::types::{
+    Column, MetricEntry, MetricResult, MetricValue, report_description, report_display,
+};
 
 const MODULE_DEPTH: usize = 2;
 const MIN_CO_CHANGES: u64 = 3;
@@ -126,17 +128,15 @@ impl MetricCollector for ModuleCouplingCollector {
 
         Some(MetricResult {
             name: "module_coupling".into(),
-            display_name: "Module Coupling".into(),
-            description: format!(
-                "Like 'coupling' but at the directory/module level (depth {MODULE_DEPTH}) instead of per-file. Strong coupling between modules that 'shouldn't' be related (e.g. billing ↔ auth) reveals architectural smells: a leaky abstraction, a shared concern that should be extracted, or a piece of logic that lives in the wrong place."
-            ),
+            display_name: report_display("module_coupling"),
+            description: report_description("module_coupling")
+                .with_param("module_depth", MODULE_DEPTH as u64),
             entry_groups: vec![],
-            column_labels: vec![],
             columns: vec![
-                "module_a".into(),
-                "module_b".into(),
-                "co_changes".into(),
-                "score".into(),
+                Column::in_report("module_coupling", "module_a"),
+                Column::in_report("module_coupling", "module_b"),
+                Column::in_report("module_coupling", "co_changes"),
+                Column::in_report("module_coupling", "score"),
             ],
             entries,
         })
@@ -160,10 +160,9 @@ fn module_of(path: &str, depth: usize) -> String {
 fn empty_result() -> MetricResult {
     MetricResult {
         name: "module_coupling".into(),
-        display_name: "Module Coupling".into(),
-        description: String::new(),
+        display_name: report_display("module_coupling"),
+        description: report_description("module_coupling"),
         entry_groups: vec![],
-        column_labels: vec![],
         columns: vec![],
         entries: vec![],
     }

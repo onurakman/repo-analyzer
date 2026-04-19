@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 
 use crate::analysis::source_filter::is_source_file;
+use crate::messages;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
-use crate::types::{MetricEntry, MetricResult, MetricValue};
+use crate::types::{
+    Column, LocalizedMessage, MetricEntry, MetricResult, MetricValue, Severity, report_description,
+    report_display,
+};
 
 pub struct OutliersCollector;
 
@@ -96,7 +100,7 @@ impl MetricCollector for OutliersCollector {
                 values.insert("change_count".into(), MetricValue::Count(cc));
                 values.insert("unique_authors".into(), MetricValue::Count(ua));
                 values.insert("total_churn".into(), MetricValue::Count(tc));
-                values.insert("recommendation".into(), MetricValue::Text(rec));
+                values.insert("recommendation".into(), MetricValue::Message(rec));
                 MetricEntry { key: file, values }
             })
             .collect();
@@ -115,39 +119,53 @@ impl MetricCollector for OutliersCollector {
 
         Some(MetricResult {
             name: "outliers".into(),
-            display_name: "Refactor Candidates".into(),
-            description: "Files that are unusually risky on two fronts at once: they change very often AND have many different authors. Both signals together almost always mean accumulated bugs, unclear ownership, and high review cost. These are your top refactor / split candidates.".into(),
+            display_name: report_display("outliers"),
+            description: report_description("outliers"),
             entry_groups: vec![],
-            column_labels: vec![],
             columns: vec![
-                "change_count".into(),
-                "unique_authors".into(),
-                "total_churn".into(),
-                "recommendation".into(),
+                Column::in_report("outliers", "change_count"),
+                Column::in_report("outliers", "unique_authors"),
+                Column::in_report("outliers", "total_churn"),
+                Column::in_report("outliers", "recommendation"),
             ],
             entries,
         })
     }
 }
 
-fn build_recommendation(changes: u64, authors: usize) -> String {
+fn build_recommendation(changes: u64, authors: usize) -> LocalizedMessage {
     let high_churn = changes >= HIGH_CHURN_THRESHOLD;
     let high_authors = authors >= HIGH_AUTHORS_THRESHOLD;
-    match (high_churn, high_authors) {
-        (true, true) => "God file + ownership chaos — split responsibilities".into(),
-        (true, false) => "High churn — consider refactoring for stability".into(),
-        (false, true) => "Diffuse ownership — clarify module owner".into(),
-        (false, false) => "OK".into(),
+    let (code, severity) = match (high_churn, high_authors) {
+        (true, true) => (
+            messages::OUTLIERS_RECOMMENDATION_GOD_FILE,
+            Some(Severity::Error),
+        ),
+        (true, false) => (
+            messages::OUTLIERS_RECOMMENDATION_HIGH_CHURN,
+            Some(Severity::Warning),
+        ),
+        (false, true) => (
+            messages::OUTLIERS_RECOMMENDATION_DIFFUSE_OWNERSHIP,
+            Some(Severity::Warning),
+        ),
+        (false, false) => (messages::OUTLIERS_RECOMMENDATION_OK, None),
+    };
+    let mut msg = LocalizedMessage::code(code)
+        .with_param("changes", changes)
+        .with_param("authors", authors as u64);
+    if let Some(s) = severity {
+        msg = msg.with_severity(s);
     }
+    msg
 }
 
 fn empty_result() -> MetricResult {
     MetricResult {
         name: "outliers".into(),
-        display_name: "Refactor Candidates".into(),
-        description: String::new(),
+        display_name: report_display("outliers"),
+        description: report_description("outliers"),
         entry_groups: vec![],
-        column_labels: vec![],
         columns: vec![],
         entries: vec![],
     }

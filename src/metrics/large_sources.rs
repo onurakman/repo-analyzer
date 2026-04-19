@@ -2,8 +2,12 @@ use std::collections::HashMap;
 
 use crate::analysis::line_classifier::count_lines;
 use crate::langs::detect_language_info;
+use crate::messages;
 use crate::metrics::MetricCollector;
-use crate::types::{MetricEntry, MetricResult, MetricValue, ParsedChange};
+use crate::types::{
+    Column, LocalizedMessage, MetricEntry, MetricResult, MetricValue, ParsedChange, Severity,
+    report_description, report_display,
+};
 
 /// Blobs above this size are considered "enormous" — scanning them with the
 /// line classifier is still cheap, but bloat catches the truly absurd
@@ -108,7 +112,7 @@ impl MetricCollector for LargeSourcesCollector {
                 values.insert("language".into(), MetricValue::Text(f.language.into()));
                 values.insert(
                     "recommendation".into(),
-                    MetricValue::Text(classify(f.code).into()),
+                    MetricValue::Message(classify(f.code)),
                 );
                 MetricEntry {
                     key: f.path,
@@ -119,19 +123,18 @@ impl MetricCollector for LargeSourcesCollector {
 
         MetricResult {
             name: "large_sources".into(),
-            display_name: "Large Source Files".into(),
-            description: "Source files (handwritten code, not markup or data) sorted by executable code lines. Anything over 1500 code lines is a split candidate — it's hard to navigate, review, and test. An enormous file (5k+ code lines) is usually either auto-generated (consider moving to a build step instead of committing) or a 'god module' that has accreted too many responsibilities.".into(),
+            display_name: report_display("large_sources"),
+            description: report_description("large_sources"),
             entry_groups: vec![],
-            column_labels: vec![],
             columns: vec![
-                "size_bytes".into(),
-                "size_human".into(),
-                "code_lines".into(),
-                "comment_lines".into(),
-                "blank_lines".into(),
-                "total_lines".into(),
-                "language".into(),
-                "recommendation".into(),
+                Column::in_report("large_sources", "size_bytes"),
+                Column::in_report("large_sources", "size_human"),
+                Column::in_report("large_sources", "code_lines"),
+                Column::in_report("large_sources", "comment_lines"),
+                Column::in_report("large_sources", "blank_lines"),
+                Column::in_report("large_sources", "total_lines"),
+                Column::in_report("large_sources", "language"),
+                Column::in_report("large_sources", "recommendation"),
             ],
             entries,
         }
@@ -236,12 +239,23 @@ pub fn is_source_path(path: &str) -> bool {
     )
 }
 
-fn classify(code_lines: u64) -> &'static str {
-    match code_lines {
-        0..=1499 => "Sizeable — monitor",
-        1500..=4999 => "Very large — consider splitting",
-        _ => "Enormous — likely generated or a god module",
+fn classify(code_lines: u64) -> LocalizedMessage {
+    let (code, severity) = match code_lines {
+        0..=1499 => (messages::LARGE_SOURCES_RECOMMENDATION_SIZEABLE, None),
+        1500..=4999 => (
+            messages::LARGE_SOURCES_RECOMMENDATION_VERY_LARGE,
+            Some(Severity::Warning),
+        ),
+        _ => (
+            messages::LARGE_SOURCES_RECOMMENDATION_ENORMOUS,
+            Some(Severity::Error),
+        ),
+    };
+    let mut msg = LocalizedMessage::code(code).with_param("code_lines", code_lines);
+    if let Some(s) = severity {
+        msg = msg.with_severity(s);
     }
+    msg
 }
 
 fn human_size(n: u64) -> String {
@@ -262,13 +276,25 @@ mod tests {
 
     #[test]
     fn classify_thresholds() {
-        assert_eq!(classify(0), "Sizeable — monitor");
-        assert_eq!(classify(1499), "Sizeable — monitor");
-        assert_eq!(classify(1500), "Very large — consider splitting");
-        assert_eq!(classify(4999), "Very large — consider splitting");
         assert_eq!(
-            classify(5000),
-            "Enormous — likely generated or a god module"
+            classify(0).code,
+            messages::LARGE_SOURCES_RECOMMENDATION_SIZEABLE
+        );
+        assert_eq!(
+            classify(1499).code,
+            messages::LARGE_SOURCES_RECOMMENDATION_SIZEABLE
+        );
+        assert_eq!(
+            classify(1500).code,
+            messages::LARGE_SOURCES_RECOMMENDATION_VERY_LARGE
+        );
+        assert_eq!(
+            classify(4999).code,
+            messages::LARGE_SOURCES_RECOMMENDATION_VERY_LARGE
+        );
+        assert_eq!(
+            classify(5000).code,
+            messages::LARGE_SOURCES_RECOMMENDATION_ENORMOUS
         );
     }
 

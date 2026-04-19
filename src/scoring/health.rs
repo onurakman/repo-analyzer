@@ -12,7 +12,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::types::{EntryGroup, MetricEntry, MetricResult, MetricValue};
+use crate::messages;
+use crate::types::{
+    Column, EntryGroup, LocalizedMessage, MetricEntry, MetricResult, MetricValue, Severity,
+    report_description, report_display,
+};
 
 /// Weight of each pillar in the overall score. Equal weighting keeps the
 /// surface transparent — one pillar can't dominate silently.
@@ -60,7 +64,7 @@ struct Pillar {
     key: &'static str,
     display: &'static str,
     score: f64,
-    summary: String,
+    summary: LocalizedMessage,
     actions: Vec<Action>,
 }
 
@@ -69,24 +73,45 @@ struct Pillar {
 /// the final output.
 struct Action {
     pillar: &'static str,
+    level: LocalizedMessage,
     target: String,
-    detail: String,
-    command: String,
+    detail: LocalizedMessage,
+    command: LocalizedMessage,
 }
 
 impl Action {
     fn new(
         pillar: &'static str,
+        level: LocalizedMessage,
         target: impl Into<String>,
-        detail: impl Into<String>,
-        command: impl Into<String>,
+        detail: LocalizedMessage,
+        command: LocalizedMessage,
     ) -> Self {
         Self {
             pillar,
+            level,
             target: target.into(),
-            detail: detail.into(),
-            command: command.into(),
+            detail,
+            command,
         }
+    }
+}
+
+fn critical() -> LocalizedMessage {
+    LocalizedMessage::code(messages::HEALTH_ACTION_CRITICAL).with_severity(Severity::Critical)
+}
+
+fn warning() -> LocalizedMessage {
+    LocalizedMessage::code(messages::HEALTH_ACTION_WARNING).with_severity(Severity::Warning)
+}
+
+fn level_for_score(score: f64) -> LocalizedMessage {
+    if score >= 80.0 {
+        LocalizedMessage::code(messages::HEALTH_ACTION_OK)
+    } else if score >= 60.0 {
+        warning()
+    } else {
+        critical()
     }
 }
 
@@ -123,45 +148,44 @@ fn score_commit_discipline(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
     if low_q > 5.0 {
         actions.push(Action::new(
             "commit_discipline",
+            warning(),
             "commit messages",
-            format!(
-                "{:.1}% of commits have low-quality messages (wip/fix/typo/...)",
-                low_q
-            ),
-            "Enforce conventional commits or a `commitlint` hook in CI",
+            LocalizedMessage::code(messages::HEALTH_DETAIL_LOW_QUALITY)
+                .with_param("pct", format!("{:.1}", low_q)),
+            LocalizedMessage::code(messages::HEALTH_COMMAND_ENFORCE_CONVENTIONAL),
         ));
     }
     if mega > 10.0 {
         actions.push(Action::new(
             "commit_discipline",
+            warning(),
             "mega commits",
-            format!(
-                "{:.1}% of commits touch 1000+ lines — hard to review or revert",
-                mega
-            ),
-            "Split large commits by feature/file before merging",
+            LocalizedMessage::code(messages::HEALTH_DETAIL_MEGA_COMMITS)
+                .with_param("pct", format!("{:.1}", mega)),
+            LocalizedMessage::code(messages::HEALTH_COMMAND_SPLIT_COMMITS),
         ));
     }
     if revert > 3.0 {
         actions.push(Action::new(
             "commit_discipline",
+            critical(),
             "revert rate",
-            format!(
-                "{:.1}% of commits are reverts — CI/review gates are leaky",
-                revert
-            ),
-            "Require green CI + peer review before merge",
+            LocalizedMessage::code(messages::HEALTH_DETAIL_HIGH_REVERT)
+                .with_param("pct", format!("{:.1}", revert)),
+            LocalizedMessage::code(messages::HEALTH_COMMAND_REQUIRE_REVIEW),
         ));
     }
 
-    let summary = format!(
-        "short={:.0}% low-q={:.0}% mega={:.0}% revert={:.0}% merge={:.0}%",
-        short, low_q, mega, revert, merge
-    );
+    let summary = LocalizedMessage::code(messages::HEALTH_SUMMARY_COMMIT_DISCIPLINE)
+        .with_param("short", format!("{:.0}", short))
+        .with_param("low_q", format!("{:.0}", low_q))
+        .with_param("mega", format!("{:.0}", mega))
+        .with_param("revert", format!("{:.0}", revert))
+        .with_param("merge", format!("{:.0}", merge));
 
     Pillar {
         key: "commit_discipline",
-        display: "Commit Discipline",
+        display: messages::HEALTH_PILLAR_COMMIT_DISCIPLINE,
         score,
         summary,
         actions,
@@ -181,15 +205,24 @@ fn score_bus_factor(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
 
     let high_risk = silos
         .iter()
-        .filter(
-            |e| matches!(e.values.get("risk"), Some(MetricValue::Text(s)) if s.contains("High")),
-        )
+        .filter(|e| {
+            matches!(
+                e.values.get("risk"),
+                Some(MetricValue::Message(m))
+                    if m.code == messages::KNOWLEDGE_SILO_RISK_AT_RISK
+            )
+        })
         .count();
 
     let stale = succ
         .iter()
         .filter(|e| {
-            matches!(e.values.get("status"), Some(MetricValue::Text(s)) if s.to_lowercase().contains("stale"))
+            matches!(
+                e.values.get("status"),
+                Some(MetricValue::Message(m))
+                    if m.code == messages::SUCCESSION_STATUS_ORPHANED
+                        || m.code == messages::SUCCESSION_STATUS_KNOWLEDGE_TRANSFER_NEEDED
+            )
         })
         .count();
 
@@ -200,25 +233,32 @@ fn score_bus_factor(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
 
     let mut actions: Vec<Action> = Vec::new();
     for e in silos.iter().take(3) {
-        if matches!(e.values.get("risk"), Some(MetricValue::Text(s)) if s.contains("High")) {
+        if matches!(
+            e.values.get("risk"),
+            Some(MetricValue::Message(m)) if m.code == messages::KNOWLEDGE_SILO_RISK_AT_RISK
+        ) {
             let owner = match e.values.get("owner") {
                 Some(MetricValue::Text(s)) => s.clone(),
                 _ => "<unknown>".into(),
             };
             actions.push(Action::new(
                 "bus_factor",
+                critical(),
                 e.key.clone(),
-                format!("sole owner: {}", owner),
-                "Pair-review next change to this file with a second author",
+                LocalizedMessage::code(messages::HEALTH_DETAIL_SOLE_OWNER)
+                    .with_param("owner", owner),
+                LocalizedMessage::code(messages::HEALTH_COMMAND_PAIR_REVIEW),
             ));
         }
     }
 
     Pillar {
         key: "bus_factor",
-        display: "Bus Factor",
+        display: messages::HEALTH_PILLAR_BUS_FACTOR,
         score,
-        summary: format!("{} high-risk silos, {} stale owners", high_risk, stale),
+        summary: LocalizedMessage::code(messages::HEALTH_SUMMARY_BUS_FACTOR)
+            .with_param("high_risk", high_risk as u64)
+            .with_param("stale", stale as u64),
         actions,
     }
 }
@@ -317,9 +357,12 @@ fn score_refactoring_debt(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
             };
             actions.push(Action::new(
                 "refactoring_debt",
+                critical(),
                 e.key.clone(),
-                format!("cyclomatic {} ({} code lines)", c, lines),
-                "Extract branches into helper fns; add a dedicated test first",
+                LocalizedMessage::code(messages::HEALTH_DETAIL_HIGH_COMPLEXITY)
+                    .with_param("cc", *c)
+                    .with_param("lines", lines),
+                LocalizedMessage::code(messages::HEALTH_COMMAND_EXTRACT_BRANCHES),
             ));
         }
     }
@@ -330,9 +373,10 @@ fn score_refactoring_debt(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
     {
         actions.push(Action::new(
             "refactoring_debt",
+            warning(),
             biggest.key.clone(),
-            format!("{} code lines — god-module candidate", lines),
-            "Split by responsibility; if auto-generated, move to a build step instead",
+            LocalizedMessage::code(messages::HEALTH_DETAIL_GOD_MODULE).with_param("lines", *lines),
+            LocalizedMessage::code(messages::HEALTH_COMMAND_SPLIT_MODULE),
         ));
     }
 
@@ -351,26 +395,27 @@ fn score_refactoring_debt(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
         };
         actions.push(Action::new(
             "refactoring_debt",
+            warning(),
             oldest.key.clone(),
-            format!("{} open for {} days", marker, age),
-            "Resolve it or delete the comment — don't leave it to rot",
+            LocalizedMessage::code(messages::HEALTH_DETAIL_ROTTEN_MARKER)
+                .with_param("marker", marker)
+                .with_param("days", age),
+            LocalizedMessage::code(messages::HEALTH_COMMAND_RESOLVE_MARKER),
         ));
     }
 
     Pillar {
         key: "refactoring_debt",
-        display: "Refactoring Debt",
+        display: messages::HEALTH_PILLAR_REFACTORING_DEBT,
         score,
-        summary: format!(
-            "{} fns CC≥20, {} CC 11-19, {} outliers, {} stale + {} rotten markers, {} huge + {} sizeable files",
-            very_high,
-            high,
-            outlier_count,
-            stale_markers,
-            rotten_markers,
-            very_large_sources,
-            sizeable_sources
-        ),
+        summary: LocalizedMessage::code(messages::HEALTH_SUMMARY_REFACTORING_DEBT)
+            .with_param("very_high", very_high as u64)
+            .with_param("high", high as u64)
+            .with_param("outliers", outlier_count as u64)
+            .with_param("stale", stale_markers as u64)
+            .with_param("rotten", rotten_markers as u64)
+            .with_param("huge", very_large_sources as u64)
+            .with_param("sizeable", sizeable_sources as u64),
         actions,
     }
 }
@@ -386,9 +431,12 @@ fn score_tidiness(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
     // Every bloat finding that isn't "OK" in the recommendation column counts.
     let bloat_findings = bloat
         .iter()
-        .filter(
-            |e| !matches!(e.values.get("recommendation"), Some(MetricValue::Text(s)) if s == "OK"),
-        )
+        .filter(|e| {
+            !matches!(
+                e.values.get("recommendation"),
+                Some(MetricValue::Message(m)) if m.code == messages::BLOAT_RECOMMENDATION_OK
+            )
+        })
         .count();
 
     // Composition may report `(binary/skipped)` and `(unknown)` buckets. Those
@@ -407,25 +455,31 @@ fn score_tidiness(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
 
     let mut actions: Vec<Action> = Vec::new();
     for e in bloat.iter().take(3) {
-        let rec = match e.values.get("recommendation") {
-            Some(MetricValue::Text(s)) => s.clone(),
-            _ => continue,
+        let Some(MetricValue::Message(m)) = e.values.get("recommendation") else {
+            continue;
         };
-        if rec == "OK" {
+        if m.code == messages::BLOAT_RECOMMENDATION_OK {
             continue;
         }
         let cmd = bloat_command_for(&e.key);
-        actions.push(Action::new("tidiness", e.key.clone(), rec, cmd));
+        actions.push(Action::new(
+            "tidiness",
+            warning(),
+            e.key.clone(),
+            // Detail carries the bloat code so the localised UI can render the
+            // reason alongside the suggested shell command.
+            LocalizedMessage::code(m.code.clone()),
+            LocalizedMessage::code(cmd),
+        ));
     }
 
     Pillar {
         key: "tidiness",
-        display: "Repo Tidiness",
+        display: messages::HEALTH_PILLAR_TIDINESS,
         score,
-        summary: format!(
-            "{} bloat findings, {} binary/skipped files",
-            bloat_findings, binary_files
-        ),
+        summary: LocalizedMessage::code(messages::HEALTH_SUMMARY_TIDINESS)
+            .with_param("bloat", bloat_findings as u64)
+            .with_param("binary", binary_files),
         actions,
     }
 }
@@ -449,9 +503,9 @@ fn score_change_concentration(by_name: &HashMap<&str, &MetricResult>) -> Pillar 
         // Too small to draw a line.
         return Pillar {
             key: "change_concentration",
-            display: "Change Concentration",
+            display: messages::HEALTH_PILLAR_CHANGE_CONCENTRATION,
             score: 100.0,
-            summary: "not enough files to measure".into(),
+            summary: LocalizedMessage::code(messages::HEALTH_SUMMARY_NOT_ENOUGH_FILES),
             actions: vec![],
         };
     }
@@ -474,14 +528,12 @@ fn score_change_concentration(by_name: &HashMap<&str, &MetricResult>) -> Pillar 
     let deviation = cumulative_at_top20 - 80.0;
     let score = (100.0 - deviation.max(0.0) * 2.0).max(MIN_PILLAR_SCORE);
 
-    let summary = format!(
-        "top 20% of files carry {:.0}% of churn (80% is textbook Pareto)",
-        cumulative_at_top20
-    );
+    let summary = LocalizedMessage::code(messages::HEALTH_SUMMARY_CHANGE_CONCENTRATION)
+        .with_param("pct", format!("{:.0}", cumulative_at_top20));
 
     Pillar {
         key: "change_concentration",
-        display: "Change Concentration",
+        display: messages::HEALTH_PILLAR_CHANGE_CONCENTRATION,
         score,
         summary,
         actions: vec![],
@@ -507,7 +559,8 @@ fn repo_hygiene_findings(
         && mb >= 1024
     {
         out.push(HygieneFinding {
-            detail: format!(".git is {} MB — consider Git LFS for large binaries", mb),
+            detail: LocalizedMessage::code(messages::HEALTH_HYGIENE_LARGE_GIT_DIR)
+                .with_param("mb", mb),
             command: "# https://git-lfs.com/ — migrate existing large blobs with `git lfs migrate import`".into(),
             history_rewrite: false,
         });
@@ -517,7 +570,8 @@ fn repo_hygiene_findings(
         && packs > 50
     {
         out.push(HygieneFinding {
-            detail: format!("{} pack files — repo is fragmented", packs),
+            detail: LocalizedMessage::code(messages::HEALTH_HYGIENE_FRAGMENTED_PACKS)
+                .with_param("packs", packs as u64),
             command: "git repack -a -d --depth=250 --window=250".into(),
             history_rewrite: false,
         });
@@ -527,7 +581,8 @@ fn repo_hygiene_findings(
         && loose > 10_000
     {
         out.push(HygieneFinding {
-            detail: format!("{} loose objects — housekeeping overdue", loose),
+            detail: LocalizedMessage::code(messages::HEALTH_HYGIENE_LOOSE_OBJECTS)
+                .with_param("loose", loose as u64),
             command: "git gc --aggressive --prune=now".into(),
             history_rewrite: false,
         });
@@ -537,22 +592,38 @@ fn repo_hygiene_findings(
     // from tracking. If it found a large binary, suggest filter-repo (heavy).
     if let Some(bloat) = by_name.get("bloat") {
         for e in bloat.entries.iter().take(5) {
-            let rec = match e.values.get("recommendation") {
-                Some(MetricValue::Text(s)) => s.clone(),
-                _ => continue,
+            let Some(MetricValue::Message(m)) = e.values.get("recommendation") else {
+                continue;
             };
-            if rec.contains("Vendored") || rec.contains("Build output") || rec.contains("IDE") {
+            let code = m.code.as_str();
+            let is_cached = matches!(
+                code,
+                c if c == messages::BLOAT_RECOMMENDATION_VENDORED_DEPS
+                    || c == messages::BLOAT_RECOMMENDATION_BUILD_OUTPUT
+                    || c == messages::BLOAT_RECOMMENDATION_RUST_BUILD_OUTPUT
+                    || c == messages::BLOAT_RECOMMENDATION_IDE_CONFIG
+            );
+            let is_history_rewrite = matches!(
+                code,
+                c if c == messages::BLOAT_RECOMMENDATION_LARGE_FILE
+                    || c == messages::BLOAT_RECOMMENDATION_VERY_LARGE_FILE
+            );
+            if is_cached {
                 out.push(HygieneFinding {
-                    detail: format!("{}: {}", e.key, rec),
+                    detail: LocalizedMessage::code(messages::HEALTH_HYGIENE_BLOAT_FINDING)
+                        .with_param("path", e.key.clone())
+                        .with_param("reason", code),
                     command: format!(
                         "git rm -rf --cached '{}' && echo '{}' >> .gitignore",
                         e.key, e.key
                     ),
                     history_rewrite: false,
                 });
-            } else if rec.contains("Very large") || rec.contains("Large") {
+            } else if is_history_rewrite {
                 out.push(HygieneFinding {
-                    detail: format!("{}: {}", e.key, rec),
+                    detail: LocalizedMessage::code(messages::HEALTH_HYGIENE_BLOAT_FINDING)
+                        .with_param("path", e.key.clone())
+                        .with_param("reason", code),
                     command: format!(
                         "git filter-repo --path '{}' --invert-paths  # rewrites history",
                         e.key
@@ -567,7 +638,7 @@ fn repo_hygiene_findings(
 }
 
 struct HygieneFinding {
-    detail: String,
+    detail: LocalizedMessage,
     command: String,
     history_rewrite: bool,
 }
@@ -631,29 +702,45 @@ fn count_loose_objects(git_dir: &Path) -> Option<usize> {
 
 fn build_result(overall: u64, pillars: Vec<Pillar>, hygiene: Vec<HygieneFinding>) -> MetricResult {
     let columns = vec![
-        "score".to_string(),
-        "details".to_string(),
-        "action".to_string(),
+        Column::in_report("health", "score"),
+        Column::labeled(
+            "level",
+            LocalizedMessage::code("report.health.column.level"),
+        ),
+        Column::in_report("health", "details"),
+        Column::in_report("health", "action"),
     ];
 
     let overall_entry = MetricEntry {
         key: "overall".into(),
         values: values(
             Some(overall),
-            format!("{}/100", overall),
-            interpretation(overall),
+            MetricValue::Message(
+                LocalizedMessage::code(messages::HEALTH_OVERALL_SCORE).with_param("score", overall),
+            ),
+            MetricValue::Message(interpretation(overall)),
         ),
     };
 
     let pillar_entries: Vec<MetricEntry> = pillars
         .iter()
-        .map(|p| MetricEntry {
-            key: p.key.to_string(),
-            values: values(
+        .map(|p| {
+            let mut v = values(
                 Some(p.score.round() as u64),
-                p.summary.clone(),
-                format!("{} — see actions below", p.display),
-            ),
+                MetricValue::Message(p.summary.clone()),
+                MetricValue::Message(
+                    LocalizedMessage::code(messages::HEALTH_PILLAR_SEE_ACTIONS)
+                        .with_param("pillar", p.display),
+                ),
+            );
+            v.insert(
+                "level".into(),
+                MetricValue::Message(level_for_score(p.score)),
+            );
+            MetricEntry {
+                key: p.key.to_string(),
+                values: v,
+            }
         })
         .collect();
 
@@ -664,9 +751,17 @@ fn build_result(overall: u64, pillars: Vec<Pillar>, hygiene: Vec<HygieneFinding>
 
     let action_entries: Vec<MetricEntry> = all_actions
         .into_iter()
-        .map(|a| MetricEntry {
-            key: format!("{}: {}", a.pillar, a.target),
-            values: values(None, a.detail.clone(), a.command.clone()),
+        .map(|a| {
+            let mut v = values(
+                None,
+                MetricValue::Message(a.detail.clone()),
+                MetricValue::Message(a.command.clone()),
+            );
+            v.insert("level".into(), MetricValue::Message(a.level.clone()));
+            MetricEntry {
+                key: format!("{}: {}", a.pillar, a.target),
+                values: v,
+            }
         })
         .collect();
 
@@ -681,7 +776,11 @@ fn build_result(overall: u64, pillars: Vec<Pillar>, hygiene: Vec<HygieneFinding>
             };
             MetricEntry {
                 key,
-                values: values(None, h.detail, h.command),
+                values: values(
+                    None,
+                    MetricValue::Message(h.detail),
+                    MetricValue::Text(h.command),
+                ),
             }
         })
         .collect();
@@ -689,35 +788,34 @@ fn build_result(overall: u64, pillars: Vec<Pillar>, hygiene: Vec<HygieneFinding>
     let mut entry_groups: Vec<EntryGroup> = Vec::new();
     entry_groups.push(EntryGroup {
         name: "overall".into(),
-        label: "Overall".into(),
+        label: messages::HEALTH_GROUP_OVERALL.into(),
         entries: vec![overall_entry],
     });
     entry_groups.push(EntryGroup {
         name: "pillars".into(),
-        label: "Pillars (0-100 each, equal weight)".into(),
+        label: messages::HEALTH_GROUP_PILLARS.into(),
         entries: pillar_entries,
     });
     if !action_entries.is_empty() {
         entry_groups.push(EntryGroup {
             name: "actions".into(),
-            label: "Start here — actions".into(),
+            label: messages::HEALTH_GROUP_ACTIONS.into(),
             entries: action_entries,
         });
     }
     if !hygiene_entries.is_empty() {
         entry_groups.push(EntryGroup {
             name: "hygiene".into(),
-            label: "Repo hygiene — run these".into(),
+            label: messages::HEALTH_GROUP_HYGIENE.into(),
             entries: hygiene_entries,
         });
     }
 
     MetricResult {
         name: "health".into(),
-        display_name: "Health Score".into(),
-        description: "Overall repository health on a 0-100 scale, built from five equally-weighted pillars: commit discipline, bus factor, refactoring debt, repo tidiness, and change concentration. Thresholds are opinionated — see scoring/health.rs for the rules. The 'Start here' list picks the highest-impact concrete actions from each pillar; 'Repo hygiene' lists cleanup commands (never run automatically).".into(),
+        display_name: report_display("health"),
+        description: report_description("health"),
         columns,
-        column_labels: vec![],
         entries: vec![],
         entry_groups,
     }
@@ -725,27 +823,28 @@ fn build_result(overall: u64, pillars: Vec<Pillar>, hygiene: Vec<HygieneFinding>
 
 fn values(
     score: Option<u64>,
-    details: impl Into<String>,
-    action: impl Into<String>,
+    details: MetricValue,
+    action: MetricValue,
 ) -> HashMap<String, MetricValue> {
     let mut m = HashMap::new();
     match score {
         Some(s) => m.insert("score".into(), MetricValue::Count(s)),
         None => m.insert("score".into(), MetricValue::Text("—".into())),
     };
-    m.insert("details".into(), MetricValue::Text(details.into()));
-    m.insert("action".into(), MetricValue::Text(action.into()));
+    m.insert("details".into(), details);
+    m.insert("action".into(), action);
     m
 }
 
-fn interpretation(score: u64) -> &'static str {
-    match score {
-        90..=100 => "excellent — keep current practices",
-        80..=89 => "good — minor improvements available",
-        70..=79 => "fair — address top pillar actions",
-        60..=69 => "concerning — meaningful cleanup needed",
-        _ => "poor — prioritise refactoring and hygiene",
-    }
+fn interpretation(score: u64) -> LocalizedMessage {
+    let code = match score {
+        90..=100 => messages::HEALTH_INTERPRETATION_EXCELLENT,
+        80..=89 => messages::HEALTH_INTERPRETATION_GOOD,
+        70..=79 => messages::HEALTH_INTERPRETATION_FAIR,
+        60..=69 => messages::HEALTH_INTERPRETATION_CONCERNING,
+        _ => messages::HEALTH_INTERPRETATION_POOR,
+    };
+    LocalizedMessage::code(code)
 }
 
 fn over(value: f64, threshold: f64) -> f64 {
@@ -784,10 +883,9 @@ mod tests {
     fn mk_result(name: &str, entries: Vec<MetricEntry>) -> MetricResult {
         MetricResult {
             name: name.into(),
-            display_name: name.into(),
-            description: String::new(),
+            display_name: report_display(name),
+            description: report_description(name),
             columns: vec![],
-            column_labels: vec![],
             entries,
             entry_groups: vec![],
         }
@@ -811,11 +909,26 @@ mod tests {
 
     #[test]
     fn interpretation_covers_all_bands() {
-        assert!(interpretation(95).starts_with("excellent"));
-        assert!(interpretation(85).starts_with("good"));
-        assert!(interpretation(75).starts_with("fair"));
-        assert!(interpretation(65).starts_with("concerning"));
-        assert!(interpretation(40).starts_with("poor"));
+        assert_eq!(
+            interpretation(95).code,
+            messages::HEALTH_INTERPRETATION_EXCELLENT
+        );
+        assert_eq!(
+            interpretation(85).code,
+            messages::HEALTH_INTERPRETATION_GOOD
+        );
+        assert_eq!(
+            interpretation(75).code,
+            messages::HEALTH_INTERPRETATION_FAIR
+        );
+        assert_eq!(
+            interpretation(65).code,
+            messages::HEALTH_INTERPRETATION_CONCERNING
+        );
+        assert_eq!(
+            interpretation(40).code,
+            messages::HEALTH_INTERPRETATION_POOR
+        );
     }
 
     #[test]
@@ -901,9 +1014,15 @@ mod tests {
             "stale + rotten markers should deduct points, got {}",
             p.score
         );
-        // Summary should reflect the split.
-        assert!(p.summary.contains("1 stale"), "summary = {}", p.summary);
-        assert!(p.summary.contains("2 rotten"), "summary = {}", p.summary);
+        // Summary params should reflect the split.
+        assert_eq!(
+            p.summary.params.get("stale"),
+            Some(&serde_json::json!(1_u64))
+        );
+        assert_eq!(
+            p.summary.params.get("rotten"),
+            Some(&serde_json::json!(2_u64))
+        );
         // An action for the oldest rotten marker.
         assert!(
             p.actions
@@ -931,8 +1050,14 @@ mod tests {
             "huge files should deduct points, got {}",
             p.score
         );
-        assert!(p.summary.contains("1 huge"), "summary = {}", p.summary);
-        assert!(p.summary.contains("1 sizeable"), "summary = {}", p.summary);
+        assert_eq!(
+            p.summary.params.get("huge"),
+            Some(&serde_json::json!(1_u64))
+        );
+        assert_eq!(
+            p.summary.params.get("sizeable"),
+            Some(&serde_json::json!(1_u64))
+        );
         // Should surface the biggest one as an action.
         assert!(
             p.actions.iter().any(|a| a.target.contains("huge.java")),
@@ -960,11 +1085,15 @@ mod tests {
 
     #[test]
     fn tidiness_rewards_clean_bloat_report() {
+        use crate::types::LocalizedMessage;
         let bloat = mk_result(
             "bloat",
             vec![mk_entry(
                 "src/main.rs",
-                &[("recommendation", MetricValue::Text("OK".into()))],
+                &[(
+                    "recommendation",
+                    MetricValue::Message(LocalizedMessage::code(messages::BLOAT_RECOMMENDATION_OK)),
+                )],
             )],
         );
         let mut by_name = HashMap::new();
@@ -975,13 +1104,16 @@ mod tests {
 
     #[test]
     fn tidiness_punishes_vendored_content() {
+        use crate::types::LocalizedMessage;
         let bloat = mk_result(
             "bloat",
             vec![mk_entry(
                 "node_modules/foo",
                 &[(
                     "recommendation",
-                    MetricValue::Text("Vendored dependencies — add to .gitignore".into()),
+                    MetricValue::Message(LocalizedMessage::code(
+                        messages::BLOAT_RECOMMENDATION_VENDORED_DEPS,
+                    )),
                 )],
             )],
         );
@@ -990,7 +1122,7 @@ mod tests {
         let p = score_tidiness(&by_name);
         assert!(p.score < 100.0);
         assert!(!p.actions.is_empty());
-        assert!(p.actions[0].command.contains("git rm"));
+        assert!(p.actions[0].command.code.contains("git rm"));
     }
 
     #[test]

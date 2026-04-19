@@ -1,8 +1,12 @@
 use std::collections::HashMap;
 
+use crate::messages;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
-use crate::types::{MetricEntry, MetricResult, MetricValue};
+use crate::types::{
+    Column, LocalizedMessage, MetricEntry, MetricResult, MetricValue, Severity, report_description,
+    report_display,
+};
 
 pub struct QualityCollector;
 
@@ -142,27 +146,36 @@ impl MetricCollector for QualityCollector {
             }
         };
 
-        let make_row = |signal: &str, count: u64, pct_val: f64, rec: &str| {
+        let make_row = |signal: &str, count: u64, pct_val: f64, rec: LocalizedMessage| {
             let mut values = HashMap::new();
             values.insert("commits".into(), MetricValue::Count(count));
             values.insert("percent".into(), MetricValue::Float(pct_val));
-            values.insert("recommendation".into(), MetricValue::Text(rec.into()));
+            values.insert("recommendation".into(), MetricValue::Message(rec));
             MetricEntry {
                 key: signal.into(),
                 values,
             }
         };
 
+        let ok = || LocalizedMessage::code(messages::QUALITY_RECOMMENDATION_OK);
+        let warn =
+            |code: &str| LocalizedMessage::code(code.to_string()).with_severity(Severity::Warning);
+
         let entries = vec![
-            make_row("total_commits", total_commits, 100.0, "Baseline"),
+            make_row(
+                "total_commits",
+                total_commits,
+                100.0,
+                LocalizedMessage::code(messages::QUALITY_RECOMMENDATION_BASELINE),
+            ),
             make_row(
                 "short_messages",
                 short_count,
                 pct(short_count),
                 if pct(short_count) > 20.0 {
-                    "Enforce min message length or conventional commits"
+                    warn(messages::QUALITY_RECOMMENDATION_ENFORCE_MSG_LENGTH)
                 } else {
-                    "OK"
+                    ok()
                 },
             ),
             make_row(
@@ -170,9 +183,9 @@ impl MetricCollector for QualityCollector {
                 low_quality_count,
                 pct(low_quality_count),
                 if pct(low_quality_count) > 5.0 {
-                    "Too many wip/fix/typo — squash before merge"
+                    warn(messages::QUALITY_RECOMMENDATION_SQUASH_WIP)
                 } else {
-                    "OK"
+                    ok()
                 },
             ),
             make_row(
@@ -180,9 +193,9 @@ impl MetricCollector for QualityCollector {
                 mega_count,
                 pct(mega_count),
                 if pct(mega_count) > 10.0 {
-                    "Large commits hurt review — split by feature"
+                    warn(messages::QUALITY_RECOMMENDATION_SPLIT_MEGA)
                 } else {
-                    "OK"
+                    ok()
                 },
             ),
             make_row(
@@ -190,9 +203,9 @@ impl MetricCollector for QualityCollector {
                 revert_count,
                 pct(revert_count),
                 if pct(revert_count) > 3.0 {
-                    "High revert rate — strengthen CI / review gates"
+                    warn(messages::QUALITY_RECOMMENDATION_STRENGTHEN_REVIEW)
                 } else {
-                    "OK"
+                    ok()
                 },
             ),
             make_row(
@@ -200,16 +213,12 @@ impl MetricCollector for QualityCollector {
                 merge_count,
                 pct(merge_count),
                 if pct(merge_count) > 30.0 {
-                    "Consider rebase workflow for cleaner history"
+                    warn(messages::QUALITY_RECOMMENDATION_REBASE_WORKFLOW)
                 } else {
-                    "OK"
+                    ok()
                 },
             ),
             {
-                // This row reports a character-count average, not a commit
-                // count. Putting `total_commits` in the `commits` column here
-                // makes the value collide with the `total_commits` row and
-                // looks like a duplicate — show the rounded average instead.
                 let mut values = HashMap::new();
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let avg_u64 = avg_msg_len.round().max(0.0) as u64;
@@ -217,10 +226,10 @@ impl MetricCollector for QualityCollector {
                 values.insert("percent".into(), MetricValue::Float(avg_msg_len));
                 values.insert(
                     "recommendation".into(),
-                    MetricValue::Text(if avg_msg_len < 30.0 {
-                        "Messages too short — require descriptions".into()
+                    MetricValue::Message(if avg_msg_len < 30.0 {
+                        warn(messages::QUALITY_RECOMMENDATION_REQUIRE_DESCRIPTIONS)
                     } else {
-                        "OK".into()
+                        ok()
                     }),
                 );
                 MetricEntry {
@@ -232,11 +241,14 @@ impl MetricCollector for QualityCollector {
 
         Some(MetricResult {
             name: "quality".into(),
-            display_name: "Commit Quality".into(),
-            description: "Signals that hint at risky commit habits: very short messages ('wip', 'fix', 'typo'), mega-commits with thousands of lines (hard to review or revert safely), reverts (a previous commit was wrong), and merge mess. Lower numbers across the board mean cleaner history and easier debugging later.".into(),
+            display_name: report_display("quality"),
+            description: report_description("quality"),
             entry_groups: vec![],
-            columns: vec!["commits".into(), "percent".into(), "recommendation".into()],
-            column_labels: vec![],
+            columns: vec![
+                Column::in_report("quality", "commits"),
+                Column::in_report("quality", "percent"),
+                Column::in_report("quality", "recommendation"),
+            ],
             entries,
         })
     }
@@ -245,11 +257,10 @@ impl MetricCollector for QualityCollector {
 fn empty_result() -> MetricResult {
     MetricResult {
         name: "quality".into(),
-        display_name: "Commit Quality".into(),
-        description: String::new(),
+        display_name: report_display("quality"),
+        description: report_description("quality"),
         entry_groups: vec![],
         columns: vec![],
-        column_labels: vec![],
         entries: vec![],
     }
 }

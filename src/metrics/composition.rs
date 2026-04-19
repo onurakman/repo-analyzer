@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use crate::analysis::line_classifier::count_lines;
 use crate::langs::{Language, detect_language_info};
 use crate::metrics::MetricCollector;
-use crate::types::{MetricEntry, MetricResult, MetricValue, ParsedChange};
+use crate::types::{
+    Column, MetricEntry, MetricResult, MetricValue, ParsedChange, report_description,
+    report_display,
+};
 
 /// Skip blobs above this size — they are almost always minified/generated
 /// and would dominate the totals while also being the slowest to classify.
@@ -152,19 +155,18 @@ impl MetricCollector for CompositionCollector {
 
         MetricResult {
             name: "composition".into(),
-            display_name: "Code Composition".into(),
-            description: "Language breakdown at HEAD. Real code vs comment vs blank lines (not raw line counts) — block comments, nested comments, and shebangs are classified correctly via a 460-language knowledge base. Useful for sizing the codebase and spotting unexpected dominance (e.g. vendored JS crowding out Rust).".into(),
+            display_name: report_display("composition"),
+            description: report_description("composition"),
             entry_groups: vec![],
-            column_labels: vec![],
             columns: vec![
-                "files".into(),
-                "code".into(),
-                "comment".into(),
-                "blank".into(),
-                "total_lines".into(),
-                "code_pct".into(),
-                "comment_ratio_pct".into(),
-                "bytes".into(),
+                Column::in_report("composition", "files"),
+                Column::in_report("composition", "code"),
+                Column::in_report("composition", "comment"),
+                Column::in_report("composition", "blank"),
+                Column::in_report("composition", "total_lines"),
+                Column::in_report("composition", "code_pct"),
+                Column::in_report("composition", "comment_ratio_pct"),
+                Column::in_report("composition", "bytes"),
             ],
             entries,
         }

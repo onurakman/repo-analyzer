@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 
 use crate::analysis::source_filter::is_source_file;
+use crate::messages;
 use crate::metrics::MetricCollector;
 use crate::store::ChangeStore;
-use crate::types::{MetricEntry, MetricResult, MetricValue};
+use crate::types::{
+    Column, LocalizedMessage, MetricEntry, MetricResult, MetricValue, report_description,
+    report_display,
+};
 
 pub struct HotspotsCollector;
 
@@ -58,7 +62,10 @@ impl MetricCollector for HotspotsCollector {
                     }
                     let score = changes * authors;
                     let mut values = HashMap::new();
-                    values.insert("level".into(), MetricValue::Text("file".into()));
+                    values.insert(
+                        "level".into(),
+                        MetricValue::Message(LocalizedMessage::code(messages::HOTSPOT_LEVEL_FILE)),
+                    );
                     values.insert("changes".into(), MetricValue::Count(changes));
                     values.insert("unique_authors".into(), MetricValue::Count(authors));
                     values.insert("score".into(), MetricValue::Count(score));
@@ -89,7 +96,12 @@ impl MetricCollector for HotspotsCollector {
                     let score = changes * authors;
                     let key = format!("{file}::{qn}");
                     let mut values = HashMap::new();
-                    values.insert("level".into(), MetricValue::Text("construct".into()));
+                    values.insert(
+                        "level".into(),
+                        MetricValue::Message(LocalizedMessage::code(
+                            messages::HOTSPOT_LEVEL_CONSTRUCT,
+                        )),
+                    );
                     values.insert("kind".into(), MetricValue::Text(kind));
                     values.insert("file".into(), MetricValue::Text(file));
                     values.insert("changes".into(), MetricValue::Count(changes));
@@ -119,17 +131,16 @@ impl MetricCollector for HotspotsCollector {
 
         Some(MetricResult {
             name: "hotspots".into(),
-            display_name: "Hotspots".into(),
-            description: "Files and code constructs that change very often AND are touched by many different people. Frequent change × many authors = high bug risk and reviewer fatigue. The top entries are your most likely refactor candidates — fixing one of these usually pays back across the team.".into(),
+            display_name: report_display("hotspots"),
+            description: report_description("hotspots"),
             entry_groups: vec![],
-            column_labels: vec![],
             columns: vec![
-                "level".into(),
-                "kind".into(),
-                "file".into(),
-                "changes".into(),
-                "unique_authors".into(),
-                "score".into(),
+                Column::in_report("hotspots", "level"),
+                Column::in_report("hotspots", "kind"),
+                Column::in_report("hotspots", "file"),
+                Column::in_report("hotspots", "changes"),
+                Column::in_report("hotspots", "unique_authors"),
+                Column::in_report("hotspots", "score"),
             ],
             entries,
         })
@@ -139,10 +150,9 @@ impl MetricCollector for HotspotsCollector {
 fn empty_result() -> MetricResult {
     MetricResult {
         name: "hotspots".into(),
-        display_name: "Hotspots".into(),
-        description: String::new(),
+        display_name: report_display("hotspots"),
+        description: report_description("hotspots"),
         entry_groups: vec![],
-        column_labels: vec![],
         columns: vec![],
         entries: vec![],
     }
