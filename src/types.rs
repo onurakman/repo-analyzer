@@ -503,6 +503,10 @@ pub enum ReportKind {
     ChurnPareto,
     ConstructOwnership,
     CommitVelocity,
+    CommitSize,
+    DocCoverage,
+    DeadCode,
+    Clones,
     TestRatio,
 }
 
@@ -553,6 +557,10 @@ impl ReportKind {
             Self::ChurnPareto,
             Self::ConstructOwnership,
             Self::CommitVelocity,
+            Self::CommitSize,
+            Self::DocCoverage,
+            Self::DeadCode,
+            Self::Clones,
             Self::TestRatio,
         ]
     }
@@ -584,6 +592,14 @@ impl ReportKind {
             "churn_pareto" | "churn-pareto" | "pareto" => Some(Self::ChurnPareto),
             "construct_ownership" | "construct-ownership" => Some(Self::ConstructOwnership),
             "commit_velocity" | "commit-velocity" | "velocity" => Some(Self::CommitVelocity),
+            "commit_size" | "commit-size" | "commit_anomalies" | "commit-anomalies" => {
+                Some(Self::CommitSize)
+            }
+            "doc_coverage" | "doc-coverage" | "docs" | "documentation" => {
+                Some(Self::DocCoverage)
+            }
+            "dead_code" | "dead-code" | "orphans" | "unused" => Some(Self::DeadCode),
+            "clones" | "duplicates" | "duplication" => Some(Self::Clones),
             "test_ratio" | "test-ratio" | "tests" => Some(Self::TestRatio),
             _ => None,
         }
@@ -617,6 +633,10 @@ impl fmt::Display for ReportKind {
             Self::ChurnPareto => "churn_pareto",
             Self::ConstructOwnership => "construct_ownership",
             Self::CommitVelocity => "commit_velocity",
+            Self::CommitSize => "commit_size",
+            Self::DocCoverage => "doc_coverage",
+            Self::DeadCode => "dead_code",
+            Self::Clones => "clones",
             Self::TestRatio => "test_ratio",
         };
         write!(f, "{s}")

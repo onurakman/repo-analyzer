@@ -124,7 +124,7 @@ Notes:
 | Bloat | `bloat` | Large files and committed artifacts (minified bundles, build output, vendored deps) |
 | Outliers | `outliers` | High-churn + high-author-count files (biggest ownership/risk flags) |
 | Quality | `quality` | Commit quality signals: short/low-quality messages, mega-commits, reverts, merges |
-| Complexity | `complexity` | Cyclomatic complexity per function (code-only SLOC) |
+| Complexity | `complexity` | Per-function cyclomatic + cognitive complexity, Maintainability Index, args count, exit-point count, code-only SLOC |
 | Construct Churn | `construct_churn` | Churn at function / class / method level |
 | Debt Markers | `debt_markers` | `TODO` / `FIXME` / `HACK` / `XXX` comments, enriched with git-blame (author + age) |
 | Large Sources | `large_sources` | Source files past a size threshold — likely refactor candidates |
@@ -135,6 +135,12 @@ Notes:
 | Module Coupling | `module_coupling` | Coupling aggregated at module level |
 | Churn Pareto | `churn_pareto` | 80/20 distribution of churn — how concentrated changes are |
 | Construct Ownership | `construct_ownership` | Author ownership at function / class level |
+| Commit Velocity | `commit_velocity` | Weekly + monthly commit counts and total lines changed |
+| Commit Size Distribution | `commit_size` | Commit-size stats (mean/median/p95/p99/max) plus anomalies above `max(10×p95, p99)` |
+| Documentation Coverage | `doc_coverage` | Per-file public-item documentation coverage for 8 languages (Rust ///, Python docstrings, JSDoc, Javadoc, Go //, KDoc, Dart ///) |
+| Dead Code | `dead_code` | Source files nobody imports (entry points and tests excluded). Rust / Python / TypeScript / JavaScript only |
+| Clone Detection | `clones` | Groups of functions sharing a normalized AST hash — classic Type-2 clones; ranked by refactor payoff |
+| Test Ratio | `test_ratio` | Test code vs production code ratio per language |
 
 By default every report except `half_life` is generated (it's memory-hungry on long histories — opt in via `--only half_life,...`). Use `--only` to select a subset.
 
@@ -175,7 +181,9 @@ Construct-level parsing (function / class / method extraction via tree-sitter):
 
 Files with unrecognized extensions are still tracked at the file level; they just lack construct-level detail.
 
-Cyclomatic complexity (`complexity` report) is available for: Rust, TypeScript, JavaScript, Python, Java, Go, Kotlin, Dart.
+Per-function complexity metrics in the `complexity` report — cyclomatic + cognitive complexity, Maintainability Index (Microsoft variant, 0–100), arg count, exit-point count — are available for: Rust, TypeScript, JavaScript, Python, Java, Go, Kotlin, Dart. Cognitive complexity follows a simplified SonarSource rubric (1 + nesting depth per decision); MI uses a generic tree-sitter token-walk for Halstead volume.
+
+AST-based clone detection (`clones` report) and documentation coverage (`doc_coverage` report) support the same eight languages. Dead-code detection (`dead_code` report) resolves imports for Rust / Python / TypeScript / JavaScript only.
 
 Language detection is delegated to [drshade/linguist](https://github.com/drshade/linguist) (GitHub Linguist data, MIT), so the `composition` / `quick-composition` / `debt_markers` / `large_sources` reports are not limited to the list above. Line classification (real code vs comment vs blank, nested block comments, shebangs) still uses the codestats-derived knowledge base ([trypsynth/codestats](https://github.com/trypsynth/codestats), MIT) — 460+ languages with their comment markers.
 
@@ -184,6 +192,8 @@ Code-focused reports (coupling, module coupling, outliers, silos, hotspots, …)
 - Lock files (`Cargo.lock`, `package-lock.json`, `yarn.lock`, `bun.lock`, `uv.lock`, `pnpm-lock.yaml`, `go.sum`, …) and manifests (`package.json`, `pom.xml`, `requirements.txt`, …).
 - Docs (`README`, `LICENSE`, `CHANGELOG`) and markup / data dialects (JSON, YAML, TOML, XML, Markdown, INI, …).
 - Vendored / generated paths via Linguist's curated `vendor.yml`: `node_modules/`, `vendor/`, `bower_components/`, `*.min.js`, generated protobuf, test fixtures, Gradle/Cocoapods caches, and hundreds more patterns.
+- Conventional asset / build / cache directories that Linguist misses: `/assets/`, `/static/`, `/public/`, `/dist/`, `/build/`, `/out/`, `/coverage/`, `/target/`, `/.next/`, `/__pycache__/`, `/.pytest_cache/`, `/.mypy_cache/`, `/.ruff_cache/`, `/.venv/`, `/venv/`, `/.tox/`, `/.gradle/`, `/.dart_tool/`, `/.pub-cache/`, `/.turbo/`, `/.parcel-cache/`, `/.pnpm-store/`, `/.yarn/`, `/.idea/`, `/.cache/`. Rails-style `app/assets/stylesheets/` is a known false positive.
+- Content-hashed build output (`<name>.<hex8+>.<ext>`, e.g. webpack/rollup/vite `main.4f8b2c9a.js`, `icon.d70f5d9b5da738341efc.svg`).
 
 This keeps architectural signals from being drowned out by bundled dependencies and generated output.
 

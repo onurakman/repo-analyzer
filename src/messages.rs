@@ -81,6 +81,15 @@ pub const DEBT_MARKERS_RECOMMENDATION_STALE: &str = "debt_markers.recommendation
 pub const DEBT_MARKERS_RECOMMENDATION_ROTTEN: &str = "debt_markers.recommendation.rotten";
 
 // ---------------------------------------------------------------------------
+// doc_coverage
+// ---------------------------------------------------------------------------
+
+pub const DOC_COVERAGE_RECOMMENDATION_POOR: &str = "doc_coverage.recommendation.poor";
+pub const DOC_COVERAGE_RECOMMENDATION_LOW: &str = "doc_coverage.recommendation.low";
+pub const DOC_COVERAGE_RECOMMENDATION_OK: &str = "doc_coverage.recommendation.ok";
+pub const DOC_COVERAGE_RECOMMENDATION_GOOD: &str = "doc_coverage.recommendation.good";
+
+// ---------------------------------------------------------------------------
 // fan_in_out
 // ---------------------------------------------------------------------------
 
@@ -283,6 +292,10 @@ mod tests {
             DEBT_MARKERS_RECOMMENDATION_AGING,
             DEBT_MARKERS_RECOMMENDATION_STALE,
             DEBT_MARKERS_RECOMMENDATION_ROTTEN,
+            DOC_COVERAGE_RECOMMENDATION_POOR,
+            DOC_COVERAGE_RECOMMENDATION_LOW,
+            DOC_COVERAGE_RECOMMENDATION_OK,
+            DOC_COVERAGE_RECOMMENDATION_GOOD,
             FAN_IN_OUT_ROLE_HUB,
             FAN_IN_OUT_ROLE_ORCHESTRATOR,
             FAN_IN_OUT_ROLE_LEAF,

@@ -104,7 +104,7 @@ Language module files use the pattern `<language>.rs` (e.g., `rust_lang.rs`, `go
        },
    );
    ```
-5. To also support cyclomatic complexity for the language, add a `LangSpec` (function-kinds + decision-kinds) in `src/metrics/complexity.rs` and wire it into `SUPPORTED` and the `spec_for_path` extension map.
+5. To also support complexity metrics for the language, add a `LangSpec` (function-kinds + decision-kinds + exit-kinds) in `src/metrics/complexity.rs` and wire it into `SUPPORTED` and the `spec_for_path` extension map. The same `function_kinds` list is reused by `clones` and `doc_coverage`; add parallel specs in those modules (each with its own `item_kinds` / visibility + doc rules) if you want the new language covered by those reports too.
 6. Add tests for construct extraction in the language module.
 
 **Note:** The `composition` / `quick-composition` reports do *not* need changes here — language detection goes through Linguist (covers languages the tree-sitter registry doesn't parse) and line classification uses the codestats 460-language table independently of tree-sitter grammars.

@@ -13,13 +13,17 @@ use crate::metrics::authors::AuthorsCollector;
 use crate::metrics::bloat::BloatCollector;
 use crate::metrics::churn::ChurnCollector;
 use crate::metrics::churn_pareto::ChurnParetoCollector;
+use crate::metrics::clones::ClonesCollector;
+use crate::metrics::commit_size::CommitSizeCollector;
 use crate::metrics::commit_velocity::CommitVelocityCollector;
 use crate::metrics::complexity::ComplexityCollector;
 use crate::metrics::composition::CompositionCollector;
 use crate::metrics::construct_churn::ConstructChurnCollector;
 use crate::metrics::construct_ownership::ConstructOwnershipCollector;
 use crate::metrics::coupling::CouplingCollector;
+use crate::metrics::dead_code::DeadCodeCollector;
 use crate::metrics::debt_markers::DebtMarkersCollector;
+use crate::metrics::doc_coverage::DocCoverageCollector;
 use crate::metrics::fan_in_out::FanInOutCollector;
 use crate::metrics::half_life::HalfLifeCollector;
 use crate::metrics::hotspots::HotspotsCollector;
@@ -449,6 +453,10 @@ impl Pipeline {
                 ReportKind::ChurnPareto => Box::new(ChurnParetoCollector::new()),
                 ReportKind::ConstructOwnership => Box::new(ConstructOwnershipCollector::new()),
                 ReportKind::CommitVelocity => Box::new(CommitVelocityCollector::new()),
+                ReportKind::CommitSize => Box::new(CommitSizeCollector::new()),
+                ReportKind::DocCoverage => Box::new(DocCoverageCollector::new()),
+                ReportKind::DeadCode => Box::new(DeadCodeCollector::new()),
+                ReportKind::Clones => Box::new(ClonesCollector::new()),
                 ReportKind::TestRatio => Box::new(TestRatioCollector::new()),
             };
             collectors.push(collector);

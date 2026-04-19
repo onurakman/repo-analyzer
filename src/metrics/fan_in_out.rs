@@ -160,13 +160,13 @@ impl MetricCollector for FanInOutCollector {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Lang {
+pub(crate) enum Lang {
     Rust,
     Python,
     TypeScript,
 }
 
-fn detect_lang(path: &str) -> Option<Lang> {
+pub(crate) fn detect_lang(path: &str) -> Option<Lang> {
     let ext = path.rsplit('.').next()?;
     match ext {
         "rs" => Some(Lang::Rust),
@@ -193,7 +193,7 @@ fn classify(fan_in: u64, fan_out: u64) -> LocalizedMessage {
         .with_param("fan_out", fan_out)
 }
 
-fn collect_blobs(
+pub(crate) fn collect_blobs(
     repo: &gix::Repository,
     tree: &gix::Tree,
     prefix: &str,
@@ -251,7 +251,7 @@ fn ts_re() -> &'static Regex {
     R.get_or_init(|| Regex::new(r#"(?:from|require\()\s*['"]([^'"]+)['"]"#).unwrap())
 }
 
-fn extract_imports(lang: Lang, source: &str) -> Vec<String> {
+pub(crate) fn extract_imports(lang: Lang, source: &str) -> Vec<String> {
     let mut out = vec![];
     match lang {
         Lang::Rust => {
@@ -293,7 +293,7 @@ fn extract_imports(lang: Lang, source: &str) -> Vec<String> {
 
 // --- Import resolution ------------------------------------------------------------
 
-fn resolve_import(
+pub(crate) fn resolve_import(
     lang: Lang,
     raw: &str,
     importer: &str,

@@ -709,11 +709,7 @@ fn halstead_walk(
 fn is_comment_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "comment"
-            | "line_comment"
-            | "block_comment"
-            | "documentation_comment"
-            | "doc_comment"
+        "comment" | "line_comment" | "block_comment" | "documentation_comment" | "doc_comment"
     )
 }
 
@@ -729,8 +725,7 @@ fn is_comment_kind(kind: &str) -> bool {
 fn maintainability_index(volume: f64, cyclomatic: u32, sloc: u32) -> u32 {
     let effective_sloc = sloc.max(1) as f64;
     let ln_v = if volume > 0.0 { volume.ln() } else { 0.0 };
-    let raw =
-        171.0 - 5.2 * ln_v - 0.23 * (cyclomatic as f64) - 16.2 * effective_sloc.ln();
+    let raw = 171.0 - 5.2 * ln_v - 0.23 * (cyclomatic as f64) - 16.2 * effective_sloc.ln();
     let scaled = (raw * 100.0 / 171.0).clamp(0.0, 100.0);
     scaled.round() as u32
 }
@@ -963,7 +958,8 @@ mod tests {
 
     #[test]
     fn nexits_counts_return_points() {
-        let src = "fn f(x: i32) -> i32 { if x > 0 { return 1; } if x < 0 { return -1; } return 0; }";
+        let src =
+            "fn f(x: i32) -> i32 { if x > 0 { return 1; } if x < 0 { return -1; } return 0; }";
         let m = analyze(&RUST, src);
         assert_eq!(m.iter().find(|x| x.name == "f").unwrap().nexits, 3);
     }
@@ -1024,7 +1020,10 @@ mod tests {
         let m_complex = analyze(&RUST, complex);
         let mi_a = m_trivial.iter().find(|x| x.name == "a").unwrap().mi;
         let mi_b = m_complex.iter().find(|x| x.name == "b").unwrap().mi;
-        assert!(mi_a > mi_b, "trivial MI {mi_a} should exceed complex MI {mi_b}");
+        assert!(
+            mi_a > mi_b,
+            "trivial MI {mi_a} should exceed complex MI {mi_b}"
+        );
     }
 
     #[test]
