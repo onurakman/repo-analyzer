@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.11](https://github.com/onurakman/repo-analyzer/compare/v0.1.10...v0.1.11) (2026-04-19)
+
+
+### Features
+
+* Add commit_velocity and test_ratio reports with i18n support ([2c190d1](https://github.com/onurakman/repo-analyzer/commit/2c190d155eceb17a4f033e16c862ccdee1f81fcb))
+
 ## [0.1.10](https://github.com/onurakman/repo-analyzer/compare/v0.1.9...v0.1.10) (2026-04-19)
 
 
