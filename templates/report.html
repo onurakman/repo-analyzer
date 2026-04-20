@@ -367,7 +367,9 @@
     construct_churn: 'code-2', construct_ownership: 'user-check',
     half_life: 'hourglass', succession: 'user-plus', knowledge_silos: 'lock',
     fan_in_out: 'share-2', module_coupling: 'boxes', churn_pareto: 'bar-chart-3',
-    commit_velocity: 'trending-up', test_ratio: 'test-tube-2'
+    commit_velocity: 'trending-up', test_ratio: 'test-tube-2',
+    commit_size: 'ruler', doc_coverage: 'book-open',
+    dead_code: 'ghost', clones: 'copy'
   };
   const ICON_DEFAULT = 'file-text';
 
@@ -397,10 +399,19 @@
       return container;
     }
 
+    // Some reports (e.g. commit_size) share one column list across entry
+    // groups where each group only populates a subset. Drop columns that
+    // every row leaves blank so the table isn't littered with empty cells.
+    const activeIdx = columns
+      .map((c, i) => ({ c, i }))
+      .filter(({ c }) => entries.some(e => e.values && e.values[c] != null));
+    const activeCols = activeIdx.map(x => x.c);
+    const activeLabels = activeIdx.map(x => labels[x.i] || x.c);
+
     // Pick first numeric column for bar chart, skipping bookkeeping columns
     // like `order` or `rank` that index rows rather than measure them.
     const SKIP_COLS = new Set(['order', 'rank', 'id']);
-    const barCol = columns.find(c => {
+    const barCol = activeCols.find(c => {
       if (SKIP_COLS.has(c.toLowerCase())) return false;
       const e = entries.find(x => x.values && x.values[c] != null);
       return e && isNum(e.values[c]);
@@ -447,8 +458,8 @@
     const table = el('table');
     const thead = el('thead');
     const headRow = el('tr', null, el('th', { text: 'Name' }));
-    columns.forEach((col, i) => {
-      headRow.append(el('th', { text: labels[i] || col }));
+    activeCols.forEach((col, i) => {
+      headRow.append(el('th', { text: activeLabels[i] || col }));
     });
     thead.append(headRow);
     table.append(thead);
@@ -458,7 +469,7 @@
       const tr = el('tr');
       if (i >= TOP_N) tr.className = 'extra-row';
       tr.append(el('td', { text: e.key }));
-      for (const col of columns) {
+      for (const col of activeCols) {
         const v = e.values ? e.values[col] : undefined;
         const td = el('td');
         if (isNum(v)) td.className = 'num';

@@ -1,8 +1,11 @@
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 
+use serde_json::{Map, Value, json};
+
+use crate::i18n::Catalog;
 use crate::output::ReportWriter;
-use crate::types::{MetricResult, OutputConfig};
+use crate::types::{MetricEntry, MetricResult, MetricValue, OutputConfig};
 
 const TEMPLATE: &str = include_str!("../../templates/report.html");
 const GENERATED_AT_MARKER: &str = "{{GENERATED_AT}}";
@@ -136,9 +139,97 @@ fn split_template() -> Vec<Segment> {
     segments
 }
 
-fn stream_html<W: Write>(writer: &mut W, results: &[MetricResult]) -> anyhow::Result<()> {
+/// Build a JSON tree where every [`crate::types::LocalizedMessage`] has been
+/// resolved to its translated string via the supplied catalog. The HTML
+/// template consumes plain strings for `display_name`, `description`, column
+/// labels, and message-valued cells — so we flatten everything here rather
+/// than teaching the frontend to understand the i18n envelope.
+fn build_report_json(results: &[MetricResult], catalog: &Catalog) -> Value {
+    Value::Array(
+        results
+            .iter()
+            .map(|r| build_one_report(r, catalog))
+            .collect(),
+    )
+}
+
+fn build_one_report(r: &MetricResult, catalog: &Catalog) -> Value {
+    let mut obj = Map::new();
+    obj.insert("name".into(), json!(r.name));
+    obj.insert(
+        "display_name".into(),
+        json!(catalog.translate(&r.display_name)),
+    );
+    obj.insert(
+        "description".into(),
+        json!(catalog.translate(&r.description)),
+    );
+
+    let column_keys: Vec<&String> = r.columns.iter().map(|c| &c.value).collect();
+    let column_labels: Vec<String> = r
+        .columns
+        .iter()
+        .map(|c| catalog.translate(&c.label))
+        .collect();
+    obj.insert("columns".into(), json!(column_keys));
+    obj.insert("column_labels".into(), json!(column_labels));
+
+    if r.entry_groups.is_empty() {
+        obj.insert("entries".into(), build_entries(&r.entries, catalog));
+    } else {
+        let groups: Vec<Value> = r
+            .entry_groups
+            .iter()
+            .map(|g| {
+                json!({
+                    "name": g.name,
+                    "label": catalog.translate_code(&g.label),
+                    "entries": build_entries(&g.entries, catalog),
+                })
+            })
+            .collect();
+        obj.insert("entry_groups".into(), Value::Array(groups));
+    }
+
+    Value::Object(obj)
+}
+
+fn build_entries(entries: &[MetricEntry], catalog: &Catalog) -> Value {
+    let arr: Vec<Value> = entries
+        .iter()
+        .map(|e| {
+            let mut values = Map::new();
+            for (k, v) in &e.values {
+                values.insert(k.clone(), translate_metric_value(v, catalog));
+            }
+            json!({ "key": e.key, "values": Value::Object(values) })
+        })
+        .collect();
+    Value::Array(arr)
+}
+
+fn translate_metric_value(v: &MetricValue, catalog: &Catalog) -> Value {
+    match v {
+        MetricValue::Message(m) => Value::String(catalog.translate(m)),
+        MetricValue::List(items) => Value::Array(
+            items
+                .iter()
+                .map(|i| translate_metric_value(i, catalog))
+                .collect(),
+        ),
+        other => serde_json::to_value(other).unwrap_or(Value::Null),
+    }
+}
+
+fn stream_html<W: Write>(
+    writer: &mut W,
+    results: &[MetricResult],
+    locale: &str,
+) -> anyhow::Result<()> {
     let segments = split_template();
     let now_escaped = escape_html(&chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    let catalog = Catalog::load(locale);
+    let data = build_report_json(results, &catalog);
 
     for seg in segments {
         match seg {
@@ -146,7 +237,7 @@ fn stream_html<W: Write>(writer: &mut W, results: &[MetricResult]) -> anyhow::Re
             Segment::GeneratedAt => writer.write_all(now_escaped.as_bytes())?,
             Segment::ReportData => {
                 let mut script_writer = ScriptEscapeWriter::new(&mut *writer);
-                serde_json::to_writer(&mut script_writer, results)?;
+                serde_json::to_writer(&mut script_writer, &data)?;
                 script_writer.finish()?;
             }
         }
@@ -158,12 +249,12 @@ impl ReportWriter for HtmlWriter {
     fn write(&self, results: &[MetricResult], config: &OutputConfig) -> anyhow::Result<()> {
         if let Some(path) = &config.output_path {
             let mut writer = BufWriter::new(File::create(path)?);
-            stream_html(&mut writer, results)?;
+            stream_html(&mut writer, results, &config.locale)?;
             writer.flush()?;
         } else {
             let stdout = std::io::stdout();
             let mut writer = BufWriter::new(stdout.lock());
-            stream_html(&mut writer, results)?;
+            stream_html(&mut writer, results, &config.locale)?;
             writer.flush()?;
         }
         Ok(())
@@ -215,10 +306,16 @@ mod tests {
 
         let content = fs::read_to_string(&path).unwrap();
         // The HTML embeds the report data as JSON inside a <script> tag.
-        // display_name is a LocalizedMessage object carrying the stable code.
+        // display_name / description / column labels are resolved to strings
+        // via the bundled `en` catalog before being serialized, so the
+        // LocalizedMessage envelope never reaches the frontend.
         assert!(
-            content.contains("\"code\":\"report.authors.display_name\""),
-            "should include display_name code in embedded JSON"
+            content.contains("\"display_name\":\"Authors\""),
+            "should include translated display_name in embedded JSON"
+        );
+        assert!(
+            !content.contains("\"code\":\"report.authors.display_name\""),
+            "raw LocalizedMessage envelope must not leak into HTML"
         );
         assert!(content.contains("alice"), "should contain entry data");
         assert!(content.contains("bob"), "should contain entry data");
