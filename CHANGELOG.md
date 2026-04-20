@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.14](https://github.com/onurakman/repo-analyzer/compare/v0.1.13...v0.1.14) (2026-04-20)
+
+
+### Features
+
+* Add branch hygiene metrics and report grouping ([e2dc1a9](https://github.com/onurakman/repo-analyzer/commit/e2dc1a9b5f4e916b6ae933d169b0dcad71907dd4))
+* Localize HTML report data and optimize column handling ([1288377](https://github.com/onurakman/repo-analyzer/commit/12883770077696809058806a06c0c4357ba1f31f))
+
 ## [0.1.13](https://github.com/onurakman/repo-analyzer/compare/v0.1.12...v0.1.13) (2026-04-19)
 
 
