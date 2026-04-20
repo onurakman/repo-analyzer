@@ -35,6 +35,17 @@ pub const BLOAT_RECOMMENDATION_OS_METADATA: &str = "bloat.recommendation.os_meta
 pub const BLOAT_RECOMMENDATION_IDE_CONFIG: &str = "bloat.recommendation.ide_config";
 
 // ---------------------------------------------------------------------------
+// branches
+// ---------------------------------------------------------------------------
+
+pub const BRANCHES_RECOMMENDATION_ACTIVE: &str = "branches.recommendation.active";
+pub const BRANCHES_RECOMMENDATION_HEAD: &str = "branches.recommendation.head";
+pub const BRANCHES_RECOMMENDATION_MERGED_RECENT: &str = "branches.recommendation.merged_recent";
+pub const BRANCHES_RECOMMENDATION_MERGED_STALE: &str = "branches.recommendation.merged_stale";
+pub const BRANCHES_RECOMMENDATION_STALE: &str = "branches.recommendation.stale";
+pub const BRANCHES_RECOMMENDATION_ABANDONED: &str = "branches.recommendation.abandoned";
+
+// ---------------------------------------------------------------------------
 // churn
 // ---------------------------------------------------------------------------
 
@@ -155,6 +166,8 @@ pub const HEALTH_HYGIENE_LARGE_GIT_DIR: &str = "health.hygiene.large_git_dir";
 pub const HEALTH_HYGIENE_FRAGMENTED_PACKS: &str = "health.hygiene.fragmented_packs";
 pub const HEALTH_HYGIENE_LOOSE_OBJECTS: &str = "health.hygiene.loose_objects";
 pub const HEALTH_HYGIENE_BLOAT_FINDING: &str = "health.hygiene.bloat_finding";
+pub const HEALTH_HYGIENE_MERGED_BRANCHES: &str = "health.hygiene.merged_branches";
+pub const HEALTH_HYGIENE_ABANDONED_BRANCHES: &str = "health.hygiene.abandoned_branches";
 pub const HEALTH_ACTION_INFO: &str = "health.action.info";
 pub const HEALTH_GROUP_INSIGHTS: &str = "health.group.insights";
 pub const HEALTH_INSIGHT_TEAM: &str = "health.insight.team";
@@ -176,9 +189,11 @@ pub const HEALTH_GROUP_SCORES: &str = "health.group.scores";
 pub const HEALTH_SCORE_ARCHITECTURE: &str = "health.score.architecture";
 pub const HEALTH_SCORE_TEAM: &str = "health.score.team";
 pub const HEALTH_SCORE_ACTIVITY: &str = "health.score.activity";
+pub const HEALTH_SCORE_BRANCH_HYGIENE: &str = "health.score.branch_hygiene";
 pub const HEALTH_SUMMARY_ARCHITECTURE: &str = "health.summary.architecture";
 pub const HEALTH_SUMMARY_TEAM: &str = "health.summary.team";
 pub const HEALTH_SUMMARY_ACTIVITY: &str = "health.summary.activity";
+pub const HEALTH_SUMMARY_BRANCH_HYGIENE: &str = "health.summary.branch_hygiene";
 
 // ---------------------------------------------------------------------------
 // hotspots
@@ -281,6 +296,12 @@ mod tests {
             BLOAT_RECOMMENDATION_RUST_BUILD_OUTPUT,
             BLOAT_RECOMMENDATION_OS_METADATA,
             BLOAT_RECOMMENDATION_IDE_CONFIG,
+            BRANCHES_RECOMMENDATION_ACTIVE,
+            BRANCHES_RECOMMENDATION_HEAD,
+            BRANCHES_RECOMMENDATION_MERGED_RECENT,
+            BRANCHES_RECOMMENDATION_MERGED_STALE,
+            BRANCHES_RECOMMENDATION_STALE,
+            BRANCHES_RECOMMENDATION_ABANDONED,
             CHURN_PARETO_SUMMARY_PCT,
             CHURN_PARETO_SUMMARY_CUMULATIVE,
             COMPLEXITY_RECOMMENDATION_SIMPLE,
@@ -348,6 +369,8 @@ mod tests {
             HEALTH_HYGIENE_FRAGMENTED_PACKS,
             HEALTH_HYGIENE_LOOSE_OBJECTS,
             HEALTH_HYGIENE_BLOAT_FINDING,
+            HEALTH_HYGIENE_MERGED_BRANCHES,
+            HEALTH_HYGIENE_ABANDONED_BRANCHES,
             HEALTH_ACTION_INFO,
             HEALTH_GROUP_INSIGHTS,
             HEALTH_INSIGHT_TEAM,
@@ -369,9 +392,11 @@ mod tests {
             HEALTH_SCORE_ARCHITECTURE,
             HEALTH_SCORE_TEAM,
             HEALTH_SCORE_ACTIVITY,
+            HEALTH_SCORE_BRANCH_HYGIENE,
             HEALTH_SUMMARY_ARCHITECTURE,
             HEALTH_SUMMARY_TEAM,
             HEALTH_SUMMARY_ACTIVITY,
+            HEALTH_SUMMARY_BRANCH_HYGIENE,
             HOTSPOT_LEVEL_FILE,
             HOTSPOT_LEVEL_CONSTRUCT,
             KNOWLEDGE_SILO_RISK_AT_RISK,

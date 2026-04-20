@@ -55,6 +55,7 @@ pub fn compute_health(results: &[MetricResult], repo_path: &Path) -> Option<Metr
         score_architecture(&by_name),
         score_team_health(&by_name),
         score_activity(&by_name),
+        score_branch_hygiene(&by_name),
     ]
     .into_iter()
     .flatten()
@@ -495,7 +496,23 @@ fn score_tidiness(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
         })
         .unwrap_or(0);
 
-    let penalty = (bloat_findings as f64 * 3.0).min(60.0) + (binary_files as f64 * 1.0).min(20.0);
+    // Merged-but-never-deleted branches are a classic tidiness signal —
+    // they're safe to delete and clutter the ref list. Mild weight so a
+    // repo with ~10 forgotten branches loses a few points, not a grade.
+    let merged_stale_branches = by_name
+        .get("branches")
+        .map(|r| {
+            r.entry_groups
+                .iter()
+                .filter(|g| g.name == "merged_stale")
+                .map(|g| g.entries.len())
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
+
+    let penalty = (bloat_findings as f64 * 3.0).min(60.0)
+        + (binary_files as f64 * 1.0).min(20.0)
+        + (merged_stale_branches as f64 * 1.5).min(15.0);
 
     // Positive: active cleanup (high deletion ratio) suggests good housekeeping.
     let cleanup_bonus = by_name
@@ -659,6 +676,46 @@ fn repo_hygiene_findings(
             command: "git gc --aggressive --prune=now".into(),
             history_rewrite: false,
         });
+    }
+
+    // Cross-ref: aggregate merged / abandoned branches into two one-liner
+    // hygiene findings rather than one row per branch. Teams with dozens of
+    // forgotten feature branches would otherwise drown the rest of the
+    // cleanup list. Commands are bulk-safe one-liners the user can review
+    // before running.
+    if let Some(br) = by_name.get("branches") {
+        let mut merged_count = 0usize;
+        let mut abandoned_count = 0usize;
+        for group in &br.entry_groups {
+            match group.name.as_str() {
+                "merged_stale" | "merged_recent" => merged_count += group.entries.len(),
+                "abandoned" => abandoned_count += group.entries.len(),
+                _ => {}
+            }
+        }
+        if merged_count > 0 {
+            out.push(HygieneFinding {
+                detail: LocalizedMessage::code(messages::HEALTH_HYGIENE_MERGED_BRANCHES)
+                    .with_param("count", merged_count as u64),
+                command: "git for-each-ref --merged=HEAD --format='%(refname:short)' \
+                          refs/remotes/origin/ | grep -v '/HEAD$' | sed 's#^origin/##' | \
+                          xargs -r -I{} git push origin --delete '{}'"
+                    .into(),
+                history_rewrite: false,
+            });
+        }
+        if abandoned_count > 0 {
+            out.push(HygieneFinding {
+                detail: LocalizedMessage::code(messages::HEALTH_HYGIENE_ABANDONED_BRANCHES)
+                    .with_param("count", abandoned_count as u64),
+                command: "# review abandoned branches before closing:\n\
+                          git for-each-ref --sort=-committerdate \
+                          --format='%(refname:short) %(committerdate:short) %(authoremail)' \
+                          refs/remotes/origin/"
+                    .into(),
+                history_rewrite: false,
+            });
+        }
     }
 
     // Cross-ref: if bloat surfaced a vendored directory, suggest removing it
@@ -937,6 +994,75 @@ fn score_activity(by_name: &HashMap<&str, &MetricResult>) -> Option<Supplementar
             .with_param("added", total_added)
             .with_param("deleted", total_deleted)
             .with_param("hotspots", hot_count as u64),
+    })
+}
+
+/// Branch hygiene score (0-100): how cluttered is the remote with long-lived
+/// feature branches? Derived from the `branches` report. Returns `None` when
+/// we can't see enough branches to form a useful signal (shallow clone,
+/// single-branch checkout) — avoids flagging a repo as "messy" just because
+/// the clone is narrow.
+fn score_branch_hygiene(by_name: &HashMap<&str, &MetricResult>) -> Option<SupplementaryScore> {
+    let branches = by_name.get("branches")?;
+    // Branches live inside entry_groups (one group per status). Flatten for
+    // counting — the score doesn't care about the bucket structure, only
+    // per-branch facts (merged flag + age).
+    let all_entries: Vec<&MetricEntry> = branches
+        .entry_groups
+        .iter()
+        .flat_map(|g| g.entries.iter())
+        .collect();
+    let total = all_entries.len();
+    if total < crate::metrics::branches::MIN_BRANCHES {
+        return None;
+    }
+
+    let count_matching = |days_min: u64, merged: Option<bool>| -> usize {
+        all_entries
+            .iter()
+            .filter(|e| {
+                let is_head =
+                    matches!(e.values.get("is_head"), Some(MetricValue::Text(t)) if t == "yes");
+                if is_head {
+                    return false;
+                }
+                let days = match e.values.get("days_since") {
+                    Some(MetricValue::Count(n)) => *n,
+                    _ => 0,
+                };
+                let is_merged =
+                    matches!(e.values.get("merged"), Some(MetricValue::Text(t)) if t == "yes");
+                let merged_ok = match merged {
+                    Some(want) => want == is_merged,
+                    None => true,
+                };
+                days >= days_min && merged_ok
+            })
+            .count()
+    };
+
+    let stale_unmerged = count_matching(60, Some(false));
+    let abandoned = count_matching(180, Some(false));
+    let merged_stale = count_matching(60, Some(true));
+
+    // Every branch left drifting past 60 days unmerged costs 2 points; an
+    // abandoned one costs an extra 3 (compounds on top of stale, so each
+    // abandoned branch is effectively a 5-point hit). Cleanable merged
+    // branches are cheap — a lint-level nudge rather than a risk — at 0.5.
+    let penalty = (stale_unmerged as f64 * 2.0).min(40.0)
+        + (abandoned as f64 * 3.0).min(25.0)
+        + (merged_stale as f64 * 0.5).min(10.0);
+    let score = (100.0 - penalty).max(MIN_PILLAR_SCORE);
+
+    Some(SupplementaryScore {
+        key: "branch_hygiene",
+        display: messages::HEALTH_SCORE_BRANCH_HYGIENE,
+        score,
+        summary: LocalizedMessage::code(messages::HEALTH_SUMMARY_BRANCH_HYGIENE)
+            .with_param("total", total as u64)
+            .with_param("stale", stale_unmerged as u64)
+            .with_param("abandoned", abandoned as u64)
+            .with_param("merged_stale", merged_stale as u64),
     })
 }
 

@@ -11,6 +11,7 @@ use crate::metrics::MetricCollector;
 use crate::metrics::age::AgeCollector;
 use crate::metrics::authors::AuthorsCollector;
 use crate::metrics::bloat::BloatCollector;
+use crate::metrics::branches::BranchesCollector;
 use crate::metrics::churn::ChurnCollector;
 use crate::metrics::churn_pareto::ChurnParetoCollector;
 use crate::metrics::clones::ClonesCollector;
@@ -458,6 +459,7 @@ impl Pipeline {
                 ReportKind::DeadCode => Box::new(DeadCodeCollector::new()),
                 ReportKind::Clones => Box::new(ClonesCollector::new()),
                 ReportKind::TestRatio => Box::new(TestRatioCollector::new()),
+                ReportKind::Branches => Box::new(BranchesCollector::new()),
             };
             collectors.push(collector);
         }
@@ -563,6 +565,29 @@ fn prompt_unshallow(repo_path: &str) -> anyhow::Result<bool> {
 
 /// Run `git fetch --unshallow` in the repo. Surfaces git's stderr on failure.
 fn run_unshallow(repo_path: &str) -> anyhow::Result<()> {
+    // Widen the fetch refspec to every remote branch first. `--single-branch`
+    // clones set it to only the checked-out branch, and `--unshallow` alone
+    // preserves that narrow refspec — we'd deepen one branch and still miss
+    // the rest. Safe no-op on clones that already have `refs/heads/*`.
+    eprintln!(
+        "Running `git remote set-branches origin '*'` in {}...",
+        repo_path
+    );
+    let set_branches = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["remote", "set-branches", "origin", "*"])
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to invoke git: {e}"))?;
+    if !set_branches.status.success() {
+        // Don't hard-fail here — a repo without an `origin` remote or a
+        // detached workspace is still worth unshallowing if it can be.
+        eprintln!(
+            "warning: git remote set-branches skipped: {}",
+            String::from_utf8_lossy(&set_branches.stderr).trim()
+        );
+    }
+
     eprintln!("Running `git fetch --unshallow` in {}...", repo_path);
     let output = Command::new("git")
         .arg("-C")

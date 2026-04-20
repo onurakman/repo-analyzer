@@ -508,6 +508,7 @@ pub enum ReportKind {
     DeadCode,
     Clones,
     TestRatio,
+    Branches,
 }
 
 impl ReportKind {
@@ -531,7 +532,10 @@ impl ReportKind {
             // Health score first — a one-glance overview with actionable
             // items, synthesised from every other report.
             Self::Health,
-            // Language composition second — a snapshot of what the repo is
+            // Branches second — a short, actionable inventory (delete/review
+            // candidates) reads naturally right under the health card.
+            Self::Branches,
+            // Language composition third — a snapshot of what the repo is
             // made of is the natural opening frame before any history-driven
             // metric.
             Self::Composition,
@@ -599,6 +603,7 @@ impl ReportKind {
             "dead_code" | "dead-code" | "orphans" | "unused" => Some(Self::DeadCode),
             "clones" | "duplicates" | "duplication" => Some(Self::Clones),
             "test_ratio" | "test-ratio" | "tests" => Some(Self::TestRatio),
+            "branches" | "branch" => Some(Self::Branches),
             _ => None,
         }
     }
@@ -636,6 +641,7 @@ impl fmt::Display for ReportKind {
             Self::DeadCode => "dead_code",
             Self::Clones => "clones",
             Self::TestRatio => "test_ratio",
+            Self::Branches => "branches",
         };
         write!(f, "{s}")
     }

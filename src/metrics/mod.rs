@@ -1,6 +1,7 @@
 pub mod age;
 pub mod authors;
 pub mod bloat;
+pub mod branches;
 pub mod churn;
 pub mod churn_pareto;
 pub mod clones;
