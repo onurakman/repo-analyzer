@@ -75,11 +75,14 @@ jobs:
         if: matrix.use_zigbuild
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.13.0
+          # 0.13.0 has a shared-cache race in parallel cc that drops
+          # tree-sitter-dart's parser.o before lld links it.
+          version: 0.14.1
 
       - name: Install cargo-zigbuild
         if: matrix.use_zigbuild
-        run: cargo install --locked cargo-zigbuild
+        # 0.22.2 ships the fix for the shared-cache race (PR #421).
+        run: cargo install --locked cargo-zigbuild@0.22.2
 
       - name: Build release binary (zigbuild)
         if: matrix.use_zigbuild
