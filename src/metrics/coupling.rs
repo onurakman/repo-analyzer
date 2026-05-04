@@ -192,3 +192,166 @@ fn empty_result() -> MetricResult {
         entries: vec![],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{CommitInfo, DiffRecord, FileStatus, ParsedChange};
+    use chrono::{FixedOffset, TimeZone};
+    use std::sync::Arc;
+
+    fn make_change(file: &str, oid: &str) -> ParsedChange {
+        let ts = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2025, 1, 15, 12, 0, 0)
+            .unwrap();
+        ParsedChange {
+            diff: Arc::new(DiffRecord {
+                commit: Arc::new(CommitInfo {
+                    oid: oid.into(),
+                    author: "dev".into(),
+                    email: "dev@x".into(),
+                    timestamp: ts,
+                    message: "m".into(),
+                    parent_ids: vec![],
+                }),
+                file_path: file.into(),
+                old_path: None,
+                status: FileStatus::Modified,
+                hunks: vec![],
+                additions: 1,
+                deletions: 0,
+            }),
+            constructs: vec![],
+        }
+    }
+
+    fn store_with(changes: &[ParsedChange]) -> ChangeStore {
+        let store = ChangeStore::open_temp().expect("open store");
+        store.insert_batch(changes).expect("insert");
+        store.finalize_indexes().expect("index");
+        store
+    }
+
+    #[test]
+    fn empty_collector_returns_named_result() {
+        let mut coll = CouplingCollector::new();
+        let r = coll.finalize();
+        assert_eq!(r.name, "coupling");
+        assert!(r.entries.is_empty());
+    }
+
+    #[test]
+    fn finalize_from_db_returns_pairs_for_co_changing_files() {
+        // Three commits each touch both files together — co_changes = 3 ≥
+        // MIN_COUPLING_COUNT, score = 3/3 = 1.0 ≥ MIN_COUPLING_SCORE.
+        let mut changes = vec![];
+        for oid in &["c1", "c2", "c3"] {
+            changes.push(make_change("a.rs", oid));
+            changes.push(make_change("b.rs", oid));
+        }
+        let store = store_with(&changes);
+
+        let mut coll = CouplingCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        assert!(!r.entries.is_empty());
+        let entry = r.entries.first().unwrap();
+        assert_eq!(entry.key, "a.rs <-> b.rs");
+        match entry.values.get("co_changes") {
+            Some(MetricValue::Count(n)) => assert_eq!(*n, 3),
+            other => panic!("expected Count(3), got {other:?}"),
+        }
+        match entry.values.get("score") {
+            Some(MetricValue::Float(f)) => assert!((*f - 1.0).abs() < 1e-6),
+            other => panic!("expected Float(1.0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_from_db_filters_below_min_coupling_count() {
+        // Only two co-changes, below MIN_COUPLING_COUNT=3 — should produce no rows.
+        let mut changes = vec![];
+        for oid in &["c1", "c2"] {
+            changes.push(make_change("a.rs", oid));
+            changes.push(make_change("b.rs", oid));
+        }
+        let store = store_with(&changes);
+
+        let mut coll = CouplingCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        assert!(
+            r.entries.is_empty(),
+            "expected no entries below MIN_COUPLING_COUNT, got {:?}",
+            r.entries
+        );
+    }
+
+    #[test]
+    fn finalize_from_db_filters_below_min_coupling_score() {
+        // a.rs is touched in 10 commits; b.rs only co-changes in 3 of them.
+        // score = 3/10 = 0.3 — exactly at the threshold (>= MIN_COUPLING_SCORE).
+        // With score = 0.29 (3/11) we drop below.
+        let mut changes = vec![];
+        // 11 commits touching a.rs
+        for i in 1..=11 {
+            changes.push(make_change("a.rs", &format!("c{i}")));
+        }
+        // Only 3 of those also touch b.rs
+        for i in 1..=3 {
+            changes.push(make_change("b.rs", &format!("c{i}")));
+        }
+        let store = store_with(&changes);
+
+        let mut coll = CouplingCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        assert!(
+            r.entries.is_empty(),
+            "score {} should be below MIN_COUPLING_SCORE",
+            3.0 / 11.0
+        );
+    }
+
+    #[test]
+    fn finalize_from_db_skips_self_pairs() {
+        // Same file appears in many commits; the SQL `<` filter prevents
+        // (a.rs, a.rs) from showing up.
+        let changes: Vec<_> = (1..=4)
+            .map(|i| make_change("a.rs", &format!("c{i}")))
+            .collect();
+        let store = store_with(&changes);
+
+        let mut coll = CouplingCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        assert!(r.entries.iter().all(|e| !e.key.contains("a.rs <-> a.rs")));
+    }
+
+    #[test]
+    fn finalize_from_db_orders_by_co_changes_desc() {
+        // (a, b) co-change 5 times, (c, d) co-change 3 times — both meet
+        // thresholds; (a, b) must rank first.
+        let mut changes = vec![];
+        for oid in &["c1", "c2", "c3", "c4", "c5"] {
+            changes.push(make_change("a.rs", oid));
+            changes.push(make_change("b.rs", oid));
+        }
+        for oid in &["d1", "d2", "d3"] {
+            changes.push(make_change("c.rs", oid));
+            changes.push(make_change("d.rs", oid));
+        }
+        let store = store_with(&changes);
+
+        let mut coll = CouplingCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        assert_eq!(r.entries[0].key, "a.rs <-> b.rs");
+    }
+}

@@ -280,11 +280,26 @@ Linux targets use `cargo-zigbuild` with `*-unknown-linux-musl` so the resulting 
 
 | Target | What it does | When to use |
 |---|---|---|
-| `make setup` | Installs `rustfmt` + `clippy` + `cargo-edit` | After first clone |
+| `make setup` | Installs `rustfmt` + `clippy` + `llvm-tools-preview` + `cargo-edit` + `cargo-llvm-cov` | After first clone |
 | `make pre-commit` | `fmt` + `clippy` + `test` | Before every commit |
 | `make ci` | `fmt-check` + `clippy` + `test` | To mirror GitHub Actions locally |
+| `make coverage` | Run tests under `cargo-llvm-cov`; emit JSON summary + LCOV + terminal table | To audit which code paths the test suite exercises |
+| `make coverage-html` | Generate browsable HTML report at `coverage/html/index.html` | For interactive coverage exploration |
+| `make coverage-clean` | Wipe cached coverage data + the `coverage/` directory | When switching branches or before a fresh run |
 | `make upgrade-check` | `cargo upgrade --incompatible --dry-run` (dev-deps excluded) | To preview dep upgrades |
 | `make upgrade` | Apply dep upgrades (dev-deps left untouched) + `cargo update` | When bumping deps |
+
+### Coverage outputs
+
+`make coverage` writes three artifacts under `coverage/` (gitignored):
+
+| Path | Format | Audience |
+|---|---|---|
+| `coverage/coverage-summary.json` | `cargo-llvm-cov` summary (LLVM JSON export, `type: "llvm.coverage.json.export"`) | **AI agents / scripts** — top-level keys are `data[0].totals.{lines,functions,regions}.{count,covered,percent}` and `data[0].files[*].{filename, summary.*}` |
+| `coverage/coverage.lcov` | LCOV | CI integrations (Codecov, Coveralls, SonarCloud) |
+| (terminal table) | ASCII | Humans running the command |
+
+The JSON file is the canonical **AI-readable** view: deterministic schema, repo-relative file ordering, and per-file + global percentages in one place. Agents should read it directly rather than parsing the terminal output.
 
 ## Commit Messages
 

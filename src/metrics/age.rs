@@ -140,3 +140,135 @@ fn empty_result() -> MetricResult {
         entries: vec![],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{CommitInfo, DiffRecord, FileStatus, ParsedChange};
+    use chrono::{FixedOffset, TimeZone};
+    use std::sync::Arc;
+
+    fn make_change_at(file: &str, oid: &str, status: FileStatus, ts_year: i32) -> ParsedChange {
+        let ts = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(ts_year, 1, 1, 0, 0, 0)
+            .unwrap();
+        ParsedChange {
+            diff: Arc::new(DiffRecord {
+                commit: Arc::new(CommitInfo {
+                    oid: oid.into(),
+                    author: "dev".into(),
+                    email: "dev@test.com".into(),
+                    timestamp: ts,
+                    message: "m".into(),
+                    parent_ids: vec![],
+                }),
+                file_path: file.into(),
+                old_path: None,
+                status,
+                hunks: vec![],
+                additions: 1,
+                deletions: 0,
+            }),
+            constructs: vec![],
+        }
+    }
+
+    fn store_with(changes: &[ParsedChange]) -> ChangeStore {
+        let store = ChangeStore::open_temp().expect("open store");
+        store.insert_batch(changes).expect("insert");
+        store.finalize_indexes().expect("index");
+        store
+    }
+
+    #[test]
+    fn empty_collector_finalize_returns_named_result() {
+        let mut coll = AgeCollector::new();
+        let result = coll.finalize();
+        assert_eq!(result.name, "age");
+        assert!(result.entries.is_empty());
+    }
+
+    #[test]
+    fn ts_to_date_handles_negative_timestamp_safely() {
+        // Should not panic on out-of-range timestamps; uses default (epoch).
+        let date = ts_to_date(i64::MIN);
+        // The fallback returns NaiveDate::default() — assert it produced something.
+        let _ = date.format("%Y-%m-%d").to_string();
+    }
+
+    #[test]
+    fn ts_to_date_known_value() {
+        // 2024-06-15 00:00:00 UTC = 1718409600
+        let date = ts_to_date(1_718_409_600);
+        assert_eq!(date.format("%Y-%m-%d").to_string(), "2024-06-15");
+    }
+
+    #[test]
+    fn finalize_from_db_skips_deleted_files() {
+        let store = store_with(&[
+            make_change_at("alive.rs", "c1", FileStatus::Added, 2020),
+            make_change_at("alive.rs", "c2", FileStatus::Modified, 2021),
+            make_change_at("gone.rs", "c3", FileStatus::Added, 2020),
+            make_change_at("gone.rs", "c4", FileStatus::Deleted, 2021),
+        ]);
+
+        let mut coll = AgeCollector::new();
+        let result = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        assert!(result.entries.iter().any(|e| e.key == "alive.rs"));
+        assert!(
+            !result.entries.iter().any(|e| e.key == "gone.rs"),
+            "deleted files must not appear in the age report"
+        );
+    }
+
+    #[test]
+    fn finalize_from_db_sorts_by_changes_per_year_desc() {
+        // hot.rs has 3 changes in the same year window; cold.rs has 1.
+        // Both share the same first_seen so changes_per_year orders them.
+        let store = store_with(&[
+            make_change_at("cold.rs", "c1", FileStatus::Added, 2020),
+            make_change_at("hot.rs", "c2", FileStatus::Added, 2020),
+            make_change_at("hot.rs", "c3", FileStatus::Modified, 2020),
+            make_change_at("hot.rs", "c4", FileStatus::Modified, 2021),
+        ]);
+
+        let mut coll = AgeCollector::new();
+        let result = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        assert!(result.entries.len() >= 2, "expected at least two entries");
+        assert_eq!(result.entries[0].key, "hot.rs");
+        assert_eq!(result.entries[1].key, "cold.rs");
+    }
+
+    #[test]
+    fn finalize_from_db_emits_expected_value_keys() {
+        let store = store_with(&[make_change_at("a.rs", "c1", FileStatus::Added, 2020)]);
+
+        let mut coll = AgeCollector::new();
+        let result = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        let entry = result.entries.iter().find(|e| e.key == "a.rs").unwrap();
+        for key in [
+            "age_days",
+            "first_seen",
+            "last_modified",
+            "days_since_last_change",
+            "change_count",
+            "changes_per_year",
+        ] {
+            assert!(
+                entry.values.contains_key(key),
+                "missing value key {key} in age entry"
+            );
+        }
+        match entry.values.get("change_count") {
+            Some(MetricValue::Count(n)) => assert_eq!(*n, 1),
+            other => panic!("Expected Count(1), got {other:?}"),
+        }
+    }
+}

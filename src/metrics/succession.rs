@@ -246,3 +246,214 @@ fn empty_result() -> MetricResult {
         entries: vec![],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{CommitInfo, DiffRecord, FileStatus, ParsedChange};
+    use chrono::{DateTime, FixedOffset};
+    use std::sync::Arc;
+
+    fn make_change_at(
+        file: &str,
+        oid: &str,
+        email: &str,
+        ts: DateTime<FixedOffset>,
+    ) -> ParsedChange {
+        ParsedChange {
+            diff: Arc::new(DiffRecord {
+                commit: Arc::new(CommitInfo {
+                    oid: oid.into(),
+                    author: email.into(),
+                    email: email.into(),
+                    timestamp: ts,
+                    message: "m".into(),
+                    parent_ids: vec![],
+                }),
+                file_path: file.into(),
+                old_path: None,
+                status: FileStatus::Modified,
+                hunks: vec![],
+                additions: 1,
+                deletions: 0,
+            }),
+            constructs: vec![],
+        }
+    }
+
+    fn store_with(changes: &[ParsedChange]) -> ChangeStore {
+        let store = ChangeStore::open_temp().expect("open store");
+        store.insert_batch(changes).expect("insert");
+        store.finalize_indexes().expect("index");
+        store
+    }
+
+    fn recent() -> DateTime<FixedOffset> {
+        Utc::now().with_timezone(&FixedOffset::east_opt(0).unwrap()) - Duration::days(1)
+    }
+
+    fn ancient() -> DateTime<FixedOffset> {
+        Utc::now().with_timezone(&FixedOffset::east_opt(0).unwrap())
+            - Duration::days(INACTIVE_DAYS + 30)
+    }
+
+    fn entry_for<'a>(r: &'a MetricResult, key: &str) -> &'a MetricEntry {
+        r.entries
+            .iter()
+            .find(|e| e.key == key)
+            .unwrap_or_else(|| panic!("missing entry {key}"))
+    }
+
+    fn status_code(e: &MetricEntry) -> String {
+        match e.values.get("status") {
+            Some(MetricValue::Message(m)) => m.code.clone(),
+            other => panic!("expected status Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_collector_returns_named_result() {
+        let mut coll = SuccessionCollector::new();
+        let r = coll.finalize();
+        assert_eq!(r.name, "succession");
+        assert!(r.entries.is_empty());
+    }
+
+    #[test]
+    fn classify_owned_when_original_active_and_few_authors() {
+        let m = classify(true, 0, 1);
+        assert_eq!(m.code, messages::SUCCESSION_STATUS_OWNED);
+    }
+
+    #[test]
+    fn classify_healthy_when_original_active_and_three_or_more_authors() {
+        let m = classify(true, 2, 3);
+        assert_eq!(m.code, messages::SUCCESSION_STATUS_HEALTHY);
+    }
+
+    #[test]
+    fn classify_orphaned_when_original_gone_and_no_successors() {
+        let m = classify(false, 0, 1);
+        assert_eq!(m.code, messages::SUCCESSION_STATUS_ORPHANED);
+        assert_eq!(m.severity, Some(Severity::Error));
+    }
+
+    #[test]
+    fn classify_knowledge_transfer_when_original_gone_and_one_successor() {
+        let m = classify(false, 1, 2);
+        assert_eq!(
+            m.code,
+            messages::SUCCESSION_STATUS_KNOWLEDGE_TRANSFER_NEEDED
+        );
+        assert_eq!(m.severity, Some(Severity::Warning));
+    }
+
+    #[test]
+    fn classify_handed_off_when_original_gone_and_multiple_successors() {
+        let m = classify(false, 3, 4);
+        assert_eq!(m.code, messages::SUCCESSION_STATUS_HANDED_OFF);
+    }
+
+    #[test]
+    fn status_rank_orders_orphaned_above_handed_off_above_owned() {
+        let make = |code: &str| {
+            let mut values = HashMap::new();
+            values.insert(
+                "status".into(),
+                MetricValue::Message(LocalizedMessage::code(code)),
+            );
+            MetricEntry {
+                key: "k".into(),
+                values,
+            }
+        };
+        let orphaned = make(messages::SUCCESSION_STATUS_ORPHANED);
+        let knowledge = make(messages::SUCCESSION_STATUS_KNOWLEDGE_TRANSFER_NEEDED);
+        let handed_off = make(messages::SUCCESSION_STATUS_HANDED_OFF);
+        let owned = make(messages::SUCCESSION_STATUS_OWNED);
+        let healthy = make(messages::SUCCESSION_STATUS_HEALTHY);
+        assert_eq!(status_rank(&orphaned), 4);
+        assert_eq!(status_rank(&knowledge), 3);
+        assert_eq!(status_rank(&handed_off), 2);
+        assert_eq!(status_rank(&owned), 1);
+        assert_eq!(status_rank(&healthy), 0);
+    }
+
+    #[test]
+    fn finalize_from_db_emits_owned_for_active_single_author() {
+        let store = store_with(&[
+            make_change_at("a.rs", "c1", "alice@x", recent()),
+            make_change_at("a.rs", "c2", "alice@x", recent()),
+        ]);
+        let mut coll = SuccessionCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        assert_eq!(
+            status_code(entry_for(&r, "a.rs")),
+            messages::SUCCESSION_STATUS_OWNED
+        );
+    }
+
+    #[test]
+    fn finalize_from_db_emits_orphaned_when_only_author_long_gone() {
+        let store = store_with(&[make_change_at("a.rs", "c1", "alice@x", ancient())]);
+        let mut coll = SuccessionCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        assert_eq!(
+            status_code(entry_for(&r, "a.rs")),
+            messages::SUCCESSION_STATUS_ORPHANED
+        );
+    }
+
+    #[test]
+    fn finalize_from_db_filters_non_source_files() {
+        let store = store_with(&[
+            make_change_at("Cargo.lock", "c1", "alice@x", recent()),
+            make_change_at("real.rs", "c2", "alice@x", recent()),
+        ]);
+        let mut coll = SuccessionCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        assert!(r.entries.iter().any(|e| e.key == "real.rs"));
+        assert!(!r.entries.iter().any(|e| e.key == "Cargo.lock"));
+    }
+
+    #[test]
+    fn finalize_from_db_orders_by_status_rank_desc() {
+        // orphaned > handed_off > owned, so the orphaned file leads.
+        let store = store_with(&[
+            make_change_at("orphan.rs", "c1", "ghost@x", ancient()),
+            make_change_at("active.rs", "c2", "alice@x", recent()),
+        ]);
+        let mut coll = SuccessionCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        assert_eq!(r.entries[0].key, "orphan.rs");
+    }
+
+    #[test]
+    fn finalize_from_db_picks_earliest_author_as_original() {
+        let very_old =
+            Utc::now().with_timezone(&FixedOffset::east_opt(0).unwrap()) - Duration::days(2);
+        let newer = recent();
+        // alice was first; bob came later.
+        let store = store_with(&[
+            make_change_at("a.rs", "c2", "bob@x", newer),
+            make_change_at("a.rs", "c1", "alice@x", very_old),
+        ]);
+        let mut coll = SuccessionCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        let entry = entry_for(&r, "a.rs");
+        match entry.values.get("original_author") {
+            Some(MetricValue::Text(s)) => assert_eq!(s, "alice@x"),
+            other => panic!("expected Text(alice@x), got {other:?}"),
+        }
+    }
+}

@@ -1,12 +1,20 @@
-.PHONY: build release test test-unit test-integration lint fmt fmt-check check clean install run help ci setup pre-commit upgrade-check upgrade
+.PHONY: build release test test-unit test-integration lint fmt fmt-check check clean install run help ci setup pre-commit upgrade-check upgrade coverage coverage-html coverage-open coverage-clean coverage-install
+
+# Coverage output paths. JSON is the AI-readable artifact; LCOV is for
+# CI integrations (Codecov / Coveralls); HTML is for human browsing.
+COVERAGE_DIR := coverage
+COVERAGE_JSON := $(COVERAGE_DIR)/coverage-summary.json
+COVERAGE_LCOV := $(COVERAGE_DIR)/coverage.lcov
+COVERAGE_HTML_DIR := $(COVERAGE_DIR)/html
 
 # Default target
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-setup: ## Install required toolchain components (rustfmt, clippy) + cargo-edit for upgrade
-	rustup component add rustfmt clippy
+setup: ## Install required toolchain components (rustfmt, clippy, llvm-tools) + cargo-edit + cargo-llvm-cov
+	rustup component add rustfmt clippy llvm-tools-preview
 	cargo install cargo-edit --locked
+	cargo install cargo-llvm-cov --locked
 
 build: ## Build debug binary
 	cargo build
@@ -57,6 +65,37 @@ run-csv: build ## Run with CSV output
 ci: fmt-check lint test ## Run all CI checks (mirrors GitHub Actions)
 
 pre-commit: fmt lint test ## Format, lint, and test before committing
+
+coverage-install: ## Install cargo-llvm-cov + llvm-tools-preview rustup component
+	rustup component add llvm-tools-preview
+	cargo install cargo-llvm-cov --locked
+
+coverage: ## Run tests with coverage; emit AI-readable JSON summary, LCOV, and terminal table
+	@mkdir -p $(COVERAGE_DIR)
+	cargo llvm-cov clean --workspace
+	cargo llvm-cov --no-report --workspace
+	cargo llvm-cov report --summary-only --json --output-path $(COVERAGE_JSON)
+	cargo llvm-cov report --lcov --output-path $(COVERAGE_LCOV)
+	@echo
+	cargo llvm-cov report
+	@echo
+	@echo "Coverage artifacts:"
+	@echo "  AI-readable JSON summary : $(COVERAGE_JSON)"
+	@echo "  LCOV (Codecov/Coveralls) : $(COVERAGE_LCOV)"
+	@echo "  HTML report (optional)   : run \`make coverage-html\`"
+
+coverage-html: ## Generate HTML coverage report (uses cached coverage data when available)
+	@mkdir -p $(COVERAGE_DIR)
+	cargo llvm-cov report --html --output-dir $(COVERAGE_DIR)
+	@echo "HTML report: $(COVERAGE_HTML_DIR)/index.html"
+
+coverage-open: ## Generate HTML coverage report and open in browser
+	@mkdir -p $(COVERAGE_DIR)
+	cargo llvm-cov report --html --open --output-dir $(COVERAGE_DIR)
+
+coverage-clean: ## Remove coverage artifacts and reset coverage data
+	cargo llvm-cov clean --workspace
+	rm -rf $(COVERAGE_DIR)
 
 upgrade-check: ## Show dep upgrades available (incl. major bumps), dev-deps excluded
 	cargo upgrade --incompatible --dry-run --exclude tempfile --exclude assert_cmd --exclude predicates

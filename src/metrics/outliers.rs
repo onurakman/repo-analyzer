@@ -170,3 +170,196 @@ fn empty_result() -> MetricResult {
         entries: vec![],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{CommitInfo, DiffRecord, FileStatus, ParsedChange};
+    use chrono::{FixedOffset, TimeZone};
+    use std::sync::Arc;
+
+    fn make_change(file: &str, oid: &str, email: &str, status: FileStatus) -> ParsedChange {
+        let ts = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2025, 1, 15, 12, 0, 0)
+            .unwrap();
+        ParsedChange {
+            diff: Arc::new(DiffRecord {
+                commit: Arc::new(CommitInfo {
+                    oid: oid.into(),
+                    author: email.into(),
+                    email: email.into(),
+                    timestamp: ts,
+                    message: "m".into(),
+                    parent_ids: vec![],
+                }),
+                file_path: file.into(),
+                old_path: None,
+                status,
+                hunks: vec![],
+                additions: 1,
+                deletions: 0,
+            }),
+            constructs: vec![],
+        }
+    }
+
+    fn store_with(changes: &[ParsedChange]) -> ChangeStore {
+        let store = ChangeStore::open_temp().expect("open store");
+        store.insert_batch(changes).expect("insert");
+        store.finalize_indexes().expect("index");
+        store
+    }
+
+    #[test]
+    fn build_recommendation_god_file_when_both_thresholds_breached() {
+        let msg = build_recommendation(HIGH_CHURN_THRESHOLD, HIGH_AUTHORS_THRESHOLD);
+        assert_eq!(msg.code, messages::OUTLIERS_RECOMMENDATION_GOD_FILE);
+        assert_eq!(msg.severity, Some(Severity::Error));
+        assert!(msg.params.contains_key("changes"));
+        assert!(msg.params.contains_key("authors"));
+    }
+
+    #[test]
+    fn build_recommendation_high_churn_only() {
+        let msg = build_recommendation(HIGH_CHURN_THRESHOLD, 1);
+        assert_eq!(msg.code, messages::OUTLIERS_RECOMMENDATION_HIGH_CHURN);
+        assert_eq!(msg.severity, Some(Severity::Warning));
+    }
+
+    #[test]
+    fn build_recommendation_diffuse_ownership_only() {
+        let msg = build_recommendation(1, HIGH_AUTHORS_THRESHOLD);
+        assert_eq!(
+            msg.code,
+            messages::OUTLIERS_RECOMMENDATION_DIFFUSE_OWNERSHIP
+        );
+        assert_eq!(msg.severity, Some(Severity::Warning));
+    }
+
+    #[test]
+    fn build_recommendation_ok_carries_no_severity() {
+        let msg = build_recommendation(1, 1);
+        assert_eq!(msg.code, messages::OUTLIERS_RECOMMENDATION_OK);
+        assert!(msg.severity.is_none());
+    }
+
+    #[test]
+    fn empty_collector_returns_named_result() {
+        let mut coll = OutliersCollector::new();
+        let r = coll.finalize();
+        assert_eq!(r.name, "outliers");
+        assert!(r.entries.is_empty());
+    }
+
+    #[test]
+    fn finalize_from_db_returns_empty_for_below_threshold_files() {
+        // 5 changes by 2 authors — both well below thresholds.
+        let store = store_with(&[
+            make_change("a.rs", "c1", "alice@x", FileStatus::Modified),
+            make_change("a.rs", "c2", "bob@x", FileStatus::Modified),
+            make_change("a.rs", "c3", "alice@x", FileStatus::Modified),
+            make_change("a.rs", "c4", "alice@x", FileStatus::Modified),
+            make_change("a.rs", "c5", "alice@x", FileStatus::Modified),
+        ]);
+
+        let mut coll = OutliersCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        assert!(
+            r.entries.is_empty(),
+            "no outliers expected below thresholds"
+        );
+    }
+
+    #[test]
+    fn finalize_from_db_emits_high_churn_outlier() {
+        let mut changes = vec![];
+        for i in 0..HIGH_CHURN_THRESHOLD {
+            changes.push(make_change(
+                "noisy.rs",
+                &format!("c{i}"),
+                "alice@x",
+                FileStatus::Modified,
+            ));
+        }
+        let store = store_with(&changes);
+
+        let mut coll = OutliersCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        let entry = r
+            .entries
+            .iter()
+            .find(|e| e.key == "noisy.rs")
+            .expect("noisy.rs row missing");
+        match entry.values.get("recommendation") {
+            Some(MetricValue::Message(m)) => {
+                assert_eq!(m.code, messages::OUTLIERS_RECOMMENDATION_HIGH_CHURN);
+            }
+            other => panic!("expected high churn recommendation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_from_db_skips_deleted_files() {
+        let mut changes = vec![];
+        for i in 0..HIGH_CHURN_THRESHOLD {
+            changes.push(make_change(
+                "gone.rs",
+                &format!("c{i}"),
+                "alice@x",
+                FileStatus::Modified,
+            ));
+        }
+        // Final entry marks the file as deleted — should be filtered out.
+        changes.push(make_change(
+            "gone.rs",
+            "cdel",
+            "alice@x",
+            FileStatus::Deleted,
+        ));
+        let store = store_with(&changes);
+
+        let mut coll = OutliersCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        assert!(
+            !r.entries.iter().any(|e| e.key == "gone.rs"),
+            "deleted files must not appear in outliers"
+        );
+    }
+
+    #[test]
+    fn finalize_from_db_filters_non_source_files() {
+        // Even if package-lock.json crosses thresholds, is_source_file drops it.
+        let mut changes = vec![];
+        for i in 0..HIGH_CHURN_THRESHOLD {
+            changes.push(make_change(
+                "package-lock.json",
+                &format!("c{i}"),
+                "alice@x",
+                FileStatus::Modified,
+            ));
+        }
+        for i in 0..HIGH_CHURN_THRESHOLD {
+            changes.push(make_change(
+                "real.rs",
+                &format!("d{i}"),
+                "alice@x",
+                FileStatus::Modified,
+            ));
+        }
+        let store = store_with(&changes);
+
+        let mut coll = OutliersCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        assert!(r.entries.iter().any(|e| e.key == "real.rs"));
+        assert!(!r.entries.iter().any(|e| e.key == "package-lock.json"));
+    }
+}

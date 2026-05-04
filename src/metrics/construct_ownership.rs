@@ -206,3 +206,203 @@ fn empty_result() -> MetricResult {
         entries: vec![],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{CodeConstruct, CommitInfo, DiffRecord, FileStatus, ParsedChange};
+    use chrono::{FixedOffset, TimeZone};
+    use std::sync::Arc;
+
+    fn make_change(
+        file: &str,
+        oid: &str,
+        email: &str,
+        constructs: Vec<CodeConstruct>,
+    ) -> ParsedChange {
+        let ts = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2025, 1, 15, 12, 0, 0)
+            .unwrap();
+        ParsedChange {
+            diff: Arc::new(DiffRecord {
+                commit: Arc::new(CommitInfo {
+                    oid: oid.into(),
+                    author: email.into(),
+                    email: email.into(),
+                    timestamp: ts,
+                    message: "m".into(),
+                    parent_ids: vec![],
+                }),
+                file_path: file.into(),
+                old_path: None,
+                status: FileStatus::Modified,
+                hunks: vec![],
+                additions: 1,
+                deletions: 0,
+            }),
+            constructs,
+        }
+    }
+
+    fn store_with(changes: &[ParsedChange]) -> ChangeStore {
+        let store = ChangeStore::open_temp().expect("open store");
+        store.insert_batch(changes).expect("insert");
+        store.finalize_indexes().expect("index");
+        store
+    }
+
+    fn func(name: &str, start: u32, end: u32) -> CodeConstruct {
+        CodeConstruct::Function {
+            name: name.into(),
+            start_line: start,
+            end_line: end,
+            enclosing: None,
+        }
+    }
+
+    #[test]
+    fn empty_collector_returns_named_result() {
+        let mut coll = ConstructOwnershipCollector::new();
+        let r = coll.finalize();
+        assert_eq!(r.name, "construct_ownership");
+        assert!(r.entries.is_empty());
+    }
+
+    #[test]
+    fn bus_factor_single_author_is_one() {
+        let mut authors = HashMap::new();
+        authors.insert("alice".into(), 100);
+        assert_eq!(compute_bus_factor(&authors, 100), 1);
+    }
+
+    #[test]
+    fn bus_factor_two_equal_authors_is_two() {
+        // Need two authors for either to cross the half mark.
+        let mut authors = HashMap::new();
+        authors.insert("alice".into(), 50);
+        authors.insert("bob".into(), 50);
+        assert_eq!(compute_bus_factor(&authors, 100), 2);
+    }
+
+    #[test]
+    fn bus_factor_dominant_author_is_one() {
+        // Top contributor alone exceeds half — single point of failure.
+        let mut authors = HashMap::new();
+        authors.insert("alice".into(), 80);
+        authors.insert("bob".into(), 10);
+        authors.insert("carol".into(), 10);
+        assert_eq!(compute_bus_factor(&authors, 100), 1);
+    }
+
+    #[test]
+    fn bus_factor_zero_total_returns_zero() {
+        let authors: HashMap<String, u64> = HashMap::new();
+        assert_eq!(compute_bus_factor(&authors, 0), 0);
+    }
+
+    #[test]
+    fn finalize_from_db_attributes_top_author_per_construct() {
+        let store = store_with(&[
+            // alice owns "foo" with 3 changes vs bob's 1
+            make_change("a.rs", "c1", "alice@x", vec![func("foo", 1, 5)]),
+            make_change("a.rs", "c2", "alice@x", vec![func("foo", 1, 5)]),
+            make_change("a.rs", "c3", "alice@x", vec![func("foo", 1, 5)]),
+            make_change("a.rs", "c4", "bob@x", vec![func("foo", 1, 5)]),
+        ]);
+
+        let mut coll = ConstructOwnershipCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        assert!(!r.entries.is_empty());
+        let entry = r
+            .entries
+            .iter()
+            .find(|e| e.key.ends_with("::foo"))
+            .expect("foo entry");
+        match entry.values.get("top_author") {
+            Some(MetricValue::Text(s)) => assert_eq!(s, "alice@x"),
+            other => panic!("expected Text(alice@x), got {other:?}"),
+        }
+        match entry.values.get("total_authors") {
+            Some(MetricValue::Count(n)) => assert_eq!(*n, 2),
+            other => panic!("expected Count(2), got {other:?}"),
+        }
+        // bus_factor is 1 because alice dominates 3 of 4 lines touched.
+        match entry.values.get("bus_factor") {
+            Some(MetricValue::Count(n)) => assert_eq!(*n, 1),
+            other => panic!("expected Count(1), got {other:?}"),
+        }
+        match entry.values.get("top_pct") {
+            Some(MetricValue::Count(pct)) => assert!((50..=100).contains(pct)),
+            other => panic!("expected Count, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_from_db_filters_non_source_files() {
+        let store = store_with(&[
+            make_change("Cargo.lock", "c1", "alice@x", vec![func("x", 1, 1)]),
+            make_change("real.rs", "c2", "alice@x", vec![func("y", 1, 1)]),
+        ]);
+
+        let mut coll = ConstructOwnershipCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        assert!(r.entries.iter().any(|e| e.key.starts_with("real.rs")));
+        assert!(!r.entries.iter().any(|e| e.key.contains("Cargo.lock")));
+    }
+
+    #[test]
+    fn finalize_from_db_emits_expected_value_keys() {
+        let store = store_with(&[make_change(
+            "a.rs",
+            "c1",
+            "alice@x",
+            vec![func("foo", 1, 10)],
+        )]);
+
+        let mut coll = ConstructOwnershipCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        let entry = r.entries.first().unwrap();
+        for key in [
+            "kind",
+            "file",
+            "top_author",
+            "top_pct",
+            "total_authors",
+            "bus_factor",
+            "touches",
+        ] {
+            assert!(
+                entry.values.contains_key(key),
+                "missing value key {key} in construct_ownership entry"
+            );
+        }
+    }
+
+    #[test]
+    fn finalize_from_db_sorts_by_bus_factor_then_touches() {
+        let store = store_with(&[
+            // single-owner construct (bus_factor 1, fewer touches)
+            make_change("a.rs", "c1", "alice@x", vec![func("solo", 1, 5)]),
+            // two-author construct (bus_factor 2, more touches)
+            make_change("b.rs", "c2", "alice@x", vec![func("shared", 1, 5)]),
+            make_change("b.rs", "c3", "bob@x", vec![func("shared", 1, 5)]),
+            make_change("b.rs", "c4", "alice@x", vec![func("shared", 1, 5)]),
+            make_change("b.rs", "c5", "bob@x", vec![func("shared", 1, 5)]),
+        ]);
+
+        let mut coll = ConstructOwnershipCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        // Rows are sorted bus_factor ASC, then touches DESC; lowest bus
+        // factor (highest risk) leads the report.
+        assert!(r.entries.first().unwrap().key.ends_with("::solo"));
+    }
+}

@@ -213,3 +213,199 @@ fn empty_result() -> MetricResult {
         entries: vec![],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{CommitInfo, DiffRecord, FileStatus, ParsedChange};
+    use chrono::{DateTime, FixedOffset};
+    use std::sync::Arc;
+
+    fn make_change_at(
+        file: &str,
+        oid: &str,
+        email: &str,
+        added: u32,
+        ts: DateTime<FixedOffset>,
+    ) -> ParsedChange {
+        ParsedChange {
+            diff: Arc::new(DiffRecord {
+                commit: Arc::new(CommitInfo {
+                    oid: oid.into(),
+                    author: email.into(),
+                    email: email.into(),
+                    timestamp: ts,
+                    message: "m".into(),
+                    parent_ids: vec![],
+                }),
+                file_path: file.into(),
+                old_path: None,
+                status: FileStatus::Modified,
+                hunks: vec![],
+                additions: added,
+                deletions: 0,
+            }),
+            constructs: vec![],
+        }
+    }
+
+    fn store_with(changes: &[ParsedChange]) -> ChangeStore {
+        let store = ChangeStore::open_temp().expect("open store");
+        store.insert_batch(changes).expect("insert");
+        store.finalize_indexes().expect("index");
+        store
+    }
+
+    /// Recent timestamp anchored at the current wall clock so the owner
+    /// counts as active in `finalize_from_db`'s `IDLE_DAYS` window.
+    fn recent() -> DateTime<FixedOffset> {
+        Utc::now().with_timezone(&FixedOffset::east_opt(0).unwrap()) - chrono::Duration::days(1)
+    }
+
+    /// Timestamp older than `IDLE_DAYS` so the owner counts as inactive.
+    fn ancient() -> DateTime<FixedOffset> {
+        Utc::now().with_timezone(&FixedOffset::east_opt(0).unwrap())
+            - chrono::Duration::days(IDLE_DAYS + 30)
+    }
+
+    #[test]
+    fn empty_collector_returns_named_result() {
+        let mut coll = KnowledgeSilosCollector::new();
+        let r = coll.finalize();
+        assert_eq!(r.name, "knowledge_silos");
+        assert!(r.entries.is_empty());
+    }
+
+    #[test]
+    fn risk_rank_orders_at_risk_above_single_owner() {
+        let make = |code: &str| {
+            let mut values = HashMap::new();
+            values.insert(
+                "risk".into(),
+                MetricValue::Message(LocalizedMessage::code(code)),
+            );
+            MetricEntry {
+                key: "k".into(),
+                values,
+            }
+        };
+        let at_risk = make(messages::KNOWLEDGE_SILO_RISK_AT_RISK);
+        let single = make(messages::KNOWLEDGE_SILO_RISK_SINGLE_OWNER);
+        let other = MetricEntry {
+            key: "k".into(),
+            values: HashMap::new(),
+        };
+        assert_eq!(risk_rank(&at_risk), 2);
+        assert_eq!(risk_rank(&single), 1);
+        assert_eq!(risk_rank(&other), 0);
+    }
+
+    #[test]
+    fn ts_to_date_known_value() {
+        // 2024-06-15 00:00:00 UTC = 1718409600
+        assert_eq!(
+            ts_to_date(1_718_409_600).format("%Y-%m-%d").to_string(),
+            "2024-06-15"
+        );
+    }
+
+    #[test]
+    fn finalize_from_db_drops_non_silo_files() {
+        // Two authors at 50/50 — ownership_pct = 50, below SILO_PCT (80).
+        let store = store_with(&[
+            make_change_at("a.rs", "c1", "alice@x", 50, recent()),
+            make_change_at("a.rs", "c2", "bob@x", 50, recent()),
+        ]);
+
+        let mut coll = KnowledgeSilosCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        assert!(
+            r.entries.is_empty(),
+            "files below SILO_PCT must not appear: {:?}",
+            r.entries
+        );
+    }
+
+    #[test]
+    fn finalize_from_db_flags_single_owner_silo_when_active() {
+        // alice owns 100 of 100 added lines, recently — single_owner risk.
+        let store = store_with(&[make_change_at("a.rs", "c1", "alice@x", 100, recent())]);
+
+        let mut coll = KnowledgeSilosCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        let entry = r.entries.iter().find(|e| e.key == "a.rs").unwrap();
+        match entry.values.get("risk") {
+            Some(MetricValue::Message(m)) => {
+                assert_eq!(m.code, messages::KNOWLEDGE_SILO_RISK_SINGLE_OWNER);
+                assert_eq!(m.severity, Some(Severity::Warning));
+            }
+            other => panic!("expected risk Message, got {other:?}"),
+        }
+        match entry.values.get("ownership_pct") {
+            Some(MetricValue::Count(n)) => assert_eq!(*n, 100),
+            other => panic!("expected Count(100), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_from_db_flags_at_risk_when_owner_idle() {
+        // alice owns everything but her last touch is well past IDLE_DAYS.
+        let store = store_with(&[make_change_at("a.rs", "c1", "alice@x", 100, ancient())]);
+
+        let mut coll = KnowledgeSilosCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        let entry = r.entries.iter().find(|e| e.key == "a.rs").unwrap();
+        match entry.values.get("risk") {
+            Some(MetricValue::Message(m)) => {
+                assert_eq!(m.code, messages::KNOWLEDGE_SILO_RISK_AT_RISK);
+                assert_eq!(m.severity, Some(Severity::Error));
+            }
+            other => panic!("expected at-risk Message, got {other:?}"),
+        }
+        match entry.values.get("owner_idle_days") {
+            Some(MetricValue::Count(n)) => {
+                assert!(*n >= IDLE_DAYS as u64, "expected idle >= IDLE_DAYS");
+            }
+            other => panic!("expected Count, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_from_db_filters_non_source_files() {
+        let store = store_with(&[
+            make_change_at("Cargo.lock", "c1", "alice@x", 100, recent()),
+            make_change_at("real.rs", "c2", "alice@x", 100, recent()),
+        ]);
+
+        let mut coll = KnowledgeSilosCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        assert!(r.entries.iter().any(|e| e.key == "real.rs"));
+        assert!(!r.entries.iter().any(|e| e.key == "Cargo.lock"));
+    }
+
+    #[test]
+    fn finalize_from_db_orders_at_risk_before_single_owner() {
+        let store = store_with(&[
+            // single_owner — alice still active
+            make_change_at("active.rs", "c1", "alice@x", 100, recent()),
+            // at_risk — alice idle
+            make_change_at("idle.rs", "c2", "bob@x", 100, ancient()),
+        ]);
+
+        let mut coll = KnowledgeSilosCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        // at-risk row should come first (rank 2 > rank 1)
+        assert_eq!(r.entries[0].key, "idle.rs");
+        assert_eq!(r.entries[1].key, "active.rs");
+    }
+}

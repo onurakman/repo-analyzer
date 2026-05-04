@@ -432,3 +432,203 @@ fn empty_result() -> MetricResult {
         entry_groups: vec![],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    fn make_branch(name: &str, days_since: i64, merged: bool, is_head: bool) -> BranchInfo {
+        BranchInfo {
+            name: name.into(),
+            last_commit_date: NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            days_since,
+            author: "dev@test".into(),
+            merged,
+            is_head,
+        }
+    }
+
+    #[test]
+    fn classify_head_takes_priority() {
+        // Even an old, unmerged branch is classified as Head when it's HEAD.
+        let b = make_branch("main", 999, false, true);
+        assert_eq!(classify(&b), BranchStatus::Head);
+    }
+
+    #[test]
+    fn classify_active_recent_unmerged() {
+        let b = make_branch("feature", STALE_DAYS - 1, false, false);
+        assert_eq!(classify(&b), BranchStatus::Active);
+    }
+
+    #[test]
+    fn classify_stale_at_threshold() {
+        let b = make_branch("feature", STALE_DAYS, false, false);
+        assert_eq!(classify(&b), BranchStatus::Stale);
+    }
+
+    #[test]
+    fn classify_abandoned_at_threshold() {
+        let b = make_branch("feature", ABANDONED_DAYS, false, false);
+        assert_eq!(classify(&b), BranchStatus::Abandoned);
+    }
+
+    #[test]
+    fn classify_merged_recent() {
+        let b = make_branch("feature", STALE_DAYS - 1, true, false);
+        assert_eq!(classify(&b), BranchStatus::MergedRecent);
+    }
+
+    #[test]
+    fn classify_merged_stale() {
+        let b = make_branch("feature", STALE_DAYS, true, false);
+        assert_eq!(classify(&b), BranchStatus::MergedStale);
+    }
+
+    #[test]
+    fn build_recommendation_head_short_circuits() {
+        // is_head wins regardless of merged/days_since.
+        let msg = build_recommendation(false, ABANDONED_DAYS + 1, true);
+        assert_eq!(msg.code, messages::BRANCHES_RECOMMENDATION_HEAD);
+        assert!(msg.severity.is_none());
+    }
+
+    #[test]
+    fn build_recommendation_merged_recent_is_info() {
+        let msg = build_recommendation(true, STALE_DAYS - 1, false);
+        assert_eq!(msg.code, messages::BRANCHES_RECOMMENDATION_MERGED_RECENT);
+        assert_eq!(msg.severity, Some(Severity::Info));
+    }
+
+    #[test]
+    fn build_recommendation_merged_stale_is_warning_with_days() {
+        let msg = build_recommendation(true, STALE_DAYS + 5, false);
+        assert_eq!(msg.code, messages::BRANCHES_RECOMMENDATION_MERGED_STALE);
+        assert_eq!(msg.severity, Some(Severity::Warning));
+        assert!(msg.params.contains_key("days"));
+    }
+
+    #[test]
+    fn build_recommendation_abandoned_is_critical() {
+        let msg = build_recommendation(false, ABANDONED_DAYS + 1, false);
+        assert_eq!(msg.code, messages::BRANCHES_RECOMMENDATION_ABANDONED);
+        assert_eq!(msg.severity, Some(Severity::Critical));
+    }
+
+    #[test]
+    fn build_recommendation_stale_is_warning() {
+        let msg = build_recommendation(false, STALE_DAYS + 5, false);
+        assert_eq!(msg.code, messages::BRANCHES_RECOMMENDATION_STALE);
+        assert_eq!(msg.severity, Some(Severity::Warning));
+    }
+
+    #[test]
+    fn build_recommendation_active_has_no_severity() {
+        let msg = build_recommendation(false, STALE_DAYS - 1, false);
+        assert_eq!(msg.code, messages::BRANCHES_RECOMMENDATION_ACTIVE);
+        assert!(msg.severity.is_none());
+    }
+
+    #[test]
+    fn branch_status_names_are_snake_case_stable() {
+        // Group ids are persisted in JSON output; lock them down.
+        assert_eq!(BranchStatus::Head.name(), "head");
+        assert_eq!(BranchStatus::Active.name(), "active");
+        assert_eq!(BranchStatus::Stale.name(), "stale");
+        assert_eq!(BranchStatus::Abandoned.name(), "abandoned");
+        assert_eq!(BranchStatus::MergedRecent.name(), "merged_recent");
+        assert_eq!(BranchStatus::MergedStale.name(), "merged_stale");
+    }
+
+    #[test]
+    fn branch_status_label_codes_follow_dotted_convention() {
+        for status in [
+            BranchStatus::Head,
+            BranchStatus::Active,
+            BranchStatus::Stale,
+            BranchStatus::Abandoned,
+            BranchStatus::MergedRecent,
+            BranchStatus::MergedStale,
+        ] {
+            assert!(
+                status.label_code().starts_with("branches.group."),
+                "label code {} does not match the branches.group.* convention",
+                status.label_code()
+            );
+        }
+    }
+
+    #[test]
+    fn finalize_drops_single_branch_and_yields_empty_result() {
+        let mut coll = BranchesCollector::new();
+        coll.branches.push(make_branch("only", 0, false, true));
+        let result = coll.finalize();
+        assert_eq!(result.name, "branches");
+        assert!(result.entries.is_empty());
+        assert!(
+            result.entry_groups.is_empty(),
+            "single branch should produce empty groups"
+        );
+    }
+
+    #[test]
+    fn finalize_groups_branches_in_worst_first_order() {
+        let mut coll = BranchesCollector::new();
+        coll.branches.push(make_branch("main", 0, false, true));
+        coll.branches
+            .push(make_branch("feature/active", STALE_DAYS - 5, false, false));
+        coll.branches
+            .push(make_branch("feature/old", ABANDONED_DAYS + 1, false, false));
+        coll.branches
+            .push(make_branch("feature/stale", STALE_DAYS + 1, false, false));
+        coll.branches
+            .push(make_branch("feature/done", STALE_DAYS - 1, true, false));
+        coll.branches
+            .push(make_branch("feature/done-old", STALE_DAYS + 1, true, false));
+
+        let result = coll.finalize();
+        assert!(!result.entry_groups.is_empty());
+        // Worst-first order: abandoned > stale > merged_stale > merged_recent > active > head
+        let names: Vec<_> = result.entry_groups.iter().map(|g| g.name.clone()).collect();
+        let abandoned_pos = names.iter().position(|n| n == "abandoned");
+        let active_pos = names.iter().position(|n| n == "active");
+        let head_pos = names.iter().position(|n| n == "head");
+        assert!(abandoned_pos.is_some());
+        assert!(active_pos.is_some());
+        assert!(head_pos.is_some());
+        assert!(
+            abandoned_pos.unwrap() < active_pos.unwrap(),
+            "abandoned should come before active"
+        );
+        assert!(
+            active_pos.unwrap() < head_pos.unwrap(),
+            "active should come before head"
+        );
+    }
+
+    #[test]
+    fn finalize_sorts_within_group_oldest_first() {
+        let mut coll = BranchesCollector::new();
+        coll.branches.push(make_branch("recent", 5, false, false));
+        coll.branches.push(make_branch("oldest", 30, false, false));
+        coll.branches.push(make_branch("middle", 20, false, false));
+        // Need at least MIN_BRANCHES branches; we already have three.
+        let result = coll.finalize();
+        let active = result
+            .entry_groups
+            .iter()
+            .find(|g| g.name == "active")
+            .expect("active group");
+        assert_eq!(active.entries[0].key, "oldest");
+        assert_eq!(active.entries[1].key, "middle");
+        assert_eq!(active.entries[2].key, "recent");
+    }
+
+    #[test]
+    fn min_branches_constant_is_two() {
+        // A repository with one branch is just HEAD — confirm the threshold
+        // hasn't been silently changed.
+        assert_eq!(MIN_BRANCHES, 2);
+    }
+}

@@ -146,3 +146,154 @@ fn empty_result() -> MetricResult {
         entries: vec![],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{CommitInfo, DiffRecord, FileStatus, ParsedChange};
+    use chrono::{FixedOffset, TimeZone};
+    use std::sync::Arc;
+
+    fn make_change(file: &str, oid: &str, email: &str, added: u32) -> ParsedChange {
+        let ts = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2025, 1, 15, 12, 0, 0)
+            .unwrap();
+        ParsedChange {
+            diff: Arc::new(DiffRecord {
+                commit: Arc::new(CommitInfo {
+                    oid: oid.into(),
+                    author: email.into(),
+                    email: email.into(),
+                    timestamp: ts,
+                    message: "m".into(),
+                    parent_ids: vec![],
+                }),
+                file_path: file.into(),
+                old_path: None,
+                status: FileStatus::Modified,
+                hunks: vec![],
+                additions: added,
+                deletions: 0,
+            }),
+            constructs: vec![],
+        }
+    }
+
+    fn store_with(changes: &[ParsedChange]) -> ChangeStore {
+        let store = ChangeStore::open_temp().expect("open store");
+        store.insert_batch(changes).expect("insert");
+        store.finalize_indexes().expect("index");
+        store
+    }
+
+    #[test]
+    fn empty_collector_returns_named_result() {
+        let mut coll = OwnershipCollector::new();
+        let r = coll.finalize();
+        assert_eq!(r.name, "ownership");
+        assert!(r.entries.is_empty());
+    }
+
+    #[test]
+    fn bus_factor_zero_total_is_zero() {
+        let authors: HashMap<String, u64> = HashMap::new();
+        assert_eq!(compute_bus_factor(&authors, 0), 0);
+    }
+
+    #[test]
+    fn bus_factor_single_author_is_one() {
+        let mut authors = HashMap::new();
+        authors.insert("alice".into(), 100);
+        assert_eq!(compute_bus_factor(&authors, 100), 1);
+    }
+
+    #[test]
+    fn bus_factor_dominant_author_is_one() {
+        // 80% from alice — alone she crosses the 50% mark.
+        let mut authors = HashMap::new();
+        authors.insert("alice".into(), 80);
+        authors.insert("bob".into(), 10);
+        authors.insert("carol".into(), 10);
+        assert_eq!(compute_bus_factor(&authors, 100), 1);
+    }
+
+    #[test]
+    fn bus_factor_two_equal_authors_is_two() {
+        let mut authors = HashMap::new();
+        authors.insert("alice".into(), 50);
+        authors.insert("bob".into(), 50);
+        // alice alone is exactly 50%, not strictly > 50%, so we need both.
+        assert_eq!(compute_bus_factor(&authors, 100), 2);
+    }
+
+    #[test]
+    fn bus_factor_three_balanced_authors_is_two() {
+        // Top two combined exceed 50%, top alone does not.
+        let mut authors = HashMap::new();
+        authors.insert("alice".into(), 40);
+        authors.insert("bob".into(), 40);
+        authors.insert("carol".into(), 20);
+        assert_eq!(compute_bus_factor(&authors, 100), 2);
+    }
+
+    #[test]
+    fn finalize_from_db_picks_top_author_by_lines_added() {
+        let store = store_with(&[
+            make_change("a.rs", "c1", "alice@x", 100),
+            make_change("a.rs", "c2", "bob@x", 10),
+        ]);
+
+        let mut coll = OwnershipCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        let entry = r.entries.iter().find(|e| e.key == "a.rs").unwrap();
+        match entry.values.get("top_author") {
+            Some(MetricValue::Text(s)) => assert_eq!(s, "alice@x"),
+            other => panic!("expected Text(alice@x), got {other:?}"),
+        }
+        match entry.values.get("total_authors") {
+            Some(MetricValue::Count(n)) => assert_eq!(*n, 2),
+            other => panic!("expected Count(2), got {other:?}"),
+        }
+        match entry.values.get("total_lines") {
+            Some(MetricValue::Count(n)) => assert_eq!(*n, 110),
+            other => panic!("expected Count(110), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_from_db_filters_non_source_files() {
+        let store = store_with(&[
+            make_change("Cargo.lock", "c1", "alice@x", 100),
+            make_change("real.rs", "c2", "alice@x", 100),
+        ]);
+
+        let mut coll = OwnershipCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        assert!(r.entries.iter().any(|e| e.key == "real.rs"));
+        assert!(!r.entries.iter().any(|e| e.key == "Cargo.lock"));
+    }
+
+    #[test]
+    fn finalize_from_db_sorts_by_bus_factor_asc() {
+        let store = store_with(&[
+            // a.rs: bus_factor 2 (alice 50, bob 50)
+            make_change("a.rs", "c1", "alice@x", 50),
+            make_change("a.rs", "c2", "bob@x", 50),
+            // b.rs: bus_factor 1 (alice 100)
+            make_change("b.rs", "c3", "alice@x", 100),
+        ]);
+
+        let mut coll = OwnershipCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .expect("db result");
+        // Highest risk (lowest bus_factor) leads.
+        assert_eq!(r.entries[0].key, "b.rs");
+        assert_eq!(r.entries[1].key, "a.rs");
+    }
+}
