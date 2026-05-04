@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.16](https://github.com/onurakman/repo-analyzer/compare/v0.1.15...v0.1.16) (2026-05-04)
+
+
+### Miscellaneous Chores
+
+* release 0.1.16 ([3f15eca](https://github.com/onurakman/repo-analyzer/commit/3f15eca374b9c99430be6d1d98c142e3c66b7abe))
+
 ## [0.1.15](https://github.com/onurakman/repo-analyzer/compare/v0.1.14...v0.1.15) (2026-04-20)
 
 
