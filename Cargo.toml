@@ -6,7 +6,7 @@ description = "Git repository analysis tool with code-construct-level granularit
 
 [dependencies]
 # Git
-gix = { version = "0.81", features = ["blocking-network-client", "blob-diff", "blame"] }
+gix = { version = "0.83", features = ["blocking-network-client", "blob-diff", "blame"] }
 
 # Parsing
 tree-sitter = "0.26"
