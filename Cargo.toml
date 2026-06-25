@@ -54,7 +54,7 @@ regex = "1.12.3"
 
 # Disk-backed change store — spills collector aggregation state to a temp
 # SQLite database so memory stays bounded on huge repos.
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Language detection / line classification (see `src/langs`, `src/analysis`).
 # Detection is delegated to `linguist` (GitHub Linguist data, MIT). Codestats'
