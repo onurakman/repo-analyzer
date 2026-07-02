@@ -133,7 +133,9 @@ fn map_to_codestats(linguist_name: &str) -> Option<&'static Language> {
         .iter()
         .find(|(from, _)| from.eq_ignore_ascii_case(linguist_name))
         .map(|(_, to)| *to)?;
-    LANGUAGES.iter().find(|l| l.name.eq_ignore_ascii_case(alias))
+    LANGUAGES
+        .iter()
+        .find(|l| l.name.eq_ignore_ascii_case(alias))
 }
 
 #[inline]

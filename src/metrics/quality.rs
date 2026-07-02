@@ -71,18 +71,17 @@ impl MetricCollector for QualityCollector {
         _progress: &crate::metrics::ProgressReporter,
     ) -> Option<anyhow::Result<MetricResult>> {
         Some((|| -> anyhow::Result<MetricResult> {
-        // One row per distinct commit. Per-commit work stays bounded because
-        // we only keep counters, never the full per-commit list.
-        let (
-            total_commits,
-            short_count,
-            low_quality_count,
-            revert_count,
-            mega_count,
-            merge_count,
-            total_msg_chars,
-        ) = store
-            .with_conn(
+            // One row per distinct commit. Per-commit work stays bounded because
+            // we only keep counters, never the full per-commit list.
+            let (
+                total_commits,
+                short_count,
+                low_quality_count,
+                revert_count,
+                mega_count,
+                merge_count,
+                total_msg_chars,
+            ) = store.with_conn(
                 |conn| -> anyhow::Result<(u64, u64, u64, u64, u64, u64, u64)> {
                     let mut stmt = conn.prepare(
                         "SELECT COALESCE(MAX(message), '') AS msg,
@@ -131,125 +130,126 @@ impl MetricCollector for QualityCollector {
                 },
             )??;
 
-        let avg_msg_len = if total_commits > 0 {
-            total_msg_chars as f64 / total_commits as f64
-        } else {
-            0.0
-        };
-
-        let pct = |n: u64| -> f64 {
-            if total_commits == 0 {
-                0.0
+            let avg_msg_len = if total_commits > 0 {
+                total_msg_chars as f64 / total_commits as f64
             } else {
-                (n as f64 / total_commits as f64) * 100.0
-            }
-        };
+                0.0
+            };
 
-        let make_row = |signal: &str, count: u64, pct_val: f64, rec: LocalizedMessage| {
-            let mut values = HashMap::new();
-            values.insert("commits".into(), MetricValue::Count(count));
-            values.insert("percent".into(), MetricValue::Float(pct_val));
-            values.insert("recommendation".into(), MetricValue::Message(rec));
-            MetricEntry {
-                key: signal.into(),
-                values,
-            }
-        };
+            let pct = |n: u64| -> f64 {
+                if total_commits == 0 {
+                    0.0
+                } else {
+                    (n as f64 / total_commits as f64) * 100.0
+                }
+            };
 
-        let ok = || LocalizedMessage::code(messages::QUALITY_RECOMMENDATION_OK);
-        let warn =
-            |code: &str| LocalizedMessage::code(code.to_string()).with_severity(Severity::Warning);
-
-        let entries = vec![
-            make_row(
-                "total_commits",
-                total_commits,
-                100.0,
-                LocalizedMessage::code(messages::QUALITY_RECOMMENDATION_BASELINE),
-            ),
-            make_row(
-                "short_messages",
-                short_count,
-                pct(short_count),
-                if pct(short_count) > 20.0 {
-                    warn(messages::QUALITY_RECOMMENDATION_ENFORCE_MSG_LENGTH)
-                } else {
-                    ok()
-                },
-            ),
-            make_row(
-                "low_quality_messages",
-                low_quality_count,
-                pct(low_quality_count),
-                if pct(low_quality_count) > 5.0 {
-                    warn(messages::QUALITY_RECOMMENDATION_SQUASH_WIP)
-                } else {
-                    ok()
-                },
-            ),
-            make_row(
-                "mega_commits",
-                mega_count,
-                pct(mega_count),
-                if pct(mega_count) > 10.0 {
-                    warn(messages::QUALITY_RECOMMENDATION_SPLIT_MEGA)
-                } else {
-                    ok()
-                },
-            ),
-            make_row(
-                "revert_commits",
-                revert_count,
-                pct(revert_count),
-                if pct(revert_count) > 3.0 {
-                    warn(messages::QUALITY_RECOMMENDATION_STRENGTHEN_REVIEW)
-                } else {
-                    ok()
-                },
-            ),
-            make_row(
-                "merge_commits",
-                merge_count,
-                pct(merge_count),
-                if pct(merge_count) > 30.0 {
-                    warn(messages::QUALITY_RECOMMENDATION_REBASE_WORKFLOW)
-                } else {
-                    ok()
-                },
-            ),
-            {
+            let make_row = |signal: &str, count: u64, pct_val: f64, rec: LocalizedMessage| {
                 let mut values = HashMap::new();
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let avg_u64 = avg_msg_len.round().max(0.0) as u64;
-                values.insert("commits".into(), MetricValue::Count(avg_u64));
-                values.insert("percent".into(), MetricValue::Float(avg_msg_len));
-                values.insert(
-                    "recommendation".into(),
-                    MetricValue::Message(if avg_msg_len < 30.0 {
-                        warn(messages::QUALITY_RECOMMENDATION_REQUIRE_DESCRIPTIONS)
-                    } else {
-                        ok()
-                    }),
-                );
+                values.insert("commits".into(), MetricValue::Count(count));
+                values.insert("percent".into(), MetricValue::Float(pct_val));
+                values.insert("recommendation".into(), MetricValue::Message(rec));
                 MetricEntry {
-                    key: "avg_message_length".into(),
+                    key: signal.into(),
                     values,
                 }
-            },
-        ];
+            };
 
-        Ok(MetricResult {
-            name: "quality".into(),
-            display_name: report_display("quality"),
-            description: report_description("quality"),
-            entry_groups: vec![],
-            columns: vec![
-                Column::in_report("quality", "commits"),
-                Column::in_report("quality", "percent"),
-                Column::in_report("quality", "recommendation"),
-            ],
-            entries,
-        })
+            let ok = || LocalizedMessage::code(messages::QUALITY_RECOMMENDATION_OK);
+            let warn = |code: &str| {
+                LocalizedMessage::code(code.to_string()).with_severity(Severity::Warning)
+            };
+
+            let entries = vec![
+                make_row(
+                    "total_commits",
+                    total_commits,
+                    100.0,
+                    LocalizedMessage::code(messages::QUALITY_RECOMMENDATION_BASELINE),
+                ),
+                make_row(
+                    "short_messages",
+                    short_count,
+                    pct(short_count),
+                    if pct(short_count) > 20.0 {
+                        warn(messages::QUALITY_RECOMMENDATION_ENFORCE_MSG_LENGTH)
+                    } else {
+                        ok()
+                    },
+                ),
+                make_row(
+                    "low_quality_messages",
+                    low_quality_count,
+                    pct(low_quality_count),
+                    if pct(low_quality_count) > 5.0 {
+                        warn(messages::QUALITY_RECOMMENDATION_SQUASH_WIP)
+                    } else {
+                        ok()
+                    },
+                ),
+                make_row(
+                    "mega_commits",
+                    mega_count,
+                    pct(mega_count),
+                    if pct(mega_count) > 10.0 {
+                        warn(messages::QUALITY_RECOMMENDATION_SPLIT_MEGA)
+                    } else {
+                        ok()
+                    },
+                ),
+                make_row(
+                    "revert_commits",
+                    revert_count,
+                    pct(revert_count),
+                    if pct(revert_count) > 3.0 {
+                        warn(messages::QUALITY_RECOMMENDATION_STRENGTHEN_REVIEW)
+                    } else {
+                        ok()
+                    },
+                ),
+                make_row(
+                    "merge_commits",
+                    merge_count,
+                    pct(merge_count),
+                    if pct(merge_count) > 30.0 {
+                        warn(messages::QUALITY_RECOMMENDATION_REBASE_WORKFLOW)
+                    } else {
+                        ok()
+                    },
+                ),
+                {
+                    let mut values = HashMap::new();
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let avg_u64 = avg_msg_len.round().max(0.0) as u64;
+                    values.insert("commits".into(), MetricValue::Count(avg_u64));
+                    values.insert("percent".into(), MetricValue::Float(avg_msg_len));
+                    values.insert(
+                        "recommendation".into(),
+                        MetricValue::Message(if avg_msg_len < 30.0 {
+                            warn(messages::QUALITY_RECOMMENDATION_REQUIRE_DESCRIPTIONS)
+                        } else {
+                            ok()
+                        }),
+                    );
+                    MetricEntry {
+                        key: "avg_message_length".into(),
+                        values,
+                    }
+                },
+            ];
+
+            Ok(MetricResult {
+                name: "quality".into(),
+                display_name: report_display("quality"),
+                description: report_description("quality"),
+                entry_groups: vec![],
+                columns: vec![
+                    Column::in_report("quality", "commits"),
+                    Column::in_report("quality", "percent"),
+                    Column::in_report("quality", "recommendation"),
+                ],
+                entries,
+            })
         })())
     }
 }
@@ -380,7 +380,8 @@ mod tests {
         let store = store_with(&[make_change("c1", "Add feature X with care", 10, 5, vec![])]);
         let mut coll = QualityCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         let keys: Vec<String> = r.entries.iter().map(|e| e.key.clone()).collect();
         for k in [
@@ -415,7 +416,8 @@ mod tests {
         ]);
         let mut coll = QualityCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(
             rec_code(entry(&r, "short_messages")),
@@ -442,7 +444,8 @@ mod tests {
         let store = store_with(&commits);
         let mut coll = QualityCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(
             rec_code(entry(&r, "low_quality_messages")),
@@ -461,7 +464,8 @@ mod tests {
         let store = store_with(&commits);
         let mut coll = QualityCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(
             rec_code(entry(&r, "mega_commits")),
@@ -479,7 +483,8 @@ mod tests {
         let store = store_with(&commits);
         let mut coll = QualityCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(
             rec_code(entry(&r, "revert_commits")),
@@ -510,7 +515,8 @@ mod tests {
         ]);
         let mut coll = QualityCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(
             rec_code(entry(&r, "merge_commits")),
@@ -523,7 +529,8 @@ mod tests {
         let store = store_with(&[make_change("c1", "Short msg", 1, 0, vec![])]);
         let mut coll = QualityCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(
             rec_code(entry(&r, "avg_message_length")),
@@ -536,7 +543,8 @@ mod tests {
         let store = store_with(&[make_change("c1", "msg ok", 1, 0, vec![])]);
         let mut coll = QualityCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         let baseline = entry(&r, "total_commits");
         match baseline.values.get("recommendation") {

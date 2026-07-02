@@ -43,34 +43,34 @@ impl MetricCollector for ConstructOwnershipCollector {
         Some(
             store
                 .with_conn(|conn| -> anyhow::Result<MetricResult> {
-                progress.status(&format!(
-                    "  construct_ownership: selecting top {TOP_CONSTRUCTS} constructs..."
-                ));
-                // Step 1: materialize top-N (file, qn, kind) by total touches
-                // into a temp table. Bounded size — everything below this is
-                // the long tail where bus_factor is uninteresting anyway.
-                conn.execute_batch(&format!(
-                    "DROP TABLE IF EXISTS __top_constructs;
+                    progress.status(&format!(
+                        "  construct_ownership: selecting top {TOP_CONSTRUCTS} constructs..."
+                    ));
+                    // Step 1: materialize top-N (file, qn, kind) by total touches
+                    // into a temp table. Bounded size — everything below this is
+                    // the long tail where bus_factor is uninteresting anyway.
+                    conn.execute_batch(&format!(
+                        "DROP TABLE IF EXISTS __top_constructs;
                      CREATE TEMP TABLE __top_constructs AS
                        SELECT ch.file_path AS file, c.qualified_name AS qn, c.kind AS kind
                          FROM constructs c JOIN non_merge_changes ch ON c.change_id = ch.id
                         GROUP BY ch.file_path, c.qualified_name, c.kind
                         ORDER BY SUM(c.lines_touched) DESC
                         LIMIT {TOP_CONSTRUCTS};"
-                ))?;
+                    ))?;
 
-                progress.status("  construct_ownership: per-author breakdown...");
-                // Step 2: per-author breakdown restricted to those top constructs.
-                // Max rows ≈ TOP_CONSTRUCTS × authors, which is a tight bound.
-                struct Acc {
-                    file: String,
-                    kind: String,
-                    by_author: HashMap<String, u64>,
-                }
-                let mut per_key: HashMap<String, Acc> = HashMap::new();
+                    progress.status("  construct_ownership: per-author breakdown...");
+                    // Step 2: per-author breakdown restricted to those top constructs.
+                    // Max rows ≈ TOP_CONSTRUCTS × authors, which is a tight bound.
+                    struct Acc {
+                        file: String,
+                        kind: String,
+                        by_author: HashMap<String, u64>,
+                    }
+                    let mut per_key: HashMap<String, Acc> = HashMap::new();
 
-                let mut stmt = conn.prepare(
-                    "SELECT ch.file_path, c.qualified_name, c.kind, ch.email,
+                    let mut stmt = conn.prepare(
+                        "SELECT ch.file_path, c.qualified_name, c.kind, ch.email,
                             SUM(c.lines_touched) AS touches
                        FROM constructs c
                        JOIN non_merge_changes ch ON c.change_id = ch.id
@@ -79,99 +79,100 @@ impl MetricCollector for ConstructOwnershipCollector {
                         AND t.qn   = c.qualified_name
                         AND t.kind = c.kind
                       GROUP BY ch.file_path, c.qualified_name, c.kind, ch.email",
-                )?;
-                let rows = stmt.query_map([], |row| {
-                    let file: String = row.get(0)?;
-                    let qn: String = row.get(1)?;
-                    let kind: String = row.get(2)?;
-                    let email: String = row.get(3)?;
-                    let touches: i64 = row.get(4)?;
-                    Ok((file, qn, kind, email, touches.max(0) as u64))
-                })?;
-                for r in rows {
-                    let (file, qn, kind, email, touches) = r?;
-                    if !is_source_file(&file) {
-                        continue;
+                    )?;
+                    let rows = stmt.query_map([], |row| {
+                        let file: String = row.get(0)?;
+                        let qn: String = row.get(1)?;
+                        let kind: String = row.get(2)?;
+                        let email: String = row.get(3)?;
+                        let touches: i64 = row.get(4)?;
+                        Ok((file, qn, kind, email, touches.max(0) as u64))
+                    })?;
+                    for r in rows {
+                        let (file, qn, kind, email, touches) = r?;
+                        if !is_source_file(&file) {
+                            continue;
+                        }
+                        let key = format!("{file}::{qn}");
+                        let acc = per_key.entry(key).or_insert_with(|| Acc {
+                            file: file.clone(),
+                            kind: kind.clone(),
+                            by_author: HashMap::new(),
+                        });
+                        *acc.by_author.entry(email).or_insert(0) += touches.max(1);
                     }
-                    let key = format!("{file}::{qn}");
-                    let acc = per_key.entry(key).or_insert_with(|| Acc {
-                        file: file.clone(),
-                        kind: kind.clone(),
-                        by_author: HashMap::new(),
+                    conn.execute("DROP TABLE IF EXISTS __top_constructs", [])?;
+
+                    let mut entries: Vec<MetricEntry> = per_key
+                        .into_iter()
+                        .map(|(key, a)| {
+                            let total: u64 = a.by_author.values().sum();
+                            let total_authors = a.by_author.len() as u64;
+                            let (top_author, top_lines): (String, u64) = a
+                                .by_author
+                                .iter()
+                                .max_by_key(|(_, n)| **n)
+                                .map(|(e, n)| (e.clone(), *n))
+                                .unwrap_or_else(|| ("<unknown>".into(), 0));
+                            let top_pct = top_lines
+                                .saturating_mul(100)
+                                .checked_div(total)
+                                .unwrap_or(0)
+                                .min(100);
+                            let bus_factor = compute_bus_factor(&a.by_author, total);
+
+                            let mut values = HashMap::new();
+                            values.insert("kind".into(), MetricValue::Text(a.kind));
+                            values.insert("file".into(), MetricValue::Text(a.file));
+                            values.insert("top_author".into(), MetricValue::Text(top_author));
+                            values.insert("top_pct".into(), MetricValue::Count(top_pct));
+                            values
+                                .insert("total_authors".into(), MetricValue::Count(total_authors));
+                            values.insert("bus_factor".into(), MetricValue::Count(bus_factor));
+                            values.insert("touches".into(), MetricValue::Count(total));
+                            MetricEntry { key, values }
+                        })
+                        .collect();
+
+                    entries.sort_by(|a, b| {
+                        let bf_a = match a.values.get("bus_factor") {
+                            Some(MetricValue::Count(n)) => *n,
+                            _ => 0,
+                        };
+                        let bf_b = match b.values.get("bus_factor") {
+                            Some(MetricValue::Count(n)) => *n,
+                            _ => 0,
+                        };
+                        if bf_a != bf_b {
+                            return bf_a.cmp(&bf_b);
+                        }
+                        let ta = match a.values.get("touches") {
+                            Some(MetricValue::Count(n)) => *n,
+                            _ => 0,
+                        };
+                        let tb = match b.values.get("touches") {
+                            Some(MetricValue::Count(n)) => *n,
+                            _ => 0,
+                        };
+                        tb.cmp(&ta)
                     });
-                    *acc.by_author.entry(email).or_insert(0) += touches.max(1);
-                }
-                conn.execute("DROP TABLE IF EXISTS __top_constructs", [])?;
 
-                let mut entries: Vec<MetricEntry> = per_key
-                    .into_iter()
-                    .map(|(key, a)| {
-                        let total: u64 = a.by_author.values().sum();
-                        let total_authors = a.by_author.len() as u64;
-                        let (top_author, top_lines): (String, u64) = a
-                            .by_author
-                            .iter()
-                            .max_by_key(|(_, n)| **n)
-                            .map(|(e, n)| (e.clone(), *n))
-                            .unwrap_or_else(|| ("<unknown>".into(), 0));
-                        let top_pct = top_lines
-                            .saturating_mul(100)
-                            .checked_div(total)
-                            .unwrap_or(0)
-                            .min(100);
-                        let bus_factor = compute_bus_factor(&a.by_author, total);
-
-                        let mut values = HashMap::new();
-                        values.insert("kind".into(), MetricValue::Text(a.kind));
-                        values.insert("file".into(), MetricValue::Text(a.file));
-                        values.insert("top_author".into(), MetricValue::Text(top_author));
-                        values.insert("top_pct".into(), MetricValue::Count(top_pct));
-                        values.insert("total_authors".into(), MetricValue::Count(total_authors));
-                        values.insert("bus_factor".into(), MetricValue::Count(bus_factor));
-                        values.insert("touches".into(), MetricValue::Count(total));
-                        MetricEntry { key, values }
+                    Ok(MetricResult {
+                        name: "construct_ownership".into(),
+                        display_name: report_display("construct_ownership"),
+                        description: report_description("construct_ownership"),
+                        entry_groups: vec![],
+                        columns: vec![
+                            Column::in_report("construct_ownership", "kind"),
+                            Column::in_report("construct_ownership", "file"),
+                            Column::in_report("construct_ownership", "top_author"),
+                            Column::in_report("construct_ownership", "top_pct"),
+                            Column::in_report("construct_ownership", "total_authors"),
+                            Column::in_report("construct_ownership", "bus_factor"),
+                            Column::in_report("construct_ownership", "touches"),
+                        ],
+                        entries,
                     })
-                    .collect();
-
-                entries.sort_by(|a, b| {
-                    let bf_a = match a.values.get("bus_factor") {
-                        Some(MetricValue::Count(n)) => *n,
-                        _ => 0,
-                    };
-                    let bf_b = match b.values.get("bus_factor") {
-                        Some(MetricValue::Count(n)) => *n,
-                        _ => 0,
-                    };
-                    if bf_a != bf_b {
-                        return bf_a.cmp(&bf_b);
-                    }
-                    let ta = match a.values.get("touches") {
-                        Some(MetricValue::Count(n)) => *n,
-                        _ => 0,
-                    };
-                    let tb = match b.values.get("touches") {
-                        Some(MetricValue::Count(n)) => *n,
-                        _ => 0,
-                    };
-                    tb.cmp(&ta)
-                });
-
-                Ok(MetricResult {
-                    name: "construct_ownership".into(),
-                    display_name: report_display("construct_ownership"),
-                    description: report_description("construct_ownership"),
-                    entry_groups: vec![],
-                    columns: vec![
-                        Column::in_report("construct_ownership", "kind"),
-                        Column::in_report("construct_ownership", "file"),
-                        Column::in_report("construct_ownership", "top_author"),
-                        Column::in_report("construct_ownership", "top_pct"),
-                        Column::in_report("construct_ownership", "total_authors"),
-                        Column::in_report("construct_ownership", "bus_factor"),
-                        Column::in_report("construct_ownership", "touches"),
-                    ],
-                    entries,
-                })
                 })
                 .and_then(|r| r),
         )
@@ -314,7 +315,8 @@ mod tests {
 
         let mut coll = ConstructOwnershipCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert!(!r.entries.is_empty());
         let entry = r
@@ -350,7 +352,8 @@ mod tests {
 
         let mut coll = ConstructOwnershipCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert!(r.entries.iter().any(|e| e.key.starts_with("real.rs")));
         assert!(!r.entries.iter().any(|e| e.key.contains("Cargo.lock")));
@@ -367,7 +370,8 @@ mod tests {
 
         let mut coll = ConstructOwnershipCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         let entry = r.entries.first().unwrap();
         for key in [
@@ -400,7 +404,8 @@ mod tests {
 
         let mut coll = ConstructOwnershipCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         // Rows are sorted bus_factor ASC, then touches DESC; lowest bus
         // factor (highest risk) leads the report.

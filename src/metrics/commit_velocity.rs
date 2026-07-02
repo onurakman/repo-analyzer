@@ -35,8 +35,7 @@ impl MetricCollector for CommitVelocityCollector {
         _progress: &crate::metrics::ProgressReporter,
     ) -> Option<anyhow::Result<MetricResult>> {
         Some((|| -> anyhow::Result<MetricResult> {
-        let (weekly, monthly) = store
-            .with_conn(
+            let (weekly, monthly) = store.with_conn(
                 |conn| -> anyhow::Result<(Vec<MetricEntry>, Vec<MetricEntry>)> {
                     // Deduplicate commits first (one commit has many change rows),
                     // then group by time bucket.
@@ -102,28 +101,28 @@ impl MetricCollector for CommitVelocityCollector {
                 },
             )??;
 
-        Ok(MetricResult {
-            name: "commit_velocity".into(),
-            display_name: report_display("commit_velocity"),
-            description: report_description("commit_velocity"),
-            columns: vec![
-                Column::in_report("commit_velocity", "commits"),
-                Column::in_report("commit_velocity", "lines_changed"),
-            ],
-            entries: vec![],
-            entry_groups: vec![
-                EntryGroup {
-                    name: "weekly".into(),
-                    label: "Weekly".into(),
-                    entries: weekly,
-                },
-                EntryGroup {
-                    name: "monthly".into(),
-                    label: "Monthly".into(),
-                    entries: monthly,
-                },
-            ],
-        })
+            Ok(MetricResult {
+                name: "commit_velocity".into(),
+                display_name: report_display("commit_velocity"),
+                description: report_description("commit_velocity"),
+                columns: vec![
+                    Column::in_report("commit_velocity", "commits"),
+                    Column::in_report("commit_velocity", "lines_changed"),
+                ],
+                entries: vec![],
+                entry_groups: vec![
+                    EntryGroup {
+                        name: "weekly".into(),
+                        label: "Weekly".into(),
+                        entries: weekly,
+                    },
+                    EntryGroup {
+                        name: "monthly".into(),
+                        label: "Monthly".into(),
+                        entries: monthly,
+                    },
+                ],
+            })
         })())
     }
 }

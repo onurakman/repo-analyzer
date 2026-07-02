@@ -38,8 +38,7 @@ impl MetricCollector for HotspotsCollector {
         _progress: &crate::metrics::ProgressReporter,
     ) -> Option<anyhow::Result<MetricResult>> {
         Some((|| -> anyhow::Result<MetricResult> {
-        let entries = store
-            .with_conn(|conn| -> anyhow::Result<Vec<MetricEntry>> {
+            let entries = store.with_conn(|conn| -> anyhow::Result<Vec<MetricEntry>> {
                 let mut out: Vec<MetricEntry> = Vec::new();
 
                 // File-level
@@ -116,35 +115,35 @@ impl MetricCollector for HotspotsCollector {
                 Ok(out)
             })??;
 
-        let mut entries = entries;
-        entries.sort_by(|a, b| {
-            let sa = match a.values.get("score") {
-                Some(MetricValue::Count(n)) => *n,
-                _ => 0,
-            };
-            let sb = match b.values.get("score") {
-                Some(MetricValue::Count(n)) => *n,
-                _ => 0,
-            };
-            sb.cmp(&sa)
-        });
-        entries.truncate(500);
+            let mut entries = entries;
+            entries.sort_by(|a, b| {
+                let sa = match a.values.get("score") {
+                    Some(MetricValue::Count(n)) => *n,
+                    _ => 0,
+                };
+                let sb = match b.values.get("score") {
+                    Some(MetricValue::Count(n)) => *n,
+                    _ => 0,
+                };
+                sb.cmp(&sa)
+            });
+            entries.truncate(500);
 
-        Ok(MetricResult {
-            name: "hotspots".into(),
-            display_name: report_display("hotspots"),
-            description: report_description("hotspots"),
-            entry_groups: vec![],
-            columns: vec![
-                Column::in_report("hotspots", "level"),
-                Column::in_report("hotspots", "kind"),
-                Column::in_report("hotspots", "file"),
-                Column::in_report("hotspots", "changes"),
-                Column::in_report("hotspots", "unique_authors"),
-                Column::in_report("hotspots", "score"),
-            ],
-            entries,
-        })
+            Ok(MetricResult {
+                name: "hotspots".into(),
+                display_name: report_display("hotspots"),
+                description: report_description("hotspots"),
+                entry_groups: vec![],
+                columns: vec![
+                    Column::in_report("hotspots", "level"),
+                    Column::in_report("hotspots", "kind"),
+                    Column::in_report("hotspots", "file"),
+                    Column::in_report("hotspots", "changes"),
+                    Column::in_report("hotspots", "unique_authors"),
+                    Column::in_report("hotspots", "score"),
+                ],
+                entries,
+            })
         })())
     }
 }
@@ -224,7 +223,8 @@ mod tests {
 
         let mut coll = HotspotsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         let entry = r.entries.iter().find(|e| e.key == "a.rs").unwrap();
         match entry.values.get("changes") {
@@ -260,7 +260,8 @@ mod tests {
 
         let mut coll = HotspotsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
 
         let construct = r
@@ -289,7 +290,8 @@ mod tests {
 
         let mut coll = HotspotsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert!(r.entries.iter().any(|e| e.key == "real.rs"));
         assert!(!r.entries.iter().any(|e| e.key == "package-lock.json"));
@@ -309,7 +311,8 @@ mod tests {
 
         let mut coll = HotspotsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(r.entries[0].key, "big.rs");
     }

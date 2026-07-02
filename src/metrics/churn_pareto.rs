@@ -43,8 +43,7 @@ impl MetricCollector for ChurnParetoCollector {
         _progress: &crate::metrics::ProgressReporter,
     ) -> Option<anyhow::Result<MetricResult>> {
         Some((|| -> anyhow::Result<MetricResult> {
-        let sorted = store
-            .with_conn(|conn| -> anyhow::Result<Vec<(String, u64)>> {
+            let sorted = store.with_conn(|conn| -> anyhow::Result<Vec<(String, u64)>> {
                 let mut stmt = conn.prepare(
                     "SELECT file_path, SUM(additions + deletions) AS churn
                        FROM non_merge_changes
@@ -68,94 +67,94 @@ impl MetricCollector for ChurnParetoCollector {
                 Ok(out)
             })??;
 
-        let total_files = sorted.len() as u64;
-        let total_churn: u64 = sorted.iter().map(|(_, c)| *c).sum();
+            let total_files = sorted.len() as u64;
+            let total_churn: u64 = sorted.iter().map(|(_, c)| *c).sum();
 
-        let mut entries: Vec<MetricEntry> = Vec::new();
+            let mut entries: Vec<MetricEntry> = Vec::new();
 
-        if total_churn > 0 {
-            let p50 = files_to_reach_pct(&sorted, total_churn, 50);
-            let p80 = files_to_reach_pct(&sorted, total_churn, 80);
-            let p90 = files_to_reach_pct(&sorted, total_churn, 90);
-            let p50_pct = pct(p50, total_files);
-            let p80_pct = pct(p80, total_files);
-            let p90_pct = pct(p90, total_files);
+            if total_churn > 0 {
+                let p50 = files_to_reach_pct(&sorted, total_churn, 50);
+                let p80 = files_to_reach_pct(&sorted, total_churn, 80);
+                let p90 = files_to_reach_pct(&sorted, total_churn, 90);
+                let p50_pct = pct(p50, total_files);
+                let p80_pct = pct(p80, total_files);
+                let p90_pct = pct(p90, total_files);
 
-            // Truncation-free Pareto signal for the health scorer: what share of
-            // total churn do the top 20% of files (over the FULL list) account
-            // for? The pillar can't recompute this from the top-50 display slice,
-            // so we expose it on the summary row's values. (finding #7)
-            let top20_files = ((total_files as f64 * 0.2).ceil() as u64).max(1);
-            let top20_churn: u64 = sorted
-                .iter()
-                .take(top20_files as usize)
-                .map(|(_, c)| *c)
-                .sum();
-            let top20_pct = (top20_churn.saturating_mul(100))
-                .checked_div(total_churn)
-                .unwrap_or(0);
+                // Truncation-free Pareto signal for the health scorer: what share of
+                // total churn do the top 20% of files (over the FULL list) account
+                // for? The pillar can't recompute this from the top-50 display slice,
+                // so we expose it on the summary row's values. (finding #7)
+                let top20_files = ((total_files as f64 * 0.2).ceil() as u64).max(1);
+                let top20_churn: u64 = sorted
+                    .iter()
+                    .take(top20_files as usize)
+                    .map(|(_, c)| *c)
+                    .sum();
+                let top20_pct = (top20_churn.saturating_mul(100))
+                    .checked_div(total_churn)
+                    .unwrap_or(0);
 
-            let mut values = HashMap::new();
-            values.insert("rank".into(), MetricValue::Text("—".into()));
-            values.insert("churn".into(), MetricValue::Count(total_churn));
-            // Consumed by the health `change_concentration` pillar; harmless
-            // extra field for other consumers (additive, summary row only).
-            values.insert("top20_pct".into(), MetricValue::Count(top20_pct));
-            values.insert(
-                "pct_of_total".into(),
-                MetricValue::Message(
-                    LocalizedMessage::code(messages::CHURN_PARETO_SUMMARY_PCT)
-                        .with_param("p50", p50)
-                        .with_param("total", total_files)
-                        .with_param("p50_pct", p50_pct),
-                ),
-            );
-            values.insert(
-                "cumulative_pct".into(),
-                MetricValue::Message(
-                    LocalizedMessage::code(messages::CHURN_PARETO_SUMMARY_CUMULATIVE)
-                        .with_param("p80", p80)
-                        .with_param("total", total_files)
-                        .with_param("p80_pct", p80_pct)
-                        .with_param("p90", p90)
-                        .with_param("p90_pct", p90_pct),
-                ),
-            );
-            entries.push(MetricEntry {
-                key: SUMMARY_KEY.into(),
-                values,
-            });
-        }
+                let mut values = HashMap::new();
+                values.insert("rank".into(), MetricValue::Text("—".into()));
+                values.insert("churn".into(), MetricValue::Count(total_churn));
+                // Consumed by the health `change_concentration` pillar; harmless
+                // extra field for other consumers (additive, summary row only).
+                values.insert("top20_pct".into(), MetricValue::Count(top20_pct));
+                values.insert(
+                    "pct_of_total".into(),
+                    MetricValue::Message(
+                        LocalizedMessage::code(messages::CHURN_PARETO_SUMMARY_PCT)
+                            .with_param("p50", p50)
+                            .with_param("total", total_files)
+                            .with_param("p50_pct", p50_pct),
+                    ),
+                );
+                values.insert(
+                    "cumulative_pct".into(),
+                    MetricValue::Message(
+                        LocalizedMessage::code(messages::CHURN_PARETO_SUMMARY_CUMULATIVE)
+                            .with_param("p80", p80)
+                            .with_param("total", total_files)
+                            .with_param("p80_pct", p80_pct)
+                            .with_param("p90", p90)
+                            .with_param("p90_pct", p90_pct),
+                    ),
+                );
+                entries.push(MetricEntry {
+                    key: SUMMARY_KEY.into(),
+                    values,
+                });
+            }
 
-        let mut cum: u64 = 0;
-        for (rank, (path, churn)) in sorted.iter().enumerate().take(50) {
-            cum += *churn;
-            let file_pct = (*churn * 100).checked_div(total_churn).unwrap_or(0);
-            let cum_pct = (cum * 100).checked_div(total_churn).unwrap_or(0);
-            let mut values = HashMap::new();
-            values.insert("rank".into(), MetricValue::Count((rank as u64) + 1));
-            values.insert("churn".into(), MetricValue::Count(*churn));
-            values.insert("pct_of_total".into(), MetricValue::Count(file_pct));
-            values.insert("cumulative_pct".into(), MetricValue::Count(cum_pct));
-            entries.push(MetricEntry {
-                key: path.clone(),
-                values,
-            });
-        }
+            let mut cum: u64 = 0;
+            for (rank, (path, churn)) in sorted.iter().enumerate().take(50) {
+                cum += *churn;
+                let file_pct = (*churn * 100).checked_div(total_churn).unwrap_or(0);
+                let cum_pct = (cum * 100).checked_div(total_churn).unwrap_or(0);
+                let mut values = HashMap::new();
+                values.insert("rank".into(), MetricValue::Count((rank as u64) + 1));
+                values.insert("churn".into(), MetricValue::Count(*churn));
+                values.insert("pct_of_total".into(), MetricValue::Count(file_pct));
+                values.insert("cumulative_pct".into(), MetricValue::Count(cum_pct));
+                entries.push(MetricEntry {
+                    key: path.clone(),
+                    values,
+                });
+            }
 
-        Ok(MetricResult {
-            name: "churn_pareto".into(),
-            display_name: report_display("churn_pareto"),
-            description: report_description("churn_pareto"),
-            entry_groups: vec![],
-            columns: vec![
-                Column::in_report("churn_pareto", "rank"),
-                Column::in_report("churn_pareto", "churn"),
-                Column::in_report("churn_pareto", "pct_of_total"),
-                Column::in_report("churn_pareto", "cumulative_pct"),
-            ],
-            entries,
-        })
+            Ok(MetricResult {
+                name: "churn_pareto".into(),
+                display_name: report_display("churn_pareto"),
+                description: report_description("churn_pareto"),
+                entry_groups: vec![],
+                columns: vec![
+                    Column::in_report("churn_pareto", "rank"),
+                    Column::in_report("churn_pareto", "churn"),
+                    Column::in_report("churn_pareto", "pct_of_total"),
+                    Column::in_report("churn_pareto", "cumulative_pct"),
+                ],
+                entries,
+            })
         })())
     }
 }

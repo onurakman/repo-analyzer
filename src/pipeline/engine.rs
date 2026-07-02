@@ -263,58 +263,54 @@ impl Pipeline {
 
         let object_cache_bytes = self.config.object_cache_mb.max(1) * 1024 * 1024;
 
-        commit_rx
-            .into_iter()
-            .par_bridge()
-            .for_each_init(
-                || {
-                    // One thread-local repo per rayon worker, reused across
-                    // every commit it processes. gix's object cache lives on the
-                    // thread-local handle, so building it once per worker (not
-                    // once per commit) lets decompressed objects survive between
-                    // commits — the previous per-commit handle threw the cache
-                    // away each time. Capped via `--object-cache-mb`. (finding #24)
-                    let mut thread_repo = thread_safe_repo.to_thread_local();
-                    thread_repo.object_cache_size_if_unset(object_cache_bytes);
-                    (changes_tx.clone(), thread_repo)
-                },
-                |(tx, thread_repo), commit| {
-                    let diff_records = match diff_extractor.extract(thread_repo, &commit) {
-                        Ok(records) => records,
-                        Err(e) => {
-                            if !quiet {
-                                pb.println(format!(
-                                    "Warning: skipping commit {}: {}",
-                                    &commit.oid[..8.min(commit.oid.len())],
-                                    e
-                                ));
-                            }
-                            pb.inc(1);
-                            return;
+        commit_rx.into_iter().par_bridge().for_each_init(
+            || {
+                // One thread-local repo per rayon worker, reused across
+                // every commit it processes. gix's object cache lives on the
+                // thread-local handle, so building it once per worker (not
+                // once per commit) lets decompressed objects survive between
+                // commits — the previous per-commit handle threw the cache
+                // away each time. Capped via `--object-cache-mb`. (finding #24)
+                let mut thread_repo = thread_safe_repo.to_thread_local();
+                thread_repo.object_cache_size_if_unset(object_cache_bytes);
+                (changes_tx.clone(), thread_repo)
+            },
+            |(tx, thread_repo), commit| {
+                let diff_records = match diff_extractor.extract(thread_repo, &commit) {
+                    Ok(records) => records,
+                    Err(e) => {
+                        if !quiet {
+                            pb.println(format!(
+                                "Warning: skipping commit {}: {}",
+                                &commit.oid[..8.min(commit.oid.len())],
+                                e
+                            ));
                         }
-                    };
+                        pb.inc(1);
+                        return;
+                    }
+                };
 
-                    // Split the commit's diff records into capped batches so a
-                    // single big merge commit doesn't queue hundreds of MBs of
-                    // parsed constructs in the channel all at once.
-                    let mut changes: Vec<ParsedChange> =
-                        Vec::with_capacity(max_changes_per_batch);
-                    for (record, blob_oid) in diff_records {
-                        if is_lock_file(&record.file_path) {
-                            continue;
-                        }
-                        changes.push(parse_diff_record(registry, thread_repo, record, blob_oid));
-                        if changes.len() >= max_changes_per_batch {
-                            let _ = tx.send(std::mem::take(&mut changes));
-                            changes = Vec::with_capacity(max_changes_per_batch);
-                        }
+                // Split the commit's diff records into capped batches so a
+                // single big merge commit doesn't queue hundreds of MBs of
+                // parsed constructs in the channel all at once.
+                let mut changes: Vec<ParsedChange> = Vec::with_capacity(max_changes_per_batch);
+                for (record, blob_oid) in diff_records {
+                    if is_lock_file(&record.file_path) {
+                        continue;
                     }
-                    if !changes.is_empty() {
-                        let _ = tx.send(changes);
+                    changes.push(parse_diff_record(registry, thread_repo, record, blob_oid));
+                    if changes.len() >= max_changes_per_batch {
+                        let _ = tx.send(std::mem::take(&mut changes));
+                        changes = Vec::with_capacity(max_changes_per_batch);
                     }
-                    pb.inc(1);
-                },
-            );
+                }
+                if !changes.is_empty() {
+                    let _ = tx.send(changes);
+                }
+                pb.inc(1);
+            },
+        );
 
         // Close the channel by dropping the original sender (workers dropped their clones).
         drop(changes_tx);
@@ -605,7 +601,10 @@ fn grammar_for_path(path: &str) -> Option<(&'static str, tree_sitter::Language)>
     let pair: (&'static str, tree_sitter::Language) = match ext {
         "rs" => ("Rust", tree_sitter_rust::LANGUAGE.into()),
         "py" | "pyi" => ("Python", tree_sitter_python::LANGUAGE.into()),
-        "ts" | "tsx" => ("TypeScript", tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        "ts" | "tsx" => (
+            "TypeScript",
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        ),
         "js" | "jsx" | "mjs" | "cjs" => ("JavaScript", tree_sitter_javascript::LANGUAGE.into()),
         "java" => ("Java", tree_sitter_java::LANGUAGE.into()),
         "go" => ("Go", tree_sitter_go::LANGUAGE.into()),

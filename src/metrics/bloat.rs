@@ -378,7 +378,11 @@ mod tests {
         // One row per vendored/build root, none per file.
         let roots: Vec<&str> = result.entries.iter().map(|e| e.key.as_str()).collect();
         assert!(roots.contains(&"node_modules"), "roots = {:?}", roots);
-        assert!(roots.contains(&"frontend/node_modules"), "roots = {:?}", roots);
+        assert!(
+            roots.contains(&"frontend/node_modules"),
+            "roots = {:?}",
+            roots
+        );
         assert!(roots.contains(&"target"), "roots = {:?}", roots);
         // No individual file under an aggregated root leaks through.
         assert!(

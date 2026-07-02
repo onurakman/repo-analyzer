@@ -1876,8 +1876,8 @@ mod tests {
             .score
             .round() as u64;
 
-        let result = compute_health(std::slice::from_ref(&quality), &std::env::temp_dir())
-            .expect("present");
+        let result =
+            compute_health(std::slice::from_ref(&quality), &std::env::temp_dir()).expect("present");
         let overall = result.entry_groups[0].entries[0]
             .values
             .get("score")

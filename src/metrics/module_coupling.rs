@@ -40,79 +40,79 @@ impl MetricCollector for ModuleCouplingCollector {
         _progress: &crate::metrics::ProgressReporter,
     ) -> Option<anyhow::Result<MetricResult>> {
         Some((|| -> anyhow::Result<MetricResult> {
-        // Rather than do the module-level self-join in SQL (SQLite doesn't have
-        // a function to truncate paths to N segments), we stream one row per
-        // (commit, file) from the DB and aggregate into module pairs in Rust.
-        //
-        // Rows are streamed `ORDER BY commit_oid` so all rows for a given commit
-        // arrive contiguously. `aggregate_streamed` accumulates only the current
-        // commit's module set and, at each group boundary, flushes that commit's
-        // contribution into the pair counters and per-module totals before
-        // clearing the set. Peak memory is one commit's modules, not the whole
-        // history.
-        let (co_changes, module_totals) = store
-            .with_conn(|conn| -> anyhow::Result<(CoChanges, ModuleTotals)> {
-                let mut stmt = conn.prepare(
-                    "SELECT commit_oid, file_path FROM non_merge_changes ORDER BY commit_oid",
-                )?;
-                let rows = stmt.query_map([], |row| {
-                    let oid: String = row.get(0)?;
-                    let file: String = row.get(1)?;
-                    Ok((oid, file))
-                })?;
+            // Rather than do the module-level self-join in SQL (SQLite doesn't have
+            // a function to truncate paths to N segments), we stream one row per
+            // (commit, file) from the DB and aggregate into module pairs in Rust.
+            //
+            // Rows are streamed `ORDER BY commit_oid` so all rows for a given commit
+            // arrive contiguously. `aggregate_streamed` accumulates only the current
+            // commit's module set and, at each group boundary, flushes that commit's
+            // contribution into the pair counters and per-module totals before
+            // clearing the set. Peak memory is one commit's modules, not the whole
+            // history.
+            let (co_changes, module_totals) =
+                store.with_conn(|conn| -> anyhow::Result<(CoChanges, ModuleTotals)> {
+                    let mut stmt = conn.prepare(
+                        "SELECT commit_oid, file_path FROM non_merge_changes ORDER BY commit_oid",
+                    )?;
+                    let rows = stmt.query_map([], |row| {
+                        let oid: String = row.get(0)?;
+                        let file: String = row.get(1)?;
+                        Ok((oid, file))
+                    })?;
 
-                aggregate_streamed(rows.map(|r| r.map_err(anyhow::Error::from)))
-            })??;
+                    aggregate_streamed(rows.map(|r| r.map_err(anyhow::Error::from)))
+                })??;
 
-        let mut entries: Vec<MetricEntry> = co_changes
-            .into_iter()
-            .filter_map(|((a, b), count)| {
-                if count < MIN_CO_CHANGES {
-                    return None;
-                }
-                let ca = module_totals.get(&a).copied().unwrap_or(1);
-                let cb = module_totals.get(&b).copied().unwrap_or(1);
-                let score = count as f64 / ca.max(cb) as f64;
-                if score < MIN_SCORE {
-                    return None;
-                }
-                let key = format!("{a} <-> {b}");
-                let mut values = HashMap::new();
-                values.insert("module_a".into(), MetricValue::Text(a));
-                values.insert("module_b".into(), MetricValue::Text(b));
-                values.insert("co_changes".into(), MetricValue::Count(count));
-                values.insert("score".into(), MetricValue::Float(score));
-                Some(MetricEntry { key, values })
+            let mut entries: Vec<MetricEntry> = co_changes
+                .into_iter()
+                .filter_map(|((a, b), count)| {
+                    if count < MIN_CO_CHANGES {
+                        return None;
+                    }
+                    let ca = module_totals.get(&a).copied().unwrap_or(1);
+                    let cb = module_totals.get(&b).copied().unwrap_or(1);
+                    let score = count as f64 / ca.max(cb) as f64;
+                    if score < MIN_SCORE {
+                        return None;
+                    }
+                    let key = format!("{a} <-> {b}");
+                    let mut values = HashMap::new();
+                    values.insert("module_a".into(), MetricValue::Text(a));
+                    values.insert("module_b".into(), MetricValue::Text(b));
+                    values.insert("co_changes".into(), MetricValue::Count(count));
+                    values.insert("score".into(), MetricValue::Float(score));
+                    Some(MetricEntry { key, values })
+                })
+                .collect();
+
+            entries.sort_by(|a, b| {
+                let sa = match a.values.get("score") {
+                    Some(MetricValue::Float(f)) => *f,
+                    _ => 0.0,
+                };
+                let sb = match b.values.get("score") {
+                    Some(MetricValue::Float(f)) => *f,
+                    _ => 0.0,
+                };
+                sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            entries.truncate(100);
+
+            Ok(MetricResult {
+                name: "module_coupling".into(),
+                display_name: report_display("module_coupling"),
+                description: report_description("module_coupling")
+                    .with_param("module_depth", MODULE_DEPTH as u64),
+                entry_groups: vec![],
+                columns: vec![
+                    Column::in_report("module_coupling", "module_a"),
+                    Column::in_report("module_coupling", "module_b"),
+                    Column::in_report("module_coupling", "co_changes"),
+                    Column::in_report("module_coupling", "score"),
+                ],
+                entries,
             })
-            .collect();
-
-        entries.sort_by(|a, b| {
-            let sa = match a.values.get("score") {
-                Some(MetricValue::Float(f)) => *f,
-                _ => 0.0,
-            };
-            let sb = match b.values.get("score") {
-                Some(MetricValue::Float(f)) => *f,
-                _ => 0.0,
-            };
-            sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        entries.truncate(100);
-
-        Ok(MetricResult {
-            name: "module_coupling".into(),
-            display_name: report_display("module_coupling"),
-            description: report_description("module_coupling")
-                .with_param("module_depth", MODULE_DEPTH as u64),
-            entry_groups: vec![],
-            columns: vec![
-                Column::in_report("module_coupling", "module_a"),
-                Column::in_report("module_coupling", "module_b"),
-                Column::in_report("module_coupling", "co_changes"),
-                Column::in_report("module_coupling", "score"),
-            ],
-            entries,
-        })
         })())
     }
 }
@@ -218,9 +218,7 @@ mod tests {
 
     /// Reference implementation: materialize the whole commit -> module-set map
     /// first (the pre-streaming behaviour), then derive pair and total counts.
-    fn aggregate_materialized(
-        rows: &[(&str, &str)],
-    ) -> (CoChanges, ModuleTotals) {
+    fn aggregate_materialized(rows: &[(&str, &str)]) -> (CoChanges, ModuleTotals) {
         let mut commits: HashMap<String, HashSet<String>> = HashMap::new();
         for (oid, file) in rows {
             if !is_source_file(file) {

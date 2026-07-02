@@ -41,8 +41,7 @@ impl MetricCollector for ChurnCollector {
         _progress: &crate::metrics::ProgressReporter,
     ) -> Option<anyhow::Result<MetricResult>> {
         Some((|| -> anyhow::Result<MetricResult> {
-        let entries = store
-            .with_conn(|conn| -> anyhow::Result<Vec<MetricEntry>> {
+            let entries = store.with_conn(|conn| -> anyhow::Result<Vec<MetricEntry>> {
                 // No LIMIT in SQL: non-code files are filtered out in Rust
                 // before the top-500 slice, so the cap applies to source files.
                 let mut stmt = conn.prepare(
@@ -97,21 +96,21 @@ impl MetricCollector for ChurnCollector {
                 Ok(out)
             })??;
 
-        Ok(MetricResult {
-            name: "churn".into(),
-            display_name: report_display("churn"),
-            description: report_description("churn"),
-            entry_groups: vec![],
-            columns: vec![
-                Column::in_report("churn", "lines_added"),
-                Column::in_report("churn", "lines_deleted"),
-                Column::in_report("churn", "net_change"),
-                Column::in_report("churn", "total_churn"),
-                Column::in_report("churn", "change_count"),
-                Column::in_report("churn", "churn_rate"),
-            ],
-            entries,
-        })
+            Ok(MetricResult {
+                name: "churn".into(),
+                display_name: report_display("churn"),
+                description: report_description("churn"),
+                entry_groups: vec![],
+                columns: vec![
+                    Column::in_report("churn", "lines_added"),
+                    Column::in_report("churn", "lines_deleted"),
+                    Column::in_report("churn", "net_change"),
+                    Column::in_report("churn", "total_churn"),
+                    Column::in_report("churn", "change_count"),
+                    Column::in_report("churn", "churn_rate"),
+                ],
+                entries,
+            })
         })())
     }
 }
@@ -173,27 +172,28 @@ mod tests {
             .unwrap()
             .with_ymd_and_hms(2025, 1, 15, 12, 0, 0)
             .unwrap();
-        let mk = |oid: &str, file: &str, old: Option<&str>, status: FileStatus, add: u32, del: u32| {
-            ParsedChange {
-                diff: Arc::new(DiffRecord {
-                    commit: Arc::new(CommitInfo {
-                        oid: oid.into(),
-                        author: "dev".into(),
-                        email: "dev@test.com".into(),
-                        timestamp: ts,
-                        message: "m".into(),
-                        parent_ids: vec![],
+        let mk =
+            |oid: &str, file: &str, old: Option<&str>, status: FileStatus, add: u32, del: u32| {
+                ParsedChange {
+                    diff: Arc::new(DiffRecord {
+                        commit: Arc::new(CommitInfo {
+                            oid: oid.into(),
+                            author: "dev".into(),
+                            email: "dev@test.com".into(),
+                            timestamp: ts,
+                            message: "m".into(),
+                            parent_ids: vec![],
+                        }),
+                        file_path: file.into(),
+                        old_path: old.map(Into::into),
+                        status,
+                        hunks: vec![],
+                        additions: add,
+                        deletions: del,
                     }),
-                    file_path: file.into(),
-                    old_path: old.map(Into::into),
-                    status,
-                    hunks: vec![],
-                    additions: add,
-                    deletions: del,
-                }),
-                constructs: vec![],
-            }
-        };
+                    constructs: vec![],
+                }
+            };
         // a.rs added (10/3), then renamed to b.rs and edited more (20/5). Churn
         // must show ONE row under the HEAD name b.rs with the merged totals,
         // not two split rows. (finding #10)
@@ -225,7 +225,8 @@ mod tests {
 
         let mut collector = ChurnCollector::new();
         let result = collector
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         let entry = result.entries.iter().find(|e| e.key == "a.rs").unwrap();
 
@@ -256,7 +257,8 @@ mod tests {
 
         let mut collector = ChurnCollector::new();
         let result = collector
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(result.entries[0].key, "big.rs");
         assert_eq!(result.entries[1].key, "small.rs");

@@ -53,9 +53,7 @@ impl ChangeStore {
 
     /// Lock the connection, erroring if the mutex is poisoned or the connection
     /// has already been closed (only happens during `Drop`).
-    fn lock_conn(
-        &self,
-    ) -> anyhow::Result<std::sync::MutexGuard<'_, Option<Connection>>> {
+    fn lock_conn(&self) -> anyhow::Result<std::sync::MutexGuard<'_, Option<Connection>>> {
         self.conn
             .lock()
             .map_err(|_| anyhow::anyhow!("ChangeStore mutex poisoned"))
@@ -455,7 +453,9 @@ mod tests {
 
         let mut live: Vec<String> = store
             .with_conn(|c| {
-                let mut stmt = c.prepare("SELECT file_path FROM live_files ORDER BY 1").unwrap();
+                let mut stmt = c
+                    .prepare("SELECT file_path FROM live_files ORDER BY 1")
+                    .unwrap();
                 stmt.query_map([], |r| r.get::<_, String>(0))
                     .unwrap()
                     .map(|r| r.unwrap())
@@ -477,8 +477,8 @@ mod tests {
             .unwrap()
             .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
             .unwrap();
-        let mk = |oid: &str, file: &str, old: Option<&str>, status: FileStatus, day: i64| {
-            ParsedChange {
+        let mk =
+            |oid: &str, file: &str, old: Option<&str>, status: FileStatus, day: i64| ParsedChange {
                 diff: Arc::new(DiffRecord {
                     commit: Arc::new(CommitInfo {
                         oid: oid.into(),
@@ -496,8 +496,7 @@ mod tests {
                     deletions: 0,
                 }),
                 constructs: vec![],
-            }
-        };
+            };
         let store = ChangeStore::open_temp().expect("open");
         // a.rs -> b.rs -> c.rs. A copy row (old_path set, status Modified) must
         // NOT be treated as a rename edge.

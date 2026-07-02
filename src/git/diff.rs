@@ -350,7 +350,9 @@ mod tests {
         assert!(!rec.hunks.is_empty(), "modification must have a hunk");
         // The edit is on line 5 — no hunk may claim to start at line 1.
         assert!(
-            rec.hunks.iter().all(|h| h.new_start >= 5 && h.old_start >= 5),
+            rec.hunks
+                .iter()
+                .all(|h| h.new_start >= 5 && h.old_start >= 5),
             "hunk must start at the real edit line, got {:?}",
             rec.hunks
         );
@@ -371,7 +373,9 @@ mod tests {
         let (extractor, repo) = make_extractor(&repo_path);
 
         // Second commit modifies file.txt: should have non-zero additions and/or deletions
-        let diffs = extractor.extract(&repo, &commits[0]).expect("extract failed");
+        let diffs = extractor
+            .extract(&repo, &commits[0])
+            .expect("extract failed");
         assert_eq!(diffs.len(), 1);
 
         let record = &diffs[0].0;

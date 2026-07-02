@@ -35,9 +35,9 @@ impl MetricCollector for PatternsCollector {
         _progress: &crate::metrics::ProgressReporter,
     ) -> Option<anyhow::Result<MetricResult>> {
         Some((|| -> anyhow::Result<MetricResult> {
-        // SQLite %w is 0=Sun..6=Sat. Remap to 0=Mon..6=Sun so Monday is at index 0,
-        // matching the original `%u` (1=Mon..7=Sun) / day_names layout.
-        let (hourly, daily) = store
+            // SQLite %w is 0=Sun..6=Sat. Remap to 0=Mon..6=Sun so Monday is at index 0,
+            // matching the original `%u` (1=Mon..7=Sun) / day_names layout.
+            let (hourly, daily) = store
             .with_conn(|conn| -> anyhow::Result<([u64; 24], [u64; 7])> {
                 let mut hourly = [0u64; 24];
                 let mut daily = [0u64; 7];
@@ -78,53 +78,53 @@ impl MetricCollector for PatternsCollector {
                 Ok((hourly, daily))
             })??;
 
-        let hourly_entries: Vec<MetricEntry> = (0..24)
-            .map(|h| {
-                let key = format!("{:02}:00", h);
-                let mut values = HashMap::new();
-                values.insert("order".into(), MetricValue::Count(h as u64));
-                values.insert("commits".into(), MetricValue::Count(hourly[h]));
-                MetricEntry { key, values }
-            })
-            .collect();
+            let hourly_entries: Vec<MetricEntry> = (0..24)
+                .map(|h| {
+                    let key = format!("{:02}:00", h);
+                    let mut values = HashMap::new();
+                    values.insert("order".into(), MetricValue::Count(h as u64));
+                    values.insert("commits".into(), MetricValue::Count(hourly[h]));
+                    MetricEntry { key, values }
+                })
+                .collect();
 
-        let day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-        let daily_entries: Vec<MetricEntry> = day_names
-            .iter()
-            .enumerate()
-            .map(|(i, &name)| {
-                let mut values = HashMap::new();
-                values.insert("order".into(), MetricValue::Count((i + 1) as u64));
-                values.insert("commits".into(), MetricValue::Count(daily[i]));
-                MetricEntry {
-                    key: name.into(),
-                    values,
-                }
-            })
-            .collect();
+            let day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+            let daily_entries: Vec<MetricEntry> = day_names
+                .iter()
+                .enumerate()
+                .map(|(i, &name)| {
+                    let mut values = HashMap::new();
+                    values.insert("order".into(), MetricValue::Count((i + 1) as u64));
+                    values.insert("commits".into(), MetricValue::Count(daily[i]));
+                    MetricEntry {
+                        key: name.into(),
+                        values,
+                    }
+                })
+                .collect();
 
-        Ok(MetricResult {
-            name: "patterns".into(),
-            display_name: report_display("patterns"),
-            description: report_description("patterns"),
-            columns: vec![
-                Column::in_report("patterns", "order"),
-                Column::in_report("patterns", "commits"),
-            ],
-            entries: vec![],
-            entry_groups: vec![
-                EntryGroup {
-                    name: "hourly".into(),
-                    label: "Hourly".into(),
-                    entries: hourly_entries,
-                },
-                EntryGroup {
-                    name: "daily".into(),
-                    label: "Daily".into(),
-                    entries: daily_entries,
-                },
-            ],
-        })
+            Ok(MetricResult {
+                name: "patterns".into(),
+                display_name: report_display("patterns"),
+                description: report_description("patterns"),
+                columns: vec![
+                    Column::in_report("patterns", "order"),
+                    Column::in_report("patterns", "commits"),
+                ],
+                entries: vec![],
+                entry_groups: vec![
+                    EntryGroup {
+                        name: "hourly".into(),
+                        label: "Hourly".into(),
+                        entries: hourly_entries,
+                    },
+                    EntryGroup {
+                        name: "daily".into(),
+                        label: "Daily".into(),
+                        entries: daily_entries,
+                    },
+                ],
+            })
         })())
     }
 }
@@ -220,7 +220,8 @@ mod tests {
         let store = store_with(&[]);
         let mut coll = PatternsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(group(&r, "hourly").entries.len(), 24);
         assert_eq!(group(&r, "daily").entries.len(), 7);
@@ -239,7 +240,8 @@ mod tests {
         let store = store_with(&[make_change_at("a.rs", "c1", 2025, 1, 13, 14)]);
         let mut coll = PatternsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(count_at(group(&r, "hourly"), "14:00"), 1);
         assert_eq!(count_at(group(&r, "hourly"), "13:00"), 0);
@@ -297,7 +299,8 @@ mod tests {
         let store = store_with(&[make_change_at("a.rs", "csun", 2025, 1, 12, 10)]);
         let mut coll = PatternsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(count_at(group(&r, "daily"), "Sun"), 1);
         assert_eq!(count_at(group(&r, "daily"), "Mon"), 0);
@@ -313,7 +316,8 @@ mod tests {
         ]);
         let mut coll = PatternsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(count_at(group(&r, "daily"), "Mon"), 1);
         assert_eq!(count_at(group(&r, "daily"), "Sat"), 1);
@@ -330,7 +334,8 @@ mod tests {
         ]);
         let mut coll = PatternsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(count_at(group(&r, "hourly"), "09:00"), 1);
         assert_eq!(count_at(group(&r, "daily"), "Mon"), 1);
@@ -341,7 +346,8 @@ mod tests {
         let store = store_with(&[]);
         let mut coll = PatternsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         // Hourly: order = 0..23 (used by writers to keep the table sorted by hour).
         let hourly = group(&r, "hourly");

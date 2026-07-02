@@ -39,30 +39,31 @@ impl MetricCollector for OwnershipCollector {
             // Pull (file, email, lines_added) per author, then group in Rust to
             // compute top_author and bus_factor (which require the full author
             // distribution per file — hard to do in plain SQL without window funcs).
-            let rows = store.with_conn(|conn| -> anyhow::Result<Vec<(String, String, u64)>> {
-                let mut stmt = conn.prepare(
-                    // Canonicalize to the HEAD name so a renamed file's
-                    // ownership isn't split across old/new paths. (finding #10)
-                    "SELECT COALESCE(cp.head_path, ch.file_path) AS canon,
+            let rows =
+                store.with_conn(|conn| -> anyhow::Result<Vec<(String, String, u64)>> {
+                    let mut stmt = conn.prepare(
+                        // Canonicalize to the HEAD name so a renamed file's
+                        // ownership isn't split across old/new paths. (finding #10)
+                        "SELECT COALESCE(cp.head_path, ch.file_path) AS canon,
                             ch.email,
                             SUM(ch.additions) AS added
                        FROM non_merge_changes ch
                        LEFT JOIN canonical_path cp ON cp.path = ch.file_path
                       GROUP BY canon, ch.email
                      HAVING canon IN (SELECT file_path FROM live_files)",
-                )?;
-                let iter = stmt.query_map([], |row| {
-                    let file: String = row.get(0)?;
-                    let email: String = row.get(1)?;
-                    let added: i64 = row.get(2)?;
-                    Ok((file, email, added as u64))
-                })?;
-                let mut out = Vec::new();
-                for r in iter {
-                    out.push(r?);
-                }
-                Ok(out)
-            })??;
+                    )?;
+                    let iter = stmt.query_map([], |row| {
+                        let file: String = row.get(0)?;
+                        let email: String = row.get(1)?;
+                        let added: i64 = row.get(2)?;
+                        Ok((file, email, added as u64))
+                    })?;
+                    let mut out = Vec::new();
+                    for r in iter {
+                        out.push(r?);
+                    }
+                    Ok(out)
+                })??;
 
             // file → (email → lines_added). Keyed by String; SQLite already interns
             // pages so memory pressure here is only from the in-flight row set.
@@ -265,7 +266,8 @@ mod tests {
 
         let mut coll = OwnershipCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         let entry = r.entries.iter().find(|e| e.key == "a.rs").unwrap();
         match entry.values.get("top_author") {
@@ -291,7 +293,8 @@ mod tests {
 
         let mut coll = OwnershipCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert!(r.entries.iter().any(|e| e.key == "real.rs"));
         assert!(!r.entries.iter().any(|e| e.key == "Cargo.lock"));
@@ -309,7 +312,8 @@ mod tests {
 
         let mut coll = OwnershipCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         // Highest risk (lowest bus_factor) leads.
         assert_eq!(r.entries[0].key, "b.rs");
@@ -354,8 +358,7 @@ mod tests {
         // Re-running from an independent store must reproduce the same order.
         for _ in 0..5 {
             let again = build();
-            let again_keys: Vec<String> =
-                again.entries.iter().map(|e| e.key.clone()).collect();
+            let again_keys: Vec<String> = again.entries.iter().map(|e| e.key.clone()).collect();
             assert_eq!(again_keys, keys);
         }
     }

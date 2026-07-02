@@ -46,70 +46,69 @@ impl MetricCollector for SuccessionCollector {
         progress: &crate::metrics::ProgressReporter,
     ) -> Option<anyhow::Result<MetricResult>> {
         Some((|| -> anyhow::Result<MetricResult> {
-        struct AuthorRow {
-            commits: u64,
-            last_ts: i64,
-        }
-        struct FileAcc {
-            authors: HashMap<String, AuthorRow>,
-            original_email: String,
-            original_ts: i64,
-        }
-        type Files = HashMap<String, FileAcc>;
-        type GlobalLast = HashMap<String, i64>;
+            struct AuthorRow {
+                commits: u64,
+                last_ts: i64,
+            }
+            struct FileAcc {
+                authors: HashMap<String, AuthorRow>,
+                original_email: String,
+                original_ts: i64,
+            }
+            type Files = HashMap<String, FileAcc>;
+            type GlobalLast = HashMap<String, i64>;
 
-        let (files, global_last) = store
-            .with_conn(|conn| -> anyhow::Result<(Files, GlobalLast)> {
-                progress.status(&format!(
-                    "  succession: picking top {TOP_FILES} active source files..."
-                ));
-                // Top-N *source* files by commit activity. Stream files ordered
-                // by activity DESC and filter non-source files in Rust up front
-                // so config, lockfiles and docs don't consume the N slots; stop
-                // once N source files have been accepted. Everything else is
-                // dropped.
-                conn.execute_batch(
-                    "DROP TABLE IF EXISTS __top_files;
+            let (files, global_last) =
+                store.with_conn(|conn| -> anyhow::Result<(Files, GlobalLast)> {
+                    progress.status(&format!(
+                        "  succession: picking top {TOP_FILES} active source files..."
+                    ));
+                    // Top-N *source* files by commit activity. Stream files ordered
+                    // by activity DESC and filter non-source files in Rust up front
+                    // so config, lockfiles and docs don't consume the N slots; stop
+                    // once N source files have been accepted. Everything else is
+                    // dropped.
+                    conn.execute_batch(
+                        "DROP TABLE IF EXISTS __top_files;
                      CREATE TEMP TABLE __top_files (file TEXT PRIMARY KEY);",
-                )?;
-                let top_files: Vec<String> = {
-                    let mut stmt = conn.prepare(
-                        "SELECT file_path AS file
+                    )?;
+                    let top_files: Vec<String> = {
+                        let mut stmt = conn.prepare(
+                            "SELECT file_path AS file
                            FROM non_merge_changes
                           WHERE file_path IN (SELECT file_path FROM live_files)
                           GROUP BY file_path
                           ORDER BY COUNT(DISTINCT commit_oid) DESC",
-                    )?;
-                    let rows = stmt.query_map([], |row| {
-                        let f: String = row.get(0)?;
-                        Ok(f)
-                    })?;
-                    let mut out: Vec<String> = Vec::new();
-                    for r in rows {
-                        let f = r?;
-                        if !is_source_file(&f) {
-                            continue;
+                        )?;
+                        let rows = stmt.query_map([], |row| {
+                            let f: String = row.get(0)?;
+                            Ok(f)
+                        })?;
+                        let mut out: Vec<String> = Vec::new();
+                        for r in rows {
+                            let f = r?;
+                            if !is_source_file(&f) {
+                                continue;
+                            }
+                            out.push(f);
+                            if out.len() as i64 == TOP_FILES {
+                                break;
+                            }
                         }
-                        out.push(f);
-                        if out.len() as i64 == TOP_FILES {
-                            break;
+                        out
+                    };
+                    {
+                        let mut ins = conn.prepare("INSERT INTO __top_files(file) VALUES (?1)")?;
+                        for f in &top_files {
+                            ins.execute(rusqlite::params![f])?;
                         }
                     }
-                    out
-                };
-                {
-                    let mut ins =
-                        conn.prepare("INSERT INTO __top_files(file) VALUES (?1)")?;
-                    for f in &top_files {
-                        ins.execute(rusqlite::params![f])?;
-                    }
-                }
 
-                progress.status("  succession: per-file per-author detail...");
-                let mut files: Files = HashMap::new();
-                {
-                    let mut stmt = conn.prepare(
-                        "SELECT ch.file_path,
+                    progress.status("  succession: per-file per-author detail...");
+                    let mut files: Files = HashMap::new();
+                    {
+                        let mut stmt = conn.prepare(
+                            "SELECT ch.file_path,
                                 ch.email,
                                 COUNT(DISTINCT ch.commit_oid) AS commits,
                                 MIN(ch.commit_ts)             AS first_ts,
@@ -117,113 +116,114 @@ impl MetricCollector for SuccessionCollector {
                            FROM non_merge_changes ch
                            JOIN __top_files t ON t.file = ch.file_path
                           GROUP BY ch.file_path, ch.email",
-                    )?;
-                    let rows = stmt.query_map([], |row| {
-                        let file: String = row.get(0)?;
-                        let email: String = row.get(1)?;
-                        let commits: i64 = row.get(2)?;
-                        let first_ts: i64 = row.get(3)?;
-                        let last_ts: i64 = row.get(4)?;
-                        Ok((file, email, commits as u64, first_ts, last_ts))
-                    })?;
-                    for r in rows {
-                        let (file, email, commits, first_ts, last_ts) = r?;
-                        if !is_source_file(&file) {
-                            continue;
+                        )?;
+                        let rows = stmt.query_map([], |row| {
+                            let file: String = row.get(0)?;
+                            let email: String = row.get(1)?;
+                            let commits: i64 = row.get(2)?;
+                            let first_ts: i64 = row.get(3)?;
+                            let last_ts: i64 = row.get(4)?;
+                            Ok((file, email, commits as u64, first_ts, last_ts))
+                        })?;
+                        for r in rows {
+                            let (file, email, commits, first_ts, last_ts) = r?;
+                            if !is_source_file(&file) {
+                                continue;
+                            }
+                            let acc = files.entry(file).or_insert_with(|| FileAcc {
+                                authors: HashMap::new(),
+                                original_email: email.clone(),
+                                original_ts: first_ts,
+                            });
+                            if first_ts < acc.original_ts {
+                                acc.original_ts = first_ts;
+                                acc.original_email = email.clone();
+                            }
+                            acc.authors.insert(email, AuthorRow { commits, last_ts });
                         }
-                        let acc = files.entry(file).or_insert_with(|| FileAcc {
-                            authors: HashMap::new(),
-                            original_email: email.clone(),
-                            original_ts: first_ts,
-                        });
-                        if first_ts < acc.original_ts {
-                            acc.original_ts = first_ts;
-                            acc.original_email = email.clone();
+                    }
+
+                    let mut global_last: GlobalLast = HashMap::new();
+                    {
+                        let mut stmt2 = conn.prepare(
+                            "SELECT email, MAX(commit_ts) FROM non_merge_changes GROUP BY email",
+                        )?;
+                        let rows2 = stmt2.query_map([], |row| {
+                            let email: String = row.get(0)?;
+                            let last: i64 = row.get(1)?;
+                            Ok((email, last))
+                        })?;
+                        for r in rows2 {
+                            let (email, last) = r?;
+                            global_last.insert(email, last);
                         }
-                        acc.authors.insert(email, AuthorRow { commits, last_ts });
                     }
-                }
 
-                let mut global_last: GlobalLast = HashMap::new();
-                {
-                    let mut stmt2 =
-                        conn.prepare("SELECT email, MAX(commit_ts) FROM non_merge_changes GROUP BY email")?;
-                    let rows2 = stmt2.query_map([], |row| {
-                        let email: String = row.get(0)?;
-                        let last: i64 = row.get(1)?;
-                        Ok((email, last))
-                    })?;
-                    for r in rows2 {
-                        let (email, last) = r?;
-                        global_last.insert(email, last);
-                    }
-                }
+                    conn.execute("DROP TABLE IF EXISTS __top_files", [])?;
+                    Ok((files, global_last))
+                })??;
 
-                conn.execute("DROP TABLE IF EXISTS __top_files", [])?;
-                Ok((files, global_last))
-            })??;
+            let now = Utc::now();
+            let active_cutoff = (now - Duration::days(INACTIVE_DAYS)).timestamp();
 
-        let now = Utc::now();
-        let active_cutoff = (now - Duration::days(INACTIVE_DAYS)).timestamp();
+            let mut entries: Vec<MetricEntry> = files
+                .into_iter()
+                .map(|(path, fs)| {
+                    let original_active = global_last
+                        .get(&fs.original_email)
+                        .map(|t| *t >= active_cutoff)
+                        .unwrap_or(false);
+                    let total_authors = fs.authors.len() as u64;
+                    let successor_count = fs
+                        .authors
+                        .iter()
+                        .filter(|(email, _)| **email != fs.original_email)
+                        .count() as u64;
+                    let current_top: String = fs
+                        .authors
+                        .iter()
+                        .max_by_key(|(_, t)| (t.commits, t.last_ts))
+                        .map(|(e, _)| e.clone())
+                        .unwrap_or_else(|| "<unknown>".into());
 
-        let mut entries: Vec<MetricEntry> = files
-            .into_iter()
-            .map(|(path, fs)| {
-                let original_active = global_last
-                    .get(&fs.original_email)
-                    .map(|t| *t >= active_cutoff)
-                    .unwrap_or(false);
-                let total_authors = fs.authors.len() as u64;
-                let successor_count = fs
-                    .authors
-                    .iter()
-                    .filter(|(email, _)| **email != fs.original_email)
-                    .count() as u64;
-                let current_top: String = fs
-                    .authors
-                    .iter()
-                    .max_by_key(|(_, t)| (t.commits, t.last_ts))
-                    .map(|(e, _)| e.clone())
-                    .unwrap_or_else(|| "<unknown>".into());
+                    let status = classify(original_active, successor_count, total_authors);
 
-                let status = classify(original_active, successor_count, total_authors);
+                    let mut values = HashMap::new();
+                    values.insert(
+                        "original_author".into(),
+                        MetricValue::Text(fs.original_email),
+                    );
+                    values.insert(
+                        "original_active".into(),
+                        MetricValue::Count(u64::from(original_active)),
+                    );
+                    values.insert("current_top".into(), MetricValue::Text(current_top));
+                    values.insert("total_authors".into(), MetricValue::Count(total_authors));
+                    values.insert("successors".into(), MetricValue::Count(successor_count));
+                    values.insert("status".into(), MetricValue::Message(status));
 
-                let mut values = HashMap::new();
-                values.insert(
-                    "original_author".into(),
-                    MetricValue::Text(fs.original_email),
-                );
-                values.insert(
-                    "original_active".into(),
-                    MetricValue::Count(u64::from(original_active)),
-                );
-                values.insert("current_top".into(), MetricValue::Text(current_top));
-                values.insert("total_authors".into(), MetricValue::Count(total_authors));
-                values.insert("successors".into(), MetricValue::Count(successor_count));
-                values.insert("status".into(), MetricValue::Message(status));
+                    MetricEntry { key: path, values }
+                })
+                .collect();
 
-                MetricEntry { key: path, values }
+            entries.sort_by_key(|e| std::cmp::Reverse(status_rank(e)));
+            entries.truncate(200);
+
+            Ok(MetricResult {
+                name: "succession".into(),
+                display_name: report_display("succession"),
+                description: report_description("succession"),
+                entry_groups: vec![],
+                columns: vec![
+                    Column::in_report("succession", "original_author"),
+                    Column::in_report("succession", "original_active"),
+                    Column::in_report("succession", "current_top"),
+                    Column::in_report("succession", "total_authors"),
+                    Column::in_report("succession", "successors"),
+                    Column::in_report("succession", "status"),
+                ],
+                entries,
             })
-            .collect();
-
-        entries.sort_by_key(|e| std::cmp::Reverse(status_rank(e)));
-        entries.truncate(200);
-
-        Ok(MetricResult {
-            name: "succession".into(),
-            display_name: report_display("succession"),
-            description: report_description("succession"),
-            entry_groups: vec![],
-            columns: vec![
-                Column::in_report("succession", "original_author"),
-                Column::in_report("succession", "original_active"),
-                Column::in_report("succession", "current_top"),
-                Column::in_report("succession", "total_authors"),
-                Column::in_report("succession", "successors"),
-                Column::in_report("succession", "status"),
-            ],
-            entries,
-        })
         })())
     }
 }
@@ -418,7 +418,8 @@ mod tests {
         ]);
         let mut coll = SuccessionCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(
             status_code(entry_for(&r, "a.rs")),
@@ -431,7 +432,8 @@ mod tests {
         let store = store_with(&[make_change_at("a.rs", "c1", "alice@x", ancient())]);
         let mut coll = SuccessionCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(
             status_code(entry_for(&r, "a.rs")),
@@ -447,7 +449,8 @@ mod tests {
         ]);
         let mut coll = SuccessionCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert!(r.entries.iter().any(|e| e.key == "real.rs"));
         assert!(!r.entries.iter().any(|e| e.key == "Cargo.lock"));
@@ -489,7 +492,8 @@ mod tests {
         ]);
         let mut coll = SuccessionCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(r.entries[0].key, "orphan.rs");
     }
@@ -506,7 +510,8 @@ mod tests {
         ]);
         let mut coll = SuccessionCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         let entry = entry_for(&r, "a.rs");
         match entry.values.get("original_author") {

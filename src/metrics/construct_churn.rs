@@ -38,8 +38,7 @@ impl MetricCollector for ConstructChurnCollector {
         _progress: &crate::metrics::ProgressReporter,
     ) -> Option<anyhow::Result<MetricResult>> {
         Some((|| -> anyhow::Result<MetricResult> {
-        let entries = store
-            .with_conn(|conn| -> anyhow::Result<Vec<MetricEntry>> {
+            let entries = store.with_conn(|conn| -> anyhow::Result<Vec<MetricEntry>> {
                 let mut stmt = conn.prepare(
                     "SELECT ch.file_path,
                             c.qualified_name,
@@ -96,21 +95,21 @@ impl MetricCollector for ConstructChurnCollector {
                 Ok(out)
             })??;
 
-        Ok(MetricResult {
-            name: "construct_churn".into(),
-            display_name: report_display("construct_churn"),
-            description: report_description("construct_churn"),
-            entry_groups: vec![],
-            columns: vec![
-                Column::in_report("construct_churn", "kind"),
-                Column::in_report("construct_churn", "file"),
-                Column::in_report("construct_churn", "changes"),
-                Column::in_report("construct_churn", "lines_touched"),
-                Column::in_report("construct_churn", "unique_authors"),
-                Column::in_report("construct_churn", "last_modified"),
-            ],
-            entries,
-        })
+            Ok(MetricResult {
+                name: "construct_churn".into(),
+                display_name: report_display("construct_churn"),
+                description: report_description("construct_churn"),
+                entry_groups: vec![],
+                columns: vec![
+                    Column::in_report("construct_churn", "kind"),
+                    Column::in_report("construct_churn", "file"),
+                    Column::in_report("construct_churn", "changes"),
+                    Column::in_report("construct_churn", "lines_touched"),
+                    Column::in_report("construct_churn", "unique_authors"),
+                    Column::in_report("construct_churn", "last_modified"),
+                ],
+                entries,
+            })
         })())
     }
 }
@@ -210,7 +209,8 @@ mod tests {
 
         let mut coll = ConstructChurnCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(r.entries.len(), 2, "two distinct constructs");
         let foo = r.entries.iter().find(|e| e.key.ends_with("::foo")).unwrap();
@@ -235,7 +235,8 @@ mod tests {
 
         let mut coll = ConstructChurnCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert!(r.entries.iter().any(|e| e.key.starts_with("real.rs")));
         assert!(
@@ -255,7 +256,8 @@ mod tests {
 
         let mut coll = ConstructChurnCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert!(r.entries.first().unwrap().key.ends_with("::often"));
     }
@@ -271,7 +273,8 @@ mod tests {
 
         let mut coll = ConstructChurnCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         let entry = r.entries.first().unwrap();
         for key in [

@@ -311,7 +311,13 @@ impl crate::metrics::SourceScanner for DocCoverageCollector {
         };
         let mut public = 0u32;
         let mut documented = 0u32;
-        visit(&tree.root_node(), spec, source, &mut public, &mut documented);
+        visit(
+            &tree.root_node(),
+            spec,
+            source,
+            &mut public,
+            &mut documented,
+        );
         self.per_file.push(FileRow {
             file: path.to_string(),
             language: spec.name,
@@ -510,7 +516,13 @@ fn analyze_file(
     let tree = parser.parse(source, None)?;
     let mut public = 0u32;
     let mut documented = 0u32;
-    visit(&tree.root_node(), spec, source, &mut public, &mut documented);
+    visit(
+        &tree.root_node(),
+        spec,
+        source,
+        &mut public,
+        &mut documented,
+    );
     Some(FileRow {
         file: file_path.to_string(),
         language: spec.name,

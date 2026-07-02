@@ -324,7 +324,10 @@ mod tests {
             .expect("walk should succeed on a repo with no commits");
 
         assert_eq!(count, 0, "empty repo should walk to 0 commits");
-        assert!(!called, "callback should not fire for a repo with no commits");
+        assert!(
+            !called,
+            "callback should not fire for a repo with no commits"
+        );
     }
 
     #[test]

@@ -37,8 +37,7 @@ impl MetricCollector for AuthorsCollector {
         _progress: &crate::metrics::ProgressReporter,
     ) -> Option<anyhow::Result<MetricResult>> {
         Some((|| -> anyhow::Result<MetricResult> {
-            let entries = store
-            .with_conn(|conn| -> anyhow::Result<Vec<MetricEntry>> {
+            let entries = store.with_conn(|conn| -> anyhow::Result<Vec<MetricEntry>> {
                 let mut stmt = conn.prepare(
                     "SELECT email,
                             COUNT(DISTINCT commit_oid)                          AS commits,
@@ -173,7 +172,8 @@ mod tests {
 
         let mut c = AuthorsCollector::new();
         let r = c
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db");
         assert_eq!(r.entries.len(), 2);
 

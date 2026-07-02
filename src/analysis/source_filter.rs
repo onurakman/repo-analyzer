@@ -486,7 +486,10 @@ mod tests {
         let first_source = is_source_file(source);
         let first_non_source = is_source_file(non_source);
 
-        assert!(first_source, "expected a .rs file to be classified as source");
+        assert!(
+            first_source,
+            "expected a .rs file to be classified as source"
+        );
         assert!(
             !first_non_source,
             "expected a markdown doc to be classified as non-source"

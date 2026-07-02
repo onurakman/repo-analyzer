@@ -47,10 +47,10 @@ impl MetricCollector for KnowledgeSilosCollector {
         _progress: &crate::metrics::ProgressReporter,
     ) -> Option<anyhow::Result<MetricResult>> {
         Some((|| -> anyhow::Result<MetricResult> {
-        let rows = store
-            .with_conn(|conn| -> anyhow::Result<Vec<(String, String, u64, i64)>> {
-                conn.execute_batch(&format!(
-                    "DROP TABLE IF EXISTS __silo_files;
+            let rows =
+                store.with_conn(|conn| -> anyhow::Result<Vec<(String, String, u64, i64)>> {
+                    conn.execute_batch(&format!(
+                        "DROP TABLE IF EXISTS __silo_files;
                      CREATE TEMP TABLE __silo_files AS
                        SELECT file_path AS file
                          FROM non_merge_changes
@@ -58,135 +58,135 @@ impl MetricCollector for KnowledgeSilosCollector {
                         GROUP BY file_path
                         ORDER BY SUM(additions) DESC
                         LIMIT {};",
-                    TOP_FILES
-                ))?;
-                let mut stmt = conn.prepare(
-                    "SELECT ch.file_path,
+                        TOP_FILES
+                    ))?;
+                    let mut stmt = conn.prepare(
+                        "SELECT ch.file_path,
                             ch.email,
                             SUM(ch.additions)   AS added,
                             MAX(ch.commit_ts)   AS last_ts
                        FROM non_merge_changes ch
                        JOIN __silo_files t ON t.file = ch.file_path
                       GROUP BY ch.file_path, ch.email",
-                )?;
-                let iter = stmt.query_map([], |row| {
-                    let file: String = row.get(0)?;
-                    let email: String = row.get(1)?;
-                    let added: i64 = row.get(2)?;
-                    let last_ts: i64 = row.get(3)?;
-                    Ok((file, email, added as u64, last_ts))
-                })?;
-                let mut out = Vec::new();
-                for r in iter {
-                    out.push(r?);
+                    )?;
+                    let iter = stmt.query_map([], |row| {
+                        let file: String = row.get(0)?;
+                        let email: String = row.get(1)?;
+                        let added: i64 = row.get(2)?;
+                        let last_ts: i64 = row.get(3)?;
+                        Ok((file, email, added as u64, last_ts))
+                    })?;
+                    let mut out = Vec::new();
+                    for r in iter {
+                        out.push(r?);
+                    }
+                    conn.execute("DROP TABLE IF EXISTS __silo_files", [])?;
+                    Ok(out)
+                })??;
+
+            struct FileAcc {
+                lines_per_author: HashMap<String, u64>,
+                last_per_author: HashMap<String, i64>,
+            }
+            let mut per_file: HashMap<String, FileAcc> = HashMap::new();
+            for (file, email, added, last_ts) in rows {
+                if !is_source_file(&file) {
+                    continue;
                 }
-                conn.execute("DROP TABLE IF EXISTS __silo_files", [])?;
-                Ok(out)
-            })??;
-
-        struct FileAcc {
-            lines_per_author: HashMap<String, u64>,
-            last_per_author: HashMap<String, i64>,
-        }
-        let mut per_file: HashMap<String, FileAcc> = HashMap::new();
-        for (file, email, added, last_ts) in rows {
-            if !is_source_file(&file) {
-                continue;
+                let acc = per_file.entry(file).or_insert_with(|| FileAcc {
+                    lines_per_author: HashMap::new(),
+                    last_per_author: HashMap::new(),
+                });
+                *acc.lines_per_author.entry(email.clone()).or_insert(0) += added;
+                let slot = acc.last_per_author.entry(email).or_insert(last_ts);
+                if last_ts > *slot {
+                    *slot = last_ts;
+                }
             }
-            let acc = per_file.entry(file).or_insert_with(|| FileAcc {
-                lines_per_author: HashMap::new(),
-                last_per_author: HashMap::new(),
+
+            let now = Utc::now().timestamp();
+            let mut entries: Vec<MetricEntry> = Vec::new();
+
+            for (path, acc) in per_file {
+                let total_lines: u64 = acc.lines_per_author.values().sum();
+                if total_lines == 0 {
+                    continue;
+                }
+                let Some((owner_email, owner_lines)) =
+                    acc.lines_per_author.iter().max_by_key(|(_, n)| **n)
+                else {
+                    continue;
+                };
+                let ownership_pct = (owner_lines * 100 / total_lines).min(100);
+                let is_silo = ownership_pct >= SILO_PCT;
+                if !is_silo {
+                    continue;
+                }
+                let owner_last = acc.last_per_author.get(owner_email).copied().unwrap_or(now);
+                let owner_idle_days = ((now - owner_last) / 86_400).max(0);
+                let owner_inactive = owner_idle_days >= IDLE_DAYS;
+                let risk = if owner_inactive {
+                    LocalizedMessage::code(messages::KNOWLEDGE_SILO_RISK_AT_RISK)
+                        .with_severity(Severity::Error)
+                        .with_param("idle_days", owner_idle_days)
+                        .with_param("ownership_pct", ownership_pct)
+                } else {
+                    LocalizedMessage::code(messages::KNOWLEDGE_SILO_RISK_SINGLE_OWNER)
+                        .with_severity(Severity::Warning)
+                        .with_param("ownership_pct", ownership_pct)
+                };
+
+                let mut values = HashMap::new();
+                values.insert("owner".into(), MetricValue::Text(owner_email.clone()));
+                values.insert("ownership_pct".into(), MetricValue::Count(ownership_pct));
+                values.insert(
+                    "owner_last_touch".into(),
+                    MetricValue::Date(ts_to_date(owner_last)),
+                );
+                values.insert(
+                    "owner_idle_days".into(),
+                    MetricValue::Count(owner_idle_days as u64),
+                );
+                values.insert("total_lines".into(), MetricValue::Count(total_lines));
+                values.insert("risk".into(), MetricValue::Message(risk));
+                entries.push(MetricEntry { key: path, values });
+            }
+
+            entries.sort_by(|a, b| {
+                let ra = risk_rank(a);
+                let rb = risk_rank(b);
+                if ra != rb {
+                    return rb.cmp(&ra);
+                }
+                let ia = match a.values.get("owner_idle_days") {
+                    Some(MetricValue::Count(n)) => *n,
+                    _ => 0,
+                };
+                let ib = match b.values.get("owner_idle_days") {
+                    Some(MetricValue::Count(n)) => *n,
+                    _ => 0,
+                };
+                ib.cmp(&ia)
             });
-            *acc.lines_per_author.entry(email.clone()).or_insert(0) += added;
-            let slot = acc.last_per_author.entry(email).or_insert(last_ts);
-            if last_ts > *slot {
-                *slot = last_ts;
-            }
-        }
+            entries.truncate(150);
 
-        let now = Utc::now().timestamp();
-        let mut entries: Vec<MetricEntry> = Vec::new();
-
-        for (path, acc) in per_file {
-            let total_lines: u64 = acc.lines_per_author.values().sum();
-            if total_lines == 0 {
-                continue;
-            }
-            let Some((owner_email, owner_lines)) =
-                acc.lines_per_author.iter().max_by_key(|(_, n)| **n)
-            else {
-                continue;
-            };
-            let ownership_pct = (owner_lines * 100 / total_lines).min(100);
-            let is_silo = ownership_pct >= SILO_PCT;
-            if !is_silo {
-                continue;
-            }
-            let owner_last = acc.last_per_author.get(owner_email).copied().unwrap_or(now);
-            let owner_idle_days = ((now - owner_last) / 86_400).max(0);
-            let owner_inactive = owner_idle_days >= IDLE_DAYS;
-            let risk = if owner_inactive {
-                LocalizedMessage::code(messages::KNOWLEDGE_SILO_RISK_AT_RISK)
-                    .with_severity(Severity::Error)
-                    .with_param("idle_days", owner_idle_days)
-                    .with_param("ownership_pct", ownership_pct)
-            } else {
-                LocalizedMessage::code(messages::KNOWLEDGE_SILO_RISK_SINGLE_OWNER)
-                    .with_severity(Severity::Warning)
-                    .with_param("ownership_pct", ownership_pct)
-            };
-
-            let mut values = HashMap::new();
-            values.insert("owner".into(), MetricValue::Text(owner_email.clone()));
-            values.insert("ownership_pct".into(), MetricValue::Count(ownership_pct));
-            values.insert(
-                "owner_last_touch".into(),
-                MetricValue::Date(ts_to_date(owner_last)),
-            );
-            values.insert(
-                "owner_idle_days".into(),
-                MetricValue::Count(owner_idle_days as u64),
-            );
-            values.insert("total_lines".into(), MetricValue::Count(total_lines));
-            values.insert("risk".into(), MetricValue::Message(risk));
-            entries.push(MetricEntry { key: path, values });
-        }
-
-        entries.sort_by(|a, b| {
-            let ra = risk_rank(a);
-            let rb = risk_rank(b);
-            if ra != rb {
-                return rb.cmp(&ra);
-            }
-            let ia = match a.values.get("owner_idle_days") {
-                Some(MetricValue::Count(n)) => *n,
-                _ => 0,
-            };
-            let ib = match b.values.get("owner_idle_days") {
-                Some(MetricValue::Count(n)) => *n,
-                _ => 0,
-            };
-            ib.cmp(&ia)
-        });
-        entries.truncate(150);
-
-        Ok(MetricResult {
-            name: "knowledge_silos".into(),
-            display_name: report_display("knowledge_silos"),
-            description: report_description("knowledge_silos")
-                .with_param("silo_pct", SILO_PCT)
-                .with_param("idle_days", IDLE_DAYS),
-            entry_groups: vec![],
-            columns: vec![
-                Column::in_report("knowledge_silos", "owner"),
-                Column::in_report("knowledge_silos", "ownership_pct"),
-                Column::in_report("knowledge_silos", "owner_last_touch"),
-                Column::in_report("knowledge_silos", "owner_idle_days"),
-                Column::in_report("knowledge_silos", "total_lines"),
-                Column::in_report("knowledge_silos", "risk"),
-            ],
-            entries,
-        })
+            Ok(MetricResult {
+                name: "knowledge_silos".into(),
+                display_name: report_display("knowledge_silos"),
+                description: report_description("knowledge_silos")
+                    .with_param("silo_pct", SILO_PCT)
+                    .with_param("idle_days", IDLE_DAYS),
+                entry_groups: vec![],
+                columns: vec![
+                    Column::in_report("knowledge_silos", "owner"),
+                    Column::in_report("knowledge_silos", "ownership_pct"),
+                    Column::in_report("knowledge_silos", "owner_last_touch"),
+                    Column::in_report("knowledge_silos", "owner_idle_days"),
+                    Column::in_report("knowledge_silos", "total_lines"),
+                    Column::in_report("knowledge_silos", "risk"),
+                ],
+                entries,
+            })
         })())
     }
 }
@@ -320,7 +320,8 @@ mod tests {
 
         let mut coll = KnowledgeSilosCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert!(
             r.entries.is_empty(),
@@ -336,7 +337,8 @@ mod tests {
 
         let mut coll = KnowledgeSilosCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         let entry = r.entries.iter().find(|e| e.key == "a.rs").unwrap();
         match entry.values.get("risk") {
@@ -359,7 +361,8 @@ mod tests {
 
         let mut coll = KnowledgeSilosCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         let entry = r.entries.iter().find(|e| e.key == "a.rs").unwrap();
         match entry.values.get("risk") {
@@ -386,7 +389,8 @@ mod tests {
 
         let mut coll = KnowledgeSilosCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert!(r.entries.iter().any(|e| e.key == "real.rs"));
         assert!(!r.entries.iter().any(|e| e.key == "Cargo.lock"));
@@ -403,7 +407,8 @@ mod tests {
 
         let mut coll = KnowledgeSilosCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         // at-risk row should come first (rank 2 > rank 1)
         assert_eq!(r.entries[0].key, "idle.rs");
