@@ -57,9 +57,31 @@ impl ProgressReporter {
     }
 }
 
+/// A collector that analyzes each source file's parsed syntax tree at HEAD.
+///
+/// The pipeline walks the HEAD tree ONCE, parses each source blob ONCE with the
+/// tree-sitter grammar for its extension, and dispatches the shared tree to
+/// every scanner — replacing N independent tree walks + re-parses (one per
+/// collector) with a single shared scan. (audit finding #23)
+pub trait SourceScanner {
+    /// Called once per source file at HEAD. `tree` is parsed with the grammar
+    /// for the file's extension; the scanner re-derives its own per-language
+    /// spec by path and runs its analysis on the shared tree.
+    fn scan_file(&mut self, path: &str, source: &str, tree: &tree_sitter::Tree);
+}
+
 #[allow(dead_code)]
 pub trait MetricCollector: Send + Sync {
     fn name(&self) -> &str;
+
+    /// If this collector analyzes parsed source trees, return itself as a
+    /// [`SourceScanner`] so the pipeline drives it via the single shared HEAD
+    /// scan instead of a private per-collector walk. Default: not a scanner.
+    /// Scanners must leave [`inspect_repo`](Self::inspect_repo) a no-op — the
+    /// shared scan replaces it. (audit finding #23)
+    fn as_source_scanner(&mut self) -> Option<&mut dyn SourceScanner> {
+        None
+    }
 
     /// Default in-memory processing path. Called by the pipeline for every
     /// parsed change when the collector does not override `finalize_from_db`.
@@ -80,8 +102,14 @@ pub trait MetricCollector: Send + Sync {
         Ok(())
     }
 
-    /// Optional disk-backed finalization. When `Some(result)` is returned, the
-    /// pipeline uses this result and skips the in-memory `finalize()` path.
+    /// Optional disk-backed finalization. The three-way return disambiguates:
+    /// - `None` — this collector doesn't use the DB path; the pipeline falls
+    ///   back to the in-memory [`finalize`](Self::finalize).
+    /// - `Some(Ok(result))` — use this result and skip `finalize()`.
+    /// - `Some(Err(e))` — the collector uses the DB path but its query failed;
+    ///   the pipeline warns and falls back to `finalize()` rather than silently
+    ///   emitting an empty report. (audit finding #5)
+    ///
     /// Collectors that aggregate per-change data should override this and run
     /// their SQL query against the shared [`ChangeStore`] so aggregation state
     /// lives on disk instead of RAM.
@@ -89,7 +117,7 @@ pub trait MetricCollector: Send + Sync {
         &mut self,
         _store: &ChangeStore,
         _progress: &ProgressReporter,
-    ) -> Option<MetricResult> {
+    ) -> Option<anyhow::Result<MetricResult>> {
         None
     }
 }

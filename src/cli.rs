@@ -153,7 +153,12 @@ pub fn parse_duration(s: &str) -> anyhow::Result<chrono::Duration> {
         anyhow::bail!("Empty duration string");
     }
 
-    let (num_str, suffix) = s.split_at(s.len() - 1);
+    // The `is_empty` guard above guarantees at least one char, so `last` is safe
+    // to unwrap. Split on a char boundary (not a raw byte index) so a multi-byte
+    // trailing character such as "10é" falls through to the unknown-suffix arm
+    // below instead of panicking.
+    let last = s.chars().last().unwrap();
+    let (num_str, suffix) = s.split_at(s.len() - last.len_utf8());
     let num: i64 = num_str
         .parse()
         .map_err(|_| anyhow::anyhow!("Invalid duration number: '{num_str}'"))?;
@@ -204,6 +209,13 @@ mod tests {
     #[test]
     fn test_parse_duration_invalid_suffix() {
         assert!(parse_duration("10x").is_err());
+    }
+
+    #[test]
+    fn test_parse_duration_non_ascii_suffix() {
+        // A multi-byte trailing char must return an Err, not panic on a
+        // non-char-boundary split.
+        assert!(parse_duration("10é").is_err());
     }
 
     #[test]

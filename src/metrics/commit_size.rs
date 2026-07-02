@@ -21,10 +21,17 @@ use crate::types::{
 /// capped so a runaway CI job doesn't produce a 10k-row table.
 const MAX_ANOMALIES: usize = 25;
 
-/// A commit qualifies as an anomaly if its total lines-changed exceeds
+/// A commit qualifies as an anomaly if its total lines-changed is at least
 /// `max(10 * p95, p99)`. Using the max avoids a pathological `p95 == 0`
 /// on repos with many tiny commits (docs-only, lockfile bumps).
 const ANOMALY_P95_MULTIPLIER: f64 = 10.0;
+
+/// Minimum number of commits before we attempt anomaly detection. On very
+/// small repos the percentiles are too noisy to be meaningful; below this
+/// floor we skip the anomaly list entirely. At/above it, a single giant
+/// commit can still be flagged even though `p99` collapses onto `max` for
+/// small `n` (see `percentile_index` / the `>=` comparison below).
+const MIN_ANOMALY_SAMPLE: usize = 20;
 
 pub struct CommitSizeCollector;
 
@@ -53,11 +60,11 @@ impl MetricCollector for CommitSizeCollector {
         &mut self,
         store: &ChangeStore,
         _progress: &crate::metrics::ProgressReporter,
-    ) -> Option<MetricResult> {
+    ) -> Option<anyhow::Result<MetricResult>> {
         // Aggregate to one row per commit: total lines changed + minimal
         // metadata for the anomaly list. Sort is done in-memory so we can
         // compute percentiles over the full distribution.
-        let rows = store
+        let rows = match store
             .with_conn(|conn| -> anyhow::Result<Vec<CommitRow>> {
                 let mut stmt = conn.prepare(
                     "SELECT commit_oid,
@@ -65,7 +72,7 @@ impl MetricCollector for CommitSizeCollector {
                                 MIN(email)                 AS email,
                                 MIN(commit_ts)             AS ts,
                                 COALESCE(MIN(message), '') AS message
-                           FROM changes
+                           FROM non_merge_changes
                           GROUP BY commit_oid",
                 )?;
                 let it = stmt.query_map([], |row| {
@@ -82,8 +89,11 @@ impl MetricCollector for CommitSizeCollector {
                 }
                 Ok(out)
             })
-            .ok()?
-            .ok()?;
+            .and_then(|r| r)
+        {
+            Ok(rows) => rows,
+            Err(e) => return Some(Err(e)),
+        };
 
         if rows.is_empty() {
             return None;
@@ -98,10 +108,19 @@ impl MetricCollector for CommitSizeCollector {
 
         // Filter + rank anomalies. The full `anomaly_count` goes into the
         // summary row; the detail list is capped at `MAX_ANOMALIES`.
-        let mut anomaly_rows: Vec<CommitRow> = rows
-            .into_iter()
-            .filter(|(_, s, _, _, _)| (*s as u64) > threshold)
-            .collect();
+        //
+        // The `>=` (not `>`) is deliberate: for small repos the nearest-rank
+        // `p99` lands on `max`, so `threshold == max`; a strict `>` would
+        // never flag the single giant commit that motivated the report. The
+        // `MIN_ANOMALY_SAMPLE` guard keeps this from firing on repos too tiny
+        // for the percentiles to mean anything.
+        let mut anomaly_rows: Vec<CommitRow> = if total_commits >= MIN_ANOMALY_SAMPLE {
+            rows.into_iter()
+                .filter(|(_, s, _, _, _)| (*s as u64) >= threshold)
+                .collect()
+        } else {
+            Vec::new()
+        };
         anomaly_rows.sort_by_key(|r| std::cmp::Reverse(r.1));
         let anomaly_count = anomaly_rows.len();
         anomaly_rows.truncate(MAX_ANOMALIES);
@@ -114,7 +133,7 @@ impl MetricCollector for CommitSizeCollector {
         let anomaly_entries: Vec<MetricEntry> =
             anomaly_rows.into_iter().map(to_anomaly_entry).collect();
 
-        Some(MetricResult {
+        Some(Ok(MetricResult {
             name: "commit_size".into(),
             display_name: report_display("commit_size"),
             description: report_description("commit_size"),
@@ -146,7 +165,7 @@ impl MetricCollector for CommitSizeCollector {
                     entries: anomaly_entries,
                 },
             ],
-        })
+        }))
     }
 }
 
@@ -164,9 +183,9 @@ impl Stats {
         debug_assert!(n > 0);
         let sum: u64 = sizes.iter().sum();
         let mean = (sum as f64 / n as f64).round() as u64;
-        let median = sizes[n / 2];
-        let p95 = sizes[((n as f64 * 0.95) as usize).min(n - 1)];
-        let p99 = sizes[((n as f64 * 0.99) as usize).min(n - 1)];
+        let median = sizes[percentile_index(n, 0.50)];
+        let p95 = sizes[percentile_index(n, 0.95)];
+        let p99 = sizes[percentile_index(n, 0.99)];
         let max = *sizes.last().unwrap_or(&0);
         Self {
             mean,
@@ -176,6 +195,19 @@ impl Stats {
             max,
         }
     }
+}
+
+/// Nearest-rank percentile index into a sorted slice of length `n` (`n > 0`).
+///
+/// Uses `ceil` rather than the old `as usize` truncation: the truncating form
+/// floored `p99` down to `max` for any `n <= 100`, which made the p99-based
+/// anomaly threshold unreachable on small repos. The `.saturating_sub(1)`
+/// converts the 1-based nearest rank to a 0-based index; `.min(n - 1)` clamps
+/// the `q == 1.0` / rounding edge.
+fn percentile_index(n: usize, q: f64) -> usize {
+    ((n as f64 * q).ceil() as usize)
+        .saturating_sub(1)
+        .min(n - 1)
 }
 
 fn anomaly_threshold(stats: &Stats) -> u64 {
@@ -250,7 +282,7 @@ mod tests {
         let sizes = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 100];
         let s = Stats::from_sorted(&sizes);
         assert_eq!(s.max, 100);
-        // p95 index = floor(10 * 0.95) = 9 → value 100.
+        // p95 nearest-rank index = ceil(10 * 0.95) - 1 = 9 → value 100.
         assert_eq!(s.p95, 100);
         // mean of that set ≈ 14.5 → rounds to 15.
         assert_eq!(s.mean, 15);
@@ -276,5 +308,41 @@ mod tests {
             max: 10_000,
         };
         assert_eq!(anomaly_threshold(&stats), 2_000);
+    }
+
+    #[test]
+    fn percentile_index_uses_nearest_rank_not_floor() {
+        // Regression guard for the old truncating `as usize` form, which
+        // floored p99 onto max for every n <= 100.
+        assert_eq!(percentile_index(100, 0.99), 98); // was 99 (== max) before.
+        assert_eq!(percentile_index(60, 0.95), 56);
+        assert_eq!(percentile_index(10, 0.95), 9);
+        assert_eq!(percentile_index(1, 0.99), 0); // single-commit clamp.
+    }
+
+    #[test]
+    fn small_repo_with_one_giant_commit_is_flagged() {
+        // 59 tiny commits + 1 giant → n = 60, below the old p99==max cliff at
+        // n <= 100. The giant must still clear the anomaly bar, and the tiny
+        // commits must not.
+        let mut sizes: Vec<u64> = vec![10; 59];
+        sizes.push(1_000_000);
+        sizes.sort_unstable();
+        let n = sizes.len();
+
+        let stats = Stats::from_sorted(&sizes);
+        let threshold = anomaly_threshold(&stats);
+
+        // Guard is satisfied, so anomaly detection runs.
+        assert!(n >= MIN_ANOMALY_SAMPLE);
+        // Mirror the filter predicate used in `finalize_from_db`.
+        assert!(
+            1_000_000u64 >= threshold,
+            "giant commit must be flagged (threshold = {threshold})"
+        );
+        assert!(
+            10u64 < threshold,
+            "tiny commits must not be flagged (threshold = {threshold})"
+        );
     }
 }

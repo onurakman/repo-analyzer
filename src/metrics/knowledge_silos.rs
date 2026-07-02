@@ -45,14 +45,16 @@ impl MetricCollector for KnowledgeSilosCollector {
         &mut self,
         store: &ChangeStore,
         _progress: &crate::metrics::ProgressReporter,
-    ) -> Option<MetricResult> {
+    ) -> Option<anyhow::Result<MetricResult>> {
+        Some((|| -> anyhow::Result<MetricResult> {
         let rows = store
             .with_conn(|conn| -> anyhow::Result<Vec<(String, String, u64, i64)>> {
                 conn.execute_batch(&format!(
                     "DROP TABLE IF EXISTS __silo_files;
                      CREATE TEMP TABLE __silo_files AS
                        SELECT file_path AS file
-                         FROM changes
+                         FROM non_merge_changes
+                        WHERE file_path IN (SELECT file_path FROM live_files)
                         GROUP BY file_path
                         ORDER BY SUM(additions) DESC
                         LIMIT {};",
@@ -63,7 +65,7 @@ impl MetricCollector for KnowledgeSilosCollector {
                             ch.email,
                             SUM(ch.additions)   AS added,
                             MAX(ch.commit_ts)   AS last_ts
-                       FROM changes ch
+                       FROM non_merge_changes ch
                        JOIN __silo_files t ON t.file = ch.file_path
                       GROUP BY ch.file_path, ch.email",
                 )?;
@@ -80,9 +82,7 @@ impl MetricCollector for KnowledgeSilosCollector {
                 }
                 conn.execute("DROP TABLE IF EXISTS __silo_files", [])?;
                 Ok(out)
-            })
-            .ok()?
-            .ok()?;
+            })??;
 
         struct FileAcc {
             lines_per_author: HashMap<String, u64>,
@@ -170,7 +170,7 @@ impl MetricCollector for KnowledgeSilosCollector {
         });
         entries.truncate(150);
 
-        Some(MetricResult {
+        Ok(MetricResult {
             name: "knowledge_silos".into(),
             display_name: report_display("knowledge_silos"),
             description: report_description("knowledge_silos")
@@ -187,6 +187,7 @@ impl MetricCollector for KnowledgeSilosCollector {
             ],
             entries,
         })
+        })())
     }
 }
 
@@ -319,7 +320,7 @@ mod tests {
 
         let mut coll = KnowledgeSilosCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert!(
             r.entries.is_empty(),
@@ -335,7 +336,7 @@ mod tests {
 
         let mut coll = KnowledgeSilosCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         let entry = r.entries.iter().find(|e| e.key == "a.rs").unwrap();
         match entry.values.get("risk") {
@@ -358,7 +359,7 @@ mod tests {
 
         let mut coll = KnowledgeSilosCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         let entry = r.entries.iter().find(|e| e.key == "a.rs").unwrap();
         match entry.values.get("risk") {
@@ -385,7 +386,7 @@ mod tests {
 
         let mut coll = KnowledgeSilosCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert!(r.entries.iter().any(|e| e.key == "real.rs"));
         assert!(!r.entries.iter().any(|e| e.key == "Cargo.lock"));
@@ -402,7 +403,7 @@ mod tests {
 
         let mut coll = KnowledgeSilosCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         // at-risk row should come first (rank 2 > rank 1)
         assert_eq!(r.entries[0].key, "idle.rs");

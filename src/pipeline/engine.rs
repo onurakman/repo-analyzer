@@ -176,12 +176,10 @@ impl Pipeline {
             self.config.time_range.clone(),
             interner.clone(),
         );
-        let mut total: usize = 0;
-        count_walker.walk(|_| {
-            total += 1;
-            spinner.tick();
-            Ok(())
-        })?;
+        spinner.tick();
+        // Decode-free count: just needs the total for the progress bar, so it
+        // avoids decoding every commit object a second time. (finding #31)
+        let total = count_walker.count()? as usize;
         spinner.finish_and_clear();
 
         if total == 0 {
@@ -215,10 +213,7 @@ impl Pipeline {
 
         // 5. Open gix repo once (thread-safe handle, cheap to clone into workers)
         let thread_safe_repo = Arc::new(gix::ThreadSafeRepository::open(&self.config.repo_path)?);
-        let diff_extractor = Arc::new(DiffExtractor::new(
-            thread_safe_repo.clone(),
-            interner.clone(),
-        ));
+        let diff_extractor = Arc::new(DiffExtractor::new(interner.clone()));
 
         // 6. Open the disk-backed change store and spawn a writer thread that
         //    drains ParsedChange batches from the channel into SQLite. All
@@ -271,49 +266,55 @@ impl Pipeline {
         commit_rx
             .into_iter()
             .par_bridge()
-            .for_each_with(changes_tx.clone(), |tx, commit| {
-                let diff_records = match diff_extractor.extract(&commit) {
-                    Ok(records) => records,
-                    Err(e) => {
-                        if !quiet {
-                            pb.println(format!(
-                                "Warning: skipping commit {}: {}",
-                                &commit.oid[..8.min(commit.oid.len())],
-                                e
-                            ));
+            .for_each_init(
+                || {
+                    // One thread-local repo per rayon worker, reused across
+                    // every commit it processes. gix's object cache lives on the
+                    // thread-local handle, so building it once per worker (not
+                    // once per commit) lets decompressed objects survive between
+                    // commits — the previous per-commit handle threw the cache
+                    // away each time. Capped via `--object-cache-mb`. (finding #24)
+                    let mut thread_repo = thread_safe_repo.to_thread_local();
+                    thread_repo.object_cache_size_if_unset(object_cache_bytes);
+                    (changes_tx.clone(), thread_repo)
+                },
+                |(tx, thread_repo), commit| {
+                    let diff_records = match diff_extractor.extract(thread_repo, &commit) {
+                        Ok(records) => records,
+                        Err(e) => {
+                            if !quiet {
+                                pb.println(format!(
+                                    "Warning: skipping commit {}: {}",
+                                    &commit.oid[..8.min(commit.oid.len())],
+                                    e
+                                ));
+                            }
+                            pb.inc(1);
+                            return;
                         }
-                        pb.inc(1);
-                        return;
-                    }
-                };
+                    };
 
-                // Cap the per-thread object cache. gix's default keeps
-                // decompressed blobs in memory — fine for a short-lived CLI
-                // call on a small repo, but on a 32k-commit monorepo the
-                // cumulative working set balloons into GBs. Tunable via
-                // `--object-cache-mb`.
-                let mut thread_repo = thread_safe_repo.to_thread_local();
-                thread_repo.object_cache_size_if_unset(object_cache_bytes);
-
-                // Split the commit's diff records into capped batches so a
-                // single big merge commit doesn't queue hundreds of MBs of
-                // parsed constructs in the channel all at once.
-                let mut changes: Vec<ParsedChange> = Vec::with_capacity(max_changes_per_batch);
-                for record in diff_records {
-                    if is_lock_file(&record.file_path) {
-                        continue;
+                    // Split the commit's diff records into capped batches so a
+                    // single big merge commit doesn't queue hundreds of MBs of
+                    // parsed constructs in the channel all at once.
+                    let mut changes: Vec<ParsedChange> =
+                        Vec::with_capacity(max_changes_per_batch);
+                    for (record, blob_oid) in diff_records {
+                        if is_lock_file(&record.file_path) {
+                            continue;
+                        }
+                        changes.push(parse_diff_record(registry, thread_repo, record, blob_oid));
+                        if changes.len() >= max_changes_per_batch {
+                            let _ = tx.send(std::mem::take(&mut changes));
+                            changes = Vec::with_capacity(max_changes_per_batch);
+                        }
                     }
-                    changes.push(parse_diff_record(registry, &thread_repo, record));
-                    if changes.len() >= max_changes_per_batch {
-                        let _ = tx.send(std::mem::take(&mut changes));
-                        changes = Vec::with_capacity(max_changes_per_batch);
+                    if !changes.is_empty() {
+                        let _ = tx.send(changes);
                     }
-                }
-                if !changes.is_empty() {
-                    let _ = tx.send(changes);
-                }
-                pb.inc(1);
-            });
+                    pb.inc(1);
+                },
+            );
 
         // Close the channel by dropping the original sender (workers dropped their clones).
         drop(changes_tx);
@@ -354,7 +355,36 @@ impl Pipeline {
         let reporter = crate::metrics::ProgressReporter::new(progress_bar_for_reporter);
         let total_collectors = collectors.len();
         {
-            let repo = thread_safe_repo.to_thread_local();
+            let mut repo = thread_safe_repo.to_thread_local();
+            // Cache decompressed objects across the inspection collectors — many
+            // of them read the SAME HEAD blobs, and without a cache each
+            // re-inflates them from the pack. (finding #23)
+            repo.object_cache_size_if_unset(object_cache_bytes);
+
+            // Single shared source scan: walk HEAD once, parse each source blob
+            // once, and feed the parsed tree to every tree-based scanner
+            // (complexity, clones, doc_coverage) — instead of each collector
+            // re-walking the tree and re-parsing every file. Their
+            // `inspect_repo` is a no-op; this replaces it. (finding #23)
+            {
+                let mut scanners: Vec<&mut dyn crate::metrics::SourceScanner> = collectors
+                    .iter_mut()
+                    .filter_map(|c| c.as_source_scanner())
+                    .collect();
+                if !scanners.is_empty() {
+                    pb.set_message("[4/5] Scanning source files...");
+                    if let Err(e) = run_source_scan(
+                        &thread_safe_repo,
+                        &mut scanners,
+                        object_cache_bytes,
+                        &reporter,
+                    ) && !self.config.quiet
+                    {
+                        pb.println(format!("Warning: shared source scan failed: {e}"));
+                    }
+                }
+            }
+
             for (idx, collector) in collectors.iter_mut().enumerate() {
                 pb.set_message(format!(
                     "[4/5] Inspecting ({}/{}) {}...",
@@ -389,8 +419,24 @@ impl Pipeline {
                     total_collectors,
                     c.name()
                 ));
-                c.finalize_from_db(&store, &reporter)
-                    .unwrap_or_else(|| c.finalize())
+                match c.finalize_from_db(&store, &reporter) {
+                    Some(Ok(r)) => r,
+                    Some(Err(e)) => {
+                        // The collector uses the DB path but its query failed.
+                        // Surface it instead of silently emitting an empty
+                        // report, then fall back to the in-memory path (which
+                        // keeps the JSON schema stable). (finding #5)
+                        if !quiet {
+                            pb.println(format!(
+                                "Warning: {} finalize_from_db failed, using in-memory fallback: {}",
+                                c.name(),
+                                e
+                            ));
+                        }
+                        c.finalize()
+                    }
+                    None => c.finalize(),
+                }
             })
             .collect();
 
@@ -482,16 +528,17 @@ fn parse_diff_record(
     registry: &LanguageRegistry,
     repo: &gix::Repository,
     record: DiffRecord,
+    blob_oid: Option<gix::ObjectId>,
 ) -> ParsedChange {
     // Short-circuit: if no parser is registered for this file extension, skip
     // loading the blob entirely. This avoids reading binaries (.png, .pdf,
     // generated bundles, etc.) into memory only to discard them.
     let constructs = if registry.get_for_file(&record.file_path).is_some()
-        && blob_size_at_commit(repo, &record.commit.oid, &record.file_path)
+        && blob_size(repo, blob_oid, &record.commit.oid, &record.file_path)
             .map(|sz| sz <= MAX_PARSE_BLOB_BYTES)
             .unwrap_or(true)
     {
-        get_file_content_at_commit(repo, &record.commit.oid, &record.file_path)
+        blob_content(repo, blob_oid, &record.commit.oid, &record.file_path)
             .ok()
             .and_then(|content| {
                 let line_ranges: Vec<(u32, u32)> = record
@@ -515,6 +562,163 @@ fn parse_diff_record(
     ParsedChange {
         diff: Arc::new(record),
         constructs,
+    }
+}
+
+/// Blob size, preferring the new-blob `ObjectId` the diff already produced (a
+/// single object-header lookup) and falling back to resolving the path at the
+/// commit only when the oid is absent (deletions). (finding #25)
+fn blob_size(
+    repo: &gix::Repository,
+    blob_oid: Option<gix::ObjectId>,
+    oid: &str,
+    file_path: &str,
+) -> Option<u64> {
+    use gix::prelude::HeaderExt;
+    if let Some(id) = blob_oid {
+        return repo.objects.header(id).ok().map(|h| h.size());
+    }
+    blob_size_at_commit(repo, oid, file_path)
+}
+
+/// Blob content, preferring the diff's new-blob `ObjectId` (a direct object
+/// fetch) over re-walking commit→tree→path. (finding #25)
+fn blob_content(
+    repo: &gix::Repository,
+    blob_oid: Option<gix::ObjectId>,
+    oid: &str,
+    file_path: &str,
+) -> anyhow::Result<String> {
+    if let Some(id) = blob_oid {
+        let object = repo.find_object(id)?;
+        return Ok(String::from_utf8_lossy(&object.data).to_string());
+    }
+    get_file_content_at_commit(repo, oid, file_path)
+}
+
+/// tree-sitter grammar (and a stable language name for the parser cache) for a
+/// source path. Mirrors the identical extension→grammar map used by the
+/// complexity/clones/doc_coverage scanners, so a single shared parse yields a
+/// tree each of them accepts. (finding #23)
+fn grammar_for_path(path: &str) -> Option<(&'static str, tree_sitter::Language)> {
+    let ext = path.rsplit('.').next()?;
+    let pair: (&'static str, tree_sitter::Language) = match ext {
+        "rs" => ("Rust", tree_sitter_rust::LANGUAGE.into()),
+        "py" | "pyi" => ("Python", tree_sitter_python::LANGUAGE.into()),
+        "ts" | "tsx" => ("TypeScript", tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        "js" | "jsx" | "mjs" | "cjs" => ("JavaScript", tree_sitter_javascript::LANGUAGE.into()),
+        "java" => ("Java", tree_sitter_java::LANGUAGE.into()),
+        "go" => ("Go", tree_sitter_go::LANGUAGE.into()),
+        "kt" | "kts" => ("Kotlin", tree_sitter_kotlin_ng::LANGUAGE.into()),
+        "dart" => ("Dart", tree_sitter_dart::LANGUAGE.into()),
+        _ => return None,
+    };
+    Some(pair)
+}
+
+/// Peak number of parsed source files held in memory at once during the shared
+/// scan. Bounds the parallel parse's memory footprint (parsed trees + source
+/// buffers) regardless of repo size — the "memory budget" on the rayon fan-out.
+const SOURCE_SCAN_CHUNK: usize = 256;
+
+/// Single shared HEAD source scan: walk the tree once, parse each source blob
+/// once, and dispatch the parsed tree to every registered scanner — replacing
+/// the redundant per-collector walk+parse that complexity, clones and
+/// doc_coverage each used to do independently. (finding #23)
+///
+/// Parsing is fanned out across rayon workers in bounded chunks (each worker
+/// reuses one thread-local repo + per-language parser), but the parsed trees
+/// are fed to the scanners **sequentially, in the original tree-walk order** —
+/// scanners hold `&mut` state and some depend on file order (e.g. complexity's
+/// bounded top-N heap), so parallelizing only the parse keeps output identical.
+fn run_source_scan(
+    thread_safe_repo: &std::sync::Arc<gix::ThreadSafeRepository>,
+    scanners: &mut [&mut dyn crate::metrics::SourceScanner],
+    object_cache_bytes: usize,
+    progress: &crate::metrics::ProgressReporter,
+) -> anyhow::Result<()> {
+    let repo = thread_safe_repo.to_thread_local();
+    let head_commit = match repo.head_commit() {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+    let tree = head_commit.tree()?;
+    let mut files: Vec<(String, gix::ObjectId)> = Vec::new();
+    collect_source_files(&repo, &tree, "", &mut files);
+
+    let mut scanned = 0u64;
+    for batch in files.chunks(SOURCE_SCAN_CHUNK) {
+        // Parse this chunk in parallel; `map_init` gives each worker its own
+        // thread-local repo (gix repos aren't Sync) and parser cache. `collect`
+        // over an indexed parallel iterator preserves input order.
+        let parsed: Vec<Option<(String, String, tree_sitter::Tree)>> = batch
+            .par_iter()
+            .map_init(
+                || {
+                    let mut r = thread_safe_repo.to_thread_local();
+                    r.object_cache_size_if_unset(object_cache_bytes);
+                    (
+                        r,
+                        std::collections::HashMap::<&'static str, tree_sitter::Parser>::new(),
+                    )
+                },
+                |(repo, parsers), (path, oid)| {
+                    let (lang_name, lang) = grammar_for_path(path)?;
+                    let object = repo.find_object(*oid).ok()?;
+                    let blob = object.try_into_blob().ok()?;
+                    let source = std::str::from_utf8(&blob.data).ok()?.to_string();
+                    let parser = parsers.entry(lang_name).or_insert_with(|| {
+                        let mut p = tree_sitter::Parser::new();
+                        let _ = p.set_language(&lang);
+                        p
+                    });
+                    let parsed = parser.parse(&source, None)?;
+                    Some((path.clone(), source, parsed))
+                },
+            )
+            .collect();
+
+        // Feed sequentially, in order, so scanner output is deterministic.
+        for (path, source, tree) in parsed.into_iter().flatten() {
+            for s in scanners.iter_mut() {
+                s.scan_file(&path, &source, &tree);
+            }
+            scanned += 1;
+        }
+        progress.status(&format!("  scanning source files: {scanned}..."));
+    }
+    Ok(())
+}
+
+/// Walk the HEAD tree once, collecting `(path, blob_oid)` for every source file.
+fn collect_source_files(
+    repo: &gix::Repository,
+    tree: &gix::Tree,
+    prefix: &str,
+    out: &mut Vec<(String, gix::ObjectId)>,
+) {
+    for entry_res in tree.iter() {
+        let Ok(entry) = entry_res else { continue };
+        let name = entry.filename().to_string();
+        let full_path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let id = entry.oid();
+        let mode = entry.mode();
+        if mode.is_tree() {
+            if let Ok(subobj) = repo.find_object(id)
+                && let Ok(subtree) = subobj.try_into_tree()
+            {
+                collect_source_files(repo, &subtree, &full_path, out);
+            }
+        } else if mode.is_blob()
+            && crate::analysis::source_filter::is_source_file(&full_path)
+            && grammar_for_path(&full_path).is_some()
+        {
+            out.push((full_path, id.into()));
+        }
     }
 }
 

@@ -24,69 +24,45 @@ fn escape_html(s: &str) -> String {
         .replace('\'', "&#x27;")
 }
 
-/// A `Write` wrapper that rewrites any `</` byte sequence to `<\/` on the fly.
-/// Lets us stream serde_json directly into the HTML template without buffering
-/// the full JSON payload, while still preventing a literal `</script>` in the
-/// data from closing the surrounding `<script type="application/json">` block.
+/// A `Write` wrapper that rewrites every `<` byte to the JSON escape `<`
+/// on the fly. Lets us stream serde_json directly into the HTML template
+/// without buffering the full JSON payload, while still preventing the
+/// embedded data from breaking out of the surrounding
+/// `<script type="application/json">` block — both via a literal `</script>`
+/// and via a `<!--` comment start (which HTML parsers treat specially even
+/// inside a script element).
 ///
-/// Byte-oriented so it works correctly even if `<` lands on a buffer boundary.
+/// In the JSON we embed, `<` only ever appears inside string values, where
+/// `<` is an exactly-equivalent, valid encoding — so a blanket byte-level
+/// replacement is safe. Byte-oriented so it works correctly even if `<` lands
+/// on a buffer boundary.
 struct ScriptEscapeWriter<W: Write> {
     inner: W,
-    pending_lt: bool,
 }
 
 impl<W: Write> ScriptEscapeWriter<W> {
     fn new(inner: W) -> Self {
-        Self {
-            inner,
-            pending_lt: false,
-        }
+        Self { inner }
     }
 
-    fn finish(mut self) -> io::Result<W> {
-        if self.pending_lt {
-            self.inner.write_all(b"<")?;
-            self.pending_lt = false;
-        }
+    fn finish(self) -> io::Result<W> {
         Ok(self.inner)
     }
 }
 
 impl<W: Write> Write for ScriptEscapeWriter<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut i = 0;
-        while i < buf.len() {
-            if self.pending_lt {
-                if buf[i] == b'/' {
-                    self.inner.write_all(b"<\\/")?;
-                    i += 1;
-                } else {
-                    self.inner.write_all(b"<")?;
-                }
-                self.pending_lt = false;
-                continue;
+        let mut start = 0;
+        while let Some(pos) = memchr::memchr(b'<', &buf[start..]) {
+            let idx = start + pos;
+            if idx > start {
+                self.inner.write_all(&buf[start..idx])?;
             }
-            let rest = &buf[i..];
-            match memchr::memchr(b'<', rest) {
-                Some(pos) => {
-                    if pos > 0 {
-                        self.inner.write_all(&rest[..pos])?;
-                    }
-                    i += pos + 1;
-                    if i == buf.len() {
-                        self.pending_lt = true;
-                    } else if buf[i] == b'/' {
-                        self.inner.write_all(b"<\\/")?;
-                        i += 1;
-                    } else {
-                        self.inner.write_all(b"<")?;
-                    }
-                }
-                None => {
-                    self.inner.write_all(rest)?;
-                    i = buf.len();
-                }
-            }
+            self.inner.write_all(b"\\u003c")?;
+            start = idx + 1;
+        }
+        if start < buf.len() {
+            self.inner.write_all(&buf[start..])?;
         }
         Ok(buf.len())
     }
@@ -144,16 +120,16 @@ fn split_template() -> Vec<Segment> {
 /// template consumes plain strings for `display_name`, `description`, column
 /// labels, and message-valued cells — so we flatten everything here rather
 /// than teaching the frontend to understand the i18n envelope.
-fn build_report_json(results: &[MetricResult], catalog: &Catalog) -> Value {
+fn build_report_json(results: &[MetricResult], catalog: &Catalog, top: Option<usize>) -> Value {
     Value::Array(
         results
             .iter()
-            .map(|r| build_one_report(r, catalog))
+            .map(|r| build_one_report(r, catalog, top))
             .collect(),
     )
 }
 
-fn build_one_report(r: &MetricResult, catalog: &Catalog) -> Value {
+fn build_one_report(r: &MetricResult, catalog: &Catalog, top: Option<usize>) -> Value {
     let mut obj = Map::new();
     obj.insert("name".into(), json!(r.name));
     obj.insert(
@@ -175,7 +151,16 @@ fn build_one_report(r: &MetricResult, catalog: &Catalog) -> Value {
     obj.insert("column_labels".into(), json!(column_labels));
 
     if r.entry_groups.is_empty() {
-        obj.insert("entries".into(), build_entries(&r.entries, catalog));
+        // Apply `--top` to the flat entries list, mirroring the JSON writer.
+        // `entry_groups` are fixed-dimension buckets (e.g. hourly/daily) and
+        // are never truncated. `top: None` keeps the full list — the template
+        // then applies its own default display cutoff.
+        let total = r.entries.len();
+        let slice: &[MetricEntry] = match top {
+            Some(n) if n < total => &r.entries[..n],
+            _ => &r.entries[..],
+        };
+        obj.insert("entries".into(), build_entries(slice, catalog));
     } else {
         let groups: Vec<Value> = r
             .entry_groups
@@ -225,11 +210,12 @@ fn stream_html<W: Write>(
     writer: &mut W,
     results: &[MetricResult],
     locale: &str,
+    top: Option<usize>,
 ) -> anyhow::Result<()> {
     let segments = split_template();
     let now_escaped = escape_html(&chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
     let catalog = Catalog::load(locale);
-    let data = build_report_json(results, &catalog);
+    let data = build_report_json(results, &catalog, top);
 
     for seg in segments {
         match seg {
@@ -249,12 +235,12 @@ impl ReportWriter for HtmlWriter {
     fn write(&self, results: &[MetricResult], config: &OutputConfig) -> anyhow::Result<()> {
         if let Some(path) = &config.output_path {
             let mut writer = BufWriter::new(File::create(path)?);
-            stream_html(&mut writer, results, &config.locale)?;
+            stream_html(&mut writer, results, &config.locale, config.top)?;
             writer.flush()?;
         } else {
             let stdout = std::io::stdout();
             let mut writer = BufWriter::new(stdout.lock());
-            stream_html(&mut writer, results, &config.locale)?;
+            stream_html(&mut writer, results, &config.locale, config.top)?;
             writer.flush()?;
         }
         Ok(())
@@ -327,6 +313,55 @@ mod tests {
     }
 
     #[test]
+    fn test_html_top_limits_entries() {
+        use crate::types::{Column, report_description, report_display};
+        let result = MetricResult {
+            name: "authors".to_string(),
+            display_name: report_display("authors"),
+            description: report_description("authors"),
+            columns: vec![Column::in_report("authors", "commits")],
+            entry_groups: vec![],
+            entries: vec![
+                MetricEntry {
+                    key: "alice".to_string(),
+                    values: HashMap::from([("commits".to_string(), MetricValue::Count(50))]),
+                },
+                MetricEntry {
+                    key: "bob".to_string(),
+                    values: HashMap::from([("commits".to_string(), MetricValue::Count(30))]),
+                },
+                MetricEntry {
+                    key: "carol".to_string(),
+                    values: HashMap::from([("commits".to_string(), MetricValue::Count(10))]),
+                },
+            ],
+        };
+
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+
+        let config = OutputConfig {
+            format: OutputFormat::Html,
+            output_path: Some(path.clone()),
+            top: Some(2),
+            quiet: false,
+            locale: "en".into(),
+        };
+
+        HtmlWriter.write(&[result], &config).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        // `--top 2` truncates the flat entries embedded in the HTML JSON, just
+        // like the JSON writer, so the third entry never reaches the page.
+        assert!(content.contains("alice"), "first entry should be present");
+        assert!(content.contains("bob"), "second entry should be present");
+        assert!(
+            !content.contains("carol"),
+            "entry beyond --top must be dropped from embedded JSON"
+        );
+    }
+
+    #[test]
     fn test_html_escapes_special_chars() {
         assert_eq!(escape_html("<script>"), "&lt;script&gt;");
         assert_eq!(escape_html("a & b"), "a &amp; b");
@@ -346,12 +381,13 @@ mod tests {
         }
         let out = String::from_utf8(buf).unwrap();
         assert!(!out.contains("</script"));
-        assert!(out.contains("<\\/script"));
+        assert!(out.contains("\\u003c/script"));
     }
 
     #[test]
     fn script_escape_writer_handles_boundary_split() {
-        // `<` at end of one write, `/` at start of next — must still rewrite.
+        // `<` at end of one write, `/` at start of next — every `<` is escaped
+        // regardless of where the buffer boundary falls.
         let mut buf: Vec<u8> = Vec::new();
         {
             let mut w = ScriptEscapeWriter::new(&mut buf);
@@ -359,17 +395,32 @@ mod tests {
             w.write_all(b"/bar").unwrap();
             w.finish().unwrap();
         }
-        assert_eq!(String::from_utf8(buf).unwrap(), "foo<\\/bar");
+        assert_eq!(String::from_utf8(buf).unwrap(), "foo\\u003c/bar");
     }
 
     #[test]
-    fn script_escape_writer_preserves_lone_lt() {
+    fn script_escape_writer_escapes_lone_lt() {
         let mut buf: Vec<u8> = Vec::new();
         {
             let mut w = ScriptEscapeWriter::new(&mut buf);
             w.write_all(b"a < b").unwrap();
             w.finish().unwrap();
         }
-        assert_eq!(String::from_utf8(buf).unwrap(), "a < b");
+        assert_eq!(String::from_utf8(buf).unwrap(), "a \\u003c b");
+    }
+
+    #[test]
+    fn script_escape_writer_neutralizes_comment_start() {
+        // `<!--<script` must not be able to open an HTML comment or a nested
+        // <script> inside the embedded JSON block: every `<` is escaped.
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut w = ScriptEscapeWriter::new(&mut buf);
+            w.write_all(b"{\"x\":\"<!--<script\"}").unwrap();
+            w.finish().unwrap();
+        }
+        let out = String::from_utf8(buf).unwrap();
+        assert!(!out.contains('<'), "no raw `<` may survive: {out}");
+        assert_eq!(out, "{\"x\":\"\\u003c!--\\u003cscript\"}");
     }
 }

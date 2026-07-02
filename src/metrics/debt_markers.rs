@@ -152,11 +152,19 @@ impl MetricCollector for DebtMarkersCollector {
         }
 
         // Hits in files we skipped blaming go in with "unknown" age.
+        //
+        // Membership is keyed on (file, line) — a marker's identity within the
+        // enriched view. A single line yields at most one hit (the scan records
+        // the first regex match per line), so this key is unique per marker.
+        // The set is seeded from the already-blamed entries and grows as we add
+        // fallbacks, so a duplicate (file, line) still in `self.hits` is skipped
+        // exactly as the old O(H^2) `any()` scan did — but in O(1) per lookup.
+        let mut seen: std::collections::HashSet<(String, u32)> = enriched
+            .iter()
+            .map(|e| (e.hit.file.clone(), e.hit.line))
+            .collect();
         for hit in &self.hits {
-            if enriched
-                .iter()
-                .any(|e| e.hit.file == hit.file && e.hit.line == hit.line)
-            {
+            if !seen.insert((hit.file.clone(), hit.line)) {
                 continue;
             }
             enriched.push(EnrichedMarker {
@@ -277,6 +285,12 @@ fn walk_tree(
                 walk_tree(repo, &subtree, &full_path, hits, scanned, progress);
             }
         } else if mode.is_blob() {
+            // Filter non-source files up front — mirrors clones.rs /
+            // complexity.rs — so blobs that `is_source_file` would reject never
+            // enter the marker scan (nor the not-blamed fallback downstream).
+            if !is_source_file(&full_path) {
+                continue;
+            }
             let Ok(obj) = repo.find_object(id) else {
                 continue;
             };
@@ -546,6 +560,22 @@ mod tests {
         scan_file("q.sql", src, sql, &mut hits);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].marker, "HACK");
+    }
+
+    #[test]
+    fn walk_tree_gate_rejects_non_source_blobs_language_would_accept() {
+        // Regression guard for the not-blamed fallback: `detect_language_info`
+        // recognises data/doc files (Markdown, JSON), so the old `walk_tree`
+        // scanned them and their markers leaked into the fallback. The
+        // `is_source_file` gate added before scanning must reject exactly these
+        // paths so they never enter the scan (nor the fallback).
+        assert!(detect_language_info("NOTES.md", None).is_some());
+        assert!(!is_source_file("NOTES.md"));
+        assert!(detect_language_info("config.json", None).is_some());
+        assert!(!is_source_file("config.json"));
+
+        // A real source file must still pass the gate.
+        assert!(is_source_file("src/lib.rs"));
     }
 
     #[test]

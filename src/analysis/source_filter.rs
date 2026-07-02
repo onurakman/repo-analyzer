@@ -24,6 +24,16 @@
 //!    If no language is detected, treat it as not source code.
 
 use crate::langs::detect_language_info;
+use std::collections::HashMap;
+use std::sync::{LazyLock, RwLock};
+
+/// Process-wide memoization cache for [`is_source_file`]. Classification is
+/// pure (depends only on the path string) and involves ~168 fancy-regex
+/// checks plus language detection, yet 16+ collectors re-classify the same
+/// paths repeatedly. Caching by path collapses that to one classification per
+/// distinct path for the whole process lifetime.
+static CACHE: LazyLock<RwLock<HashMap<String, bool>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// Language names (as they appear in `languages.json5`) treated as non-code:
 /// data formats, markup, docs, and configuration dialects without logic.
@@ -170,6 +180,28 @@ const NON_CODE_FILENAMES: &[&str] = &[
 /// and lockfiles all return `false`.
 #[must_use]
 pub fn is_source_file(path: &str) -> bool {
+    // Read-lock fast path: return a previously computed classification without
+    // re-running the regex/language-detection pipeline.
+    if let Ok(cache) = CACHE.read()
+        && let Some(&cached) = cache.get(path)
+    {
+        return cached;
+    }
+
+    let result = classify_source_file(path);
+
+    // Write-lock to memoize the result on miss.
+    if let Ok(mut cache) = CACHE.write() {
+        cache.insert(path.to_owned(), result);
+    }
+
+    result
+}
+
+/// Pure classification pipeline behind [`is_source_file`]. Kept separate so the
+/// public entry point can memoize results in [`CACHE`]. The behaviour here must
+/// remain byte-identical to the previous inline implementation.
+fn classify_source_file(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
 
     // Any *.lock file is a generated artifact, regardless of language detection.
@@ -188,12 +220,15 @@ pub fn is_source_file(path: &str) -> bool {
         return false;
     }
 
-    // Substring match against the path with a synthetic leading slash so that
-    // both `assets/foo.css` and `packages/x/assets/foo.css` hit `/assets/`.
-    let guarded = format!("/{path}");
+    // Substring match with a synthetic leading slash so that both
+    // `assets/foo.css` and `packages/x/assets/foo.css` hit `/assets/`. We avoid
+    // allocating a `"/{path}"` string on this hot path: prepending a slash makes
+    // a segment like `/assets/` match iff `path` either contains it verbatim
+    // (nested case) or starts with the slash-stripped form `assets/` (top-level
+    // case). Those two checks are exactly equivalent to the guarded `contains`.
     if NON_CODE_PATH_SEGMENTS
         .iter()
-        .any(|seg| guarded.contains(seg))
+        .any(|seg| path.contains(seg) || path.starts_with(&seg[1..]))
     {
         return false;
     }
@@ -438,6 +473,30 @@ mod tests {
         assert!(!is_source_file(".gradle/build-scan-data/scan.json"));
         assert!(!is_source_file("app/.dart_tool/package_config.json"));
         assert!(!is_source_file(".pub-cache/hosted/pub.dev/foo.dart"));
+    }
+
+    #[test]
+    fn memoized_repeated_calls_are_stable() {
+        // Repeated calls must return the same value (cache hit path), and a
+        // known source vs non-source path must classify correctly and stay
+        // consistent across calls.
+        let source = "src/deep/nested/module.rs";
+        let non_source = "docs/nested/guide.md";
+
+        let first_source = is_source_file(source);
+        let first_non_source = is_source_file(non_source);
+
+        assert!(first_source, "expected a .rs file to be classified as source");
+        assert!(
+            !first_non_source,
+            "expected a markdown doc to be classified as non-source"
+        );
+
+        // Subsequent calls hit the cache and must agree with the first result.
+        for _ in 0..5 {
+            assert_eq!(is_source_file(source), first_source);
+            assert_eq!(is_source_file(non_source), first_non_source);
+        }
     }
 
     #[test]

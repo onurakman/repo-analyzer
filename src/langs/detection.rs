@@ -91,27 +91,49 @@ pub fn detect_language_info(filename: &str, content: Option<&str>) -> Option<&'s
     map_to_codestats(resolved)
 }
 
+/// Linguist → codestats name aliases. Every target on the right MUST exist as
+/// a codestats key in `languages.json5`; the `alias_targets_exist` test guards
+/// this. Comparison is ASCII-case-insensitive (see [`map_to_codestats`]).
+const CODESTATS_ALIASES: &[(&str, &str)] = &[
+    ("Shell", "Bash"),
+    ("TSX", "TypeScript"),
+    ("JSX", "JavaScript"),
+    ("Cython", "Python"),
+    ("HTML+ERB", "HTML"),
+    ("JavaScript+ERB", "JavaScript"),
+    ("TypeScript+ERB", "TypeScript"),
+    ("Ruby+ERB", "Ruby"),
+    ("Batchfile", "Batch"),
+    ("Fortran Free Form", "Fortran"),
+    ("Tcsh", "C Shell"),
+    ("TeX", "TeX/LaTeX"),
+    ("Reason", "ReasonML"),
+    ("LLVM", "LLVM IR"),
+    ("Metal", "Metal Shading Language"),
+    ("Visual Basic .NET", "Visual Basic/Visual Basic .NET"),
+    ("Jinja", "Jinja2"),
+    ("Liquid", "Liquid Templates"),
+    ("Modula-2", "Modula-2/3"),
+];
+
 /// Map a Linguist language name to the corresponding codestats [`Language`]
-/// entry. Direct name match first; small alias table handles the handful of
-/// names that differ between the two datasets. Returns `None` if Linguist
-/// detects a language codestats doesn't know (rare — accepted regression).
+/// entry. Direct (case-insensitive) name match first; the [`CODESTATS_ALIASES`]
+/// table handles the names that differ between the two datasets. Matching is
+/// ASCII-case-insensitive so casing drift between the datasets doesn't silently
+/// drop languages. Returns `None` if Linguist detects a language codestats
+/// doesn't know (rare — accepted regression).
 fn map_to_codestats(linguist_name: &str) -> Option<&'static Language> {
-    if let Some(lang) = LANGUAGES.iter().find(|l| l.name == linguist_name) {
+    if let Some(lang) = LANGUAGES
+        .iter()
+        .find(|l| l.name.eq_ignore_ascii_case(linguist_name))
+    {
         return Some(lang);
     }
-    let alias = match linguist_name {
-        "Shell" => "Bash",
-        "TSX" => "TypeScript",
-        "JSX" => "JavaScript",
-        "Vim Script" => "Vim",
-        "Cython" => "Python",
-        "HTML+ERB" => "HTML",
-        "JavaScript+ERB" => "JavaScript",
-        "TypeScript+ERB" => "TypeScript",
-        "Ruby+ERB" => "Ruby",
-        _ => return None,
-    };
-    LANGUAGES.iter().find(|l| l.name == alias)
+    let alias = CODESTATS_ALIASES
+        .iter()
+        .find(|(from, _)| from.eq_ignore_ascii_case(linguist_name))
+        .map(|(_, to)| *to)?;
+    LANGUAGES.iter().find(|l| l.name.eq_ignore_ascii_case(alias))
 }
 
 #[inline]
@@ -206,5 +228,24 @@ mod tests {
         // Linguist calls it "Shell"; codestats calls it "Bash".
         let sh = detect_language_info("script.sh", None).expect("shell → bash alias");
         assert_eq!(sh.name, "Bash");
+    }
+
+    #[test]
+    fn alias_targets_exist() {
+        // The real invariant: every alias target names a real codestats
+        // language, and every alias source resolves to *some* language (never
+        // silently dropped). We don't require map_to_codestats(from) == to,
+        // because a `from` that also matches a language name case-insensitively
+        // legitimately resolves via the direct match instead of the alias.
+        for (from, to) in CODESTATS_ALIASES {
+            assert!(
+                LANGUAGES.iter().any(|l| l.name.eq_ignore_ascii_case(to)),
+                "alias target {to:?} is not a real codestats language"
+            );
+            assert!(
+                map_to_codestats(from).is_some(),
+                "alias source {from:?} did not resolve to any language"
+            );
+        }
     }
 }

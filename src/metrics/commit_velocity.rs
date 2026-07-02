@@ -33,7 +33,8 @@ impl MetricCollector for CommitVelocityCollector {
         &mut self,
         store: &ChangeStore,
         _progress: &crate::metrics::ProgressReporter,
-    ) -> Option<MetricResult> {
+    ) -> Option<anyhow::Result<MetricResult>> {
+        Some((|| -> anyhow::Result<MetricResult> {
         let (weekly, monthly) = store
             .with_conn(
                 |conn| -> anyhow::Result<(Vec<MetricEntry>, Vec<MetricEntry>)> {
@@ -48,7 +49,7 @@ impl MetricCollector for CommitVelocityCollector {
                            SELECT commit_oid,
                                   MIN(commit_ts) AS ts,
                                   SUM(additions + deletions) AS lines
-                             FROM changes
+                             FROM non_merge_changes
                             GROUP BY commit_oid
                        )
                       GROUP BY week
@@ -77,7 +78,7 @@ impl MetricCollector for CommitVelocityCollector {
                            SELECT commit_oid,
                                   MIN(commit_ts) AS ts,
                                   SUM(additions + deletions) AS lines
-                             FROM changes
+                             FROM non_merge_changes
                             GROUP BY commit_oid
                        )
                       GROUP BY month
@@ -99,11 +100,9 @@ impl MetricCollector for CommitVelocityCollector {
 
                     Ok((weekly, monthly))
                 },
-            )
-            .ok()?
-            .ok()?;
+            )??;
 
-        Some(MetricResult {
+        Ok(MetricResult {
             name: "commit_velocity".into(),
             display_name: report_display("commit_velocity"),
             description: report_description("commit_velocity"),
@@ -125,6 +124,7 @@ impl MetricCollector for CommitVelocityCollector {
                 },
             ],
         })
+        })())
     }
 }
 

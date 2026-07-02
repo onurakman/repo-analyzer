@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
-use memchr::{memchr2, memrchr};
+use aho_corasick::AhoCorasick;
+use memchr::memrchr;
 
 use crate::langs::{
     Language,
@@ -19,6 +20,10 @@ pub enum LineType {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct CommentState {
     block_comment_depth: usize,
+    /// Index of the `(start, end)` delimiter pair that opened the current block
+    /// comment, so its matching end is found even in languages with several
+    /// block-comment pairs. Meaningful only while `block_comment_depth > 0`.
+    block_pair: usize,
 }
 
 impl CommentState {
@@ -29,8 +34,14 @@ impl CommentState {
     }
 
     #[inline]
-    const fn enter_first_block(&mut self) {
+    const fn enter_first_block(&mut self, pair: usize) {
         self.block_comment_depth = 1;
+        self.block_pair = pair;
+    }
+
+    #[inline]
+    const fn block_pair(&self) -> usize {
+        self.block_pair
     }
 
     #[inline]
@@ -87,12 +98,36 @@ pub fn count_lines(content: &str, lang: Option<&Language>) -> LineCounts {
     counts
 }
 
+/// Position of the first *valid* line-comment token in `line`, honoring the
+/// same word-boundary rule as [`is_valid_line_comment_match`] so a token like
+/// `#` isn't matched inside an identifier.
+#[inline]
+fn first_valid_line_comment_pos(
+    line: &str,
+    line_comments: &AhoCorasick,
+    lang: &Language,
+) -> Option<usize> {
+    for matched in line_comments.find_iter(line) {
+        let token = lang.line_comments[matched.pattern().as_usize()];
+        if is_valid_line_comment_match(line, matched.end(), token) {
+            return Some(matched.start());
+        }
+    }
+    None
+}
+
 /// Process block comments on a line, updating state and detecting code.
 /// Returns: (remaining line portion, has_code_outside_comments).
+///
+/// `line_comments`/`lang` let the scanner honor line-comment precedence: a
+/// valid `//` that opens at or before a `/*` on the same line means the `/*`
+/// is *inside* the line comment and must not open a block. (finding #4)
 #[inline]
 fn handle_block_comments<'a>(
     line: &'a str,
     matchers: &BlockCommentMatchers,
+    line_comments: Option<&AhoCorasick>,
+    lang: &Language,
     comment_state: &mut CommentState,
     nested: bool,
 ) -> (&'a str, bool) {
@@ -100,17 +135,28 @@ fn handle_block_comments<'a>(
     let mut has_code = false;
     while !line_remainder.is_empty() {
         if !comment_state.is_in_comment() {
-            if let Some((pos, start_len)) = matchers.find_block_start(line_remainder) {
+            if let Some((pos, start_len, pair)) = matchers.find_block_start(line_remainder) {
+                // Leftmost token wins: if a valid line comment opens at or
+                // before this block-start, the `/*` lives inside the line
+                // comment. Stop here (without consuming) and let the caller's
+                // line-comment pass classify the remainder — critically we do
+                // NOT enter block state, so the rest of the file is unaffected.
+                if let Some(lc_pos) = line_comments
+                    .and_then(|lc| first_valid_line_comment_pos(line_remainder, lc, lang))
+                    && lc_pos <= pos
+                {
+                    break;
+                }
                 if pos > 0 && contains_non_whitespace(&line_remainder[..pos]) {
                     has_code = true;
                 }
                 line_remainder = &line_remainder[pos + start_len..];
-                comment_state.enter_first_block();
+                comment_state.enter_first_block(pair);
             } else {
                 break;
             }
-        } else if let Some((pos, len, found_nested_start)) =
-            matchers.find_block_end_or_nested_start(line_remainder, nested)
+        } else if let Some((pos, len, found_nested_start)) = matchers
+            .find_block_end_or_nested_start(line_remainder, nested, comment_state.block_pair())
         {
             if nested && found_nested_start {
                 comment_state.enter_nested_block();
@@ -133,6 +179,13 @@ pub fn classify_line(
     comment_state: &mut CommentState,
     is_first_line: bool,
 ) -> LineType {
+    // A UTF-8 BOM (U+FEFF) at the very start of a file precedes the first
+    // line's content; strip it so the first line isn't misclassified. (#42)
+    let line = if is_first_line {
+        line.strip_prefix('\u{feff}').unwrap_or(line)
+    } else {
+        line
+    };
     let trimmed = trim_ascii(line);
     if trimmed.is_empty() {
         return LineType::Blank;
@@ -161,8 +214,14 @@ pub fn classify_line(
     let mut line_remainder: &str = trimmed;
     let matchers = language_matchers(lang);
     let mut has_code = if let Some(block_comments) = matchers.block_comments.as_ref() {
-        let (remainder, found_code) =
-            handle_block_comments(trimmed, block_comments, comment_state, lang.nested_blocks);
+        let (remainder, found_code) = handle_block_comments(
+            trimmed,
+            block_comments,
+            matchers.line_comments.as_ref(),
+            lang,
+            comment_state,
+            lang.nested_blocks,
+        );
         line_remainder = remainder;
         found_code
     } else {
@@ -228,24 +287,7 @@ fn trim_ascii(line: &str) -> &str {
 
 #[inline]
 fn contains_non_whitespace(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    let mut idx = 0;
-    while idx < bytes.len() {
-        let byte = bytes[idx];
-        if !is_ascii_ws(byte) {
-            return true;
-        }
-        if byte == b' ' || byte == b'\t' {
-            if let Some(pos) = memchr2(b' ', b'\t', &bytes[idx..]) {
-                idx += pos + 1;
-            } else {
-                idx = bytes.len();
-            }
-        } else {
-            idx += 1;
-        }
-    }
-    false
+    s.bytes().any(|b| !is_ascii_ws(b))
 }
 
 #[inline]
@@ -371,5 +413,73 @@ mod tests {
         let b = a; // Copy
         assert_eq!(a, b);
         assert_ne!(LineType::Code, LineType::Comment);
+    }
+
+    #[test]
+    fn line_comment_containing_block_opener_stays_line_comment() {
+        let rust = detect_language_info("foo.rs", None).expect("rust");
+        // `// ... /*` is a single line comment and must NOT flip the classifier
+        // into block-comment state — the following code lines must still count
+        // as code rather than being swallowed as comment. (finding #4)
+        let src = "// see /*\nfn a() {}\nfn b() {}\n";
+        let counts = count_lines(src, Some(rust));
+        assert_eq!(counts.comment, 1, "the // line is one comment");
+        assert_eq!(counts.code, 2, "both fn lines stay code, not swallowed");
+    }
+
+    #[test]
+    fn code_then_line_comment_with_block_opener_is_code() {
+        let rust = detect_language_info("foo.rs", None).expect("rust");
+        let src = "let x = 1; // note /* not a block\nfn a() {}\n";
+        let counts = count_lines(src, Some(rust));
+        assert_eq!(counts.code, 2, "code precedes the //, so line 1 is code");
+        assert_eq!(counts.comment, 0);
+    }
+
+    #[test]
+    fn bom_prefixed_first_line_is_classified_by_content() {
+        let rust = detect_language_info("foo.rs", None).expect("rust");
+        // A UTF-8 BOM before the first line's code must be stripped so the line
+        // is still classified by its actual content. (#42)
+        let mut state = CommentState::new();
+        assert_eq!(
+            classify_line("\u{feff}fn main() {}", Some(rust), &mut state, true),
+            LineType::Code,
+            "BOM-prefixed code line stays code"
+        );
+        // A BOM followed by a line comment is still a comment.
+        let mut state = CommentState::new();
+        assert_eq!(
+            classify_line("\u{feff}// hello", Some(rust), &mut state, true),
+            LineType::Comment,
+            "BOM-prefixed comment line stays comment"
+        );
+        // The BOM strip only applies to the first line.
+        let mut state = CommentState::new();
+        assert_eq!(
+            classify_line("\u{feff}fn main() {}", Some(rust), &mut state, false),
+            LineType::Code
+        );
+    }
+
+    #[test]
+    fn contains_non_whitespace_detects_content() {
+        assert!(!contains_non_whitespace(""));
+        assert!(!contains_non_whitespace("   \t \r\n"));
+        assert!(contains_non_whitespace("x"));
+        assert!(contains_non_whitespace("   x"));
+        assert!(contains_non_whitespace("\t \tx \t"));
+    }
+
+    #[test]
+    fn block_opener_before_line_comment_still_opens_block() {
+        let rust = detect_language_info("foo.rs", None).expect("rust");
+        // `/*` opens before the `//`, so it's a genuine block that swallows the
+        // `//` and spans lines until `*/` — the leftmost-token rule preserves
+        // this pre-existing correct behavior.
+        let src = "/* open // still block\nstill\n*/\nfn a() {}\n";
+        let counts = count_lines(src, Some(rust));
+        assert_eq!(counts.comment, 3, "three block-comment lines");
+        assert_eq!(counts.code, 1);
     }
 }

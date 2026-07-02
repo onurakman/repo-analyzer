@@ -80,8 +80,11 @@ impl MetricCollector for HalfLifeCollector {
         // Cap files to bound memory: blame is O(history size × file size) per file
         // and gix-blame can momentarily hold the entire file content + diff state
         // for every parent. 50 files × ~200 MB peak = a manageable ceiling.
-        paths.sort_by_key(|(p, _)| p.clone());
-        paths.truncate(MAX_FILES);
+        //
+        // Select the *most-relevant* files to keep under that cap rather than an
+        // alphabetical prefix: drop non-source paths first, then prefer the
+        // largest blobs (the strongest available proxy for churn/interest here).
+        let paths = select_files(paths);
 
         // Stop blame from walking past the ancient cutoff — anything older than
         // that already counts as "ancient" wholesale, and the deeper traversal
@@ -231,6 +234,21 @@ fn commit_timestamp(repo: &gix::Repository, oid: gix::ObjectId) -> Option<i64> {
     Some(author.time().ok()?.seconds)
 }
 
+/// Chooses which candidate blobs to blame under the [`MAX_FILES`] cap.
+///
+/// The cap exists to bound blame's memory cost, so which files survive it
+/// matters: keeping an alphabetical prefix is a biased sample. Instead, drop
+/// anything that isn't real source (config/data/vendored/generated) and then
+/// order by blob size descending so the largest — and thus most churn-prone
+/// and interesting — files are the ones retained.
+fn select_files(mut paths: Vec<(String, u64)>) -> Vec<(String, u64)> {
+    paths.retain(|(p, _)| is_source_file(p));
+    // Largest first; tie-break on path so output is deterministic.
+    paths.sort_by(|(pa, sa), (pb, sb)| sb.cmp(sa).then_with(|| pa.cmp(pb)));
+    paths.truncate(MAX_FILES);
+    paths
+}
+
 fn collect_source_blobs(
     repo: &gix::Repository,
     tree: &gix::Tree,
@@ -320,5 +338,37 @@ mod tests {
         // Should pick the LAST extension after final dot.
         assert!(is_source("foo.bar.rs"));
         assert!(!is_source("foo.rs.bak"));
+    }
+
+    #[test]
+    fn select_files_drops_non_source_and_prefers_largest() {
+        let candidates = vec![
+            ("zeta.rs".to_string(), 10),
+            ("alpha.rs".to_string(), 100),
+            ("config.yaml".to_string(), 9_999), // non-source: must be dropped
+            ("beta.rs".to_string(), 50),
+        ];
+
+        let selected = select_files(candidates);
+
+        // Non-source dropped, and remaining ordered by size descending —
+        // NOT the alphabetical prefix ("alpha", "beta", "config") the old
+        // code would have kept.
+        let ordered: Vec<&str> = selected.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(ordered, vec!["alpha.rs", "beta.rs", "zeta.rs"]);
+    }
+
+    #[test]
+    fn select_files_caps_to_max_files() {
+        let candidates: Vec<(String, u64)> = (0..(MAX_FILES + 20))
+            .map(|i| (format!("src/f{i}.rs"), i as u64))
+            .collect();
+
+        let selected = select_files(candidates);
+
+        assert_eq!(selected.len(), MAX_FILES);
+        // Largest survives the cap; smallest is discarded.
+        assert!(selected.iter().any(|(p, _)| p == "src/f69.rs"));
+        assert!(!selected.iter().any(|(p, _)| p == "src/f0.rs"));
     }
 }

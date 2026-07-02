@@ -44,7 +44,8 @@ impl MetricCollector for SuccessionCollector {
         &mut self,
         store: &ChangeStore,
         progress: &crate::metrics::ProgressReporter,
-    ) -> Option<MetricResult> {
+    ) -> Option<anyhow::Result<MetricResult>> {
+        Some((|| -> anyhow::Result<MetricResult> {
         struct AuthorRow {
             commits: u64,
             last_ts: i64,
@@ -60,18 +61,49 @@ impl MetricCollector for SuccessionCollector {
         let (files, global_last) = store
             .with_conn(|conn| -> anyhow::Result<(Files, GlobalLast)> {
                 progress.status(&format!(
-                    "  succession: picking top {TOP_FILES} active files..."
+                    "  succession: picking top {TOP_FILES} active source files..."
                 ));
-                // Top-N files by commit activity. Everything else is dropped.
-                conn.execute_batch(&format!(
+                // Top-N *source* files by commit activity. Stream files ordered
+                // by activity DESC and filter non-source files in Rust up front
+                // so config, lockfiles and docs don't consume the N slots; stop
+                // once N source files have been accepted. Everything else is
+                // dropped.
+                conn.execute_batch(
                     "DROP TABLE IF EXISTS __top_files;
-                     CREATE TEMP TABLE __top_files AS
-                       SELECT file_path AS file
-                         FROM changes
-                        GROUP BY file_path
-                        ORDER BY COUNT(DISTINCT commit_oid) DESC
-                        LIMIT {TOP_FILES};"
-                ))?;
+                     CREATE TEMP TABLE __top_files (file TEXT PRIMARY KEY);",
+                )?;
+                let top_files: Vec<String> = {
+                    let mut stmt = conn.prepare(
+                        "SELECT file_path AS file
+                           FROM non_merge_changes
+                          WHERE file_path IN (SELECT file_path FROM live_files)
+                          GROUP BY file_path
+                          ORDER BY COUNT(DISTINCT commit_oid) DESC",
+                    )?;
+                    let rows = stmt.query_map([], |row| {
+                        let f: String = row.get(0)?;
+                        Ok(f)
+                    })?;
+                    let mut out: Vec<String> = Vec::new();
+                    for r in rows {
+                        let f = r?;
+                        if !is_source_file(&f) {
+                            continue;
+                        }
+                        out.push(f);
+                        if out.len() as i64 == TOP_FILES {
+                            break;
+                        }
+                    }
+                    out
+                };
+                {
+                    let mut ins =
+                        conn.prepare("INSERT INTO __top_files(file) VALUES (?1)")?;
+                    for f in &top_files {
+                        ins.execute(rusqlite::params![f])?;
+                    }
+                }
 
                 progress.status("  succession: per-file per-author detail...");
                 let mut files: Files = HashMap::new();
@@ -82,7 +114,7 @@ impl MetricCollector for SuccessionCollector {
                                 COUNT(DISTINCT ch.commit_oid) AS commits,
                                 MIN(ch.commit_ts)             AS first_ts,
                                 MAX(ch.commit_ts)             AS last_ts
-                           FROM changes ch
+                           FROM non_merge_changes ch
                            JOIN __top_files t ON t.file = ch.file_path
                           GROUP BY ch.file_path, ch.email",
                     )?;
@@ -115,7 +147,7 @@ impl MetricCollector for SuccessionCollector {
                 let mut global_last: GlobalLast = HashMap::new();
                 {
                     let mut stmt2 =
-                        conn.prepare("SELECT email, MAX(commit_ts) FROM changes GROUP BY email")?;
+                        conn.prepare("SELECT email, MAX(commit_ts) FROM non_merge_changes GROUP BY email")?;
                     let rows2 = stmt2.query_map([], |row| {
                         let email: String = row.get(0)?;
                         let last: i64 = row.get(1)?;
@@ -129,9 +161,7 @@ impl MetricCollector for SuccessionCollector {
 
                 conn.execute("DROP TABLE IF EXISTS __top_files", [])?;
                 Ok((files, global_last))
-            })
-            .ok()?
-            .ok()?;
+            })??;
 
         let now = Utc::now();
         let active_cutoff = (now - Duration::days(INACTIVE_DAYS)).timestamp();
@@ -179,7 +209,7 @@ impl MetricCollector for SuccessionCollector {
         entries.sort_by_key(|e| std::cmp::Reverse(status_rank(e)));
         entries.truncate(200);
 
-        Some(MetricResult {
+        Ok(MetricResult {
             name: "succession".into(),
             display_name: report_display("succession"),
             description: report_description("succession"),
@@ -194,6 +224,7 @@ impl MetricCollector for SuccessionCollector {
             ],
             entries,
         })
+        })())
     }
 }
 
@@ -387,7 +418,7 @@ mod tests {
         ]);
         let mut coll = SuccessionCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(
             status_code(entry_for(&r, "a.rs")),
@@ -400,7 +431,7 @@ mod tests {
         let store = store_with(&[make_change_at("a.rs", "c1", "alice@x", ancient())]);
         let mut coll = SuccessionCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(
             status_code(entry_for(&r, "a.rs")),
@@ -416,7 +447,34 @@ mod tests {
         ]);
         let mut coll = SuccessionCollector::new();
         let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
+            .expect("db result");
+        assert!(r.entries.iter().any(|e| e.key == "real.rs"));
+        assert!(!r.entries.iter().any(|e| e.key == "Cargo.lock"));
+    }
+
+    #[test]
+    fn finalize_from_db_source_selection_not_starved_by_active_non_source() {
+        // A non-source file is far more active than the source file. The
+        // top-N selection filters non-source files in Rust *before* taking
+        // the slots, so the source file must still be selected and emitted.
+        let mut changes = vec![
+            make_change_at("real.rs", "s1", "alice@x", recent()),
+            make_change_at("real.rs", "s2", "alice@x", recent()),
+        ];
+        for i in 0..10 {
+            changes.push(make_change_at(
+                "Cargo.lock",
+                &format!("l{i}"),
+                "alice@x",
+                recent(),
+            ));
+        }
+        let store = store_with(&changes);
+        let mut coll = SuccessionCollector::new();
+        let r = coll
             .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
             .expect("db result");
         assert!(r.entries.iter().any(|e| e.key == "real.rs"));
         assert!(!r.entries.iter().any(|e| e.key == "Cargo.lock"));
@@ -431,7 +489,7 @@ mod tests {
         ]);
         let mut coll = SuccessionCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(r.entries[0].key, "orphan.rs");
     }
@@ -448,7 +506,7 @@ mod tests {
         ]);
         let mut coll = SuccessionCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         let entry = entry_for(&r, "a.rs");
         match entry.values.get("original_author") {

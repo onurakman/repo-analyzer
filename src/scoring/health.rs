@@ -13,14 +13,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::messages;
+use crate::metrics::churn_pareto::SUMMARY_KEY;
 use crate::types::{
     Column, EntryGroup, LocalizedMessage, MetricEntry, MetricResult, MetricValue, Severity,
     report_description, report_display,
 };
-
-/// Weight of each pillar in the overall score. Equal weighting keeps the
-/// surface transparent — one pillar can't dominate silently.
-const PILLAR_WEIGHT: f64 = 1.0 / 5.0;
 
 /// How many concrete action items to surface in the "Actions" group across
 /// all pillars. Keeps the output skimmable.
@@ -36,17 +33,27 @@ pub fn compute_health(results: &[MetricResult], repo_path: &Path) -> Option<Metr
     let by_name: HashMap<&str, &MetricResult> =
         results.iter().map(|r| (r.name.as_str(), r)).collect();
 
-    let pillars: Vec<Pillar> = vec![
+    let pillars: Vec<Pillar> = [
         score_commit_discipline(&by_name),
         score_bus_factor(&by_name),
         score_refactoring_debt(&by_name),
         score_tidiness(&by_name),
         score_change_concentration(&by_name),
-    ];
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
 
-    let overall_score = {
-        let sum: f64 = pillars.iter().map(|p| p.score * PILLAR_WEIGHT).sum();
-        sum.round().clamp(0.0, 100.0) as u64
+    // Renormalize over the pillars that actually have data. A missing collector
+    // no longer contributes a phantom 100 that silently inflates the overall.
+    // When no pillar has data at all (e.g. `--only health`), keep the report
+    // present so consumers keying `reports.health` don't break, but score it 0
+    // rather than a fabricated 100. (finding #8)
+    let overall_score = if pillars.is_empty() {
+        0
+    } else {
+        let sum: f64 = pillars.iter().map(|p| p.score).sum();
+        (sum / pillars.len() as f64).round().clamp(0.0, 100.0) as u64
     };
 
     let hygiene = repo_hygiene_findings(repo_path, &by_name);
@@ -136,11 +143,15 @@ fn level_for_score(score: f64) -> LocalizedMessage {
 }
 
 /// Pillar 1: commit hygiene signals from the `quality` report.
-fn score_commit_discipline(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
-    let quality = by_name.get("quality");
+fn score_commit_discipline(by_name: &HashMap<&str, &MetricResult>) -> Option<Pillar> {
+    // Absent `quality` report → no signal; omit this pillar rather than scoring
+    // a phantom 100 that inflates the overall. (finding #8)
+    let quality = by_name.get("quality")?;
     let pct = |key: &str| -> f64 {
         quality
-            .and_then(|r| r.entries.iter().find(|e| e.key == key))
+            .entries
+            .iter()
+            .find(|e| e.key == key)
             .and_then(|e| match e.values.get("percent") {
                 Some(MetricValue::Float(f)) => Some(*f),
                 _ => None,
@@ -203,17 +214,21 @@ fn score_commit_discipline(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
         .with_param("revert", format!("{:.0}", revert))
         .with_param("merge", format!("{:.0}", merge));
 
-    Pillar {
+    Some(Pillar {
         key: "commit_discipline",
         display: messages::HEALTH_PILLAR_COMMIT_DISCIPLINE,
         score,
         summary,
         actions,
-    }
+    })
 }
 
 /// Pillar 2: bus-factor risk from `knowledge_silos` and `succession`.
-fn score_bus_factor(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
+fn score_bus_factor(by_name: &HashMap<&str, &MetricResult>) -> Option<Pillar> {
+    // Needs at least one of its source reports; omit otherwise. (finding #8)
+    if by_name.get("knowledge_silos").is_none() && by_name.get("succession").is_none() {
+        return None;
+    }
     let silos = by_name
         .get("knowledge_silos")
         .map(|r| r.entries.as_slice())
@@ -298,7 +313,7 @@ fn score_bus_factor(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
         }
     }
 
-    Pillar {
+    Some(Pillar {
         key: "bus_factor",
         display: messages::HEALTH_PILLAR_BUS_FACTOR,
         score,
@@ -306,12 +321,20 @@ fn score_bus_factor(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
             .with_param("high_risk", high_risk as u64)
             .with_param("stale", stale as u64),
         actions,
-    }
+    })
 }
 
 /// Pillar 3: refactoring debt from `complexity`, `outliers`, and stale
 /// debt markers (TODO/FIXME/HACK/XXX comments older than 6 months).
-fn score_refactoring_debt(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
+fn score_refactoring_debt(by_name: &HashMap<&str, &MetricResult>) -> Option<Pillar> {
+    // Omit only when *every* source report is absent; a present-but-empty
+    // report (clean repo) still deserves a real high score. (finding #8)
+    if ["complexity", "outliers", "debt_markers", "large_sources"]
+        .iter()
+        .all(|k| by_name.get(k).is_none())
+    {
+        return None;
+    }
     let complex = by_name
         .get("complexity")
         .map(|r| r.entries.as_slice())
@@ -450,7 +473,7 @@ fn score_refactoring_debt(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
         ));
     }
 
-    Pillar {
+    Some(Pillar {
         key: "refactoring_debt",
         display: messages::HEALTH_PILLAR_REFACTORING_DEBT,
         score,
@@ -463,11 +486,15 @@ fn score_refactoring_debt(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
             .with_param("huge", very_large_sources as u64)
             .with_param("sizeable", sizeable_sources as u64),
         actions,
-    }
+    })
 }
 
 /// Pillar 4: repo tidiness from `bloat` and `composition`.
-fn score_tidiness(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
+fn score_tidiness(by_name: &HashMap<&str, &MetricResult>) -> Option<Pillar> {
+    // Needs at least one of its source reports; omit otherwise. (finding #8)
+    if by_name.get("bloat").is_none() && by_name.get("composition").is_none() {
+        return None;
+    }
     let bloat = by_name
         .get("bloat")
         .map(|r| r.entries.as_slice())
@@ -563,7 +590,7 @@ fn score_tidiness(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
         ));
     }
 
-    Pillar {
+    Some(Pillar {
         key: "tidiness",
         display: messages::HEALTH_PILLAR_TIDINESS,
         score,
@@ -571,43 +598,49 @@ fn score_tidiness(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
             .with_param("bloat", bloat_findings as u64)
             .with_param("binary", binary_files),
         actions,
-    }
+    })
 }
 
 /// Pillar 5: churn concentration from `churn_pareto`.
-fn score_change_concentration(by_name: &HashMap<&str, &MetricResult>) -> Pillar {
+fn score_change_concentration(by_name: &HashMap<&str, &MetricResult>) -> Option<Pillar> {
     // `churn_pareto` emits per-file entries sorted by churn desc, with
     // `cumulative_pct` telling us how much of total churn the top N files
     // account for. A healthy repo spreads churn; an unhealthy one has
     // everything in a handful of files (high Gini coefficient).
+    // Absent churn_pareto report → omit this pillar. (finding #8)
+    by_name.get("churn_pareto")?;
     let pareto = by_name
         .get("churn_pareto")
         .map(|r| r.entries.as_slice())
         .unwrap_or(&[]);
 
+    // Count files, excluding the aggregate summary row. The old filter compared
+    // against "summary" but the real key is "<summary>", so the summary row was
+    // counted as a file (off-by-one) and could be picked up below. (finding #6)
     let total_files = pareto
         .iter()
-        .filter(|e| e.key != "summary" && !e.key.is_empty())
+        .filter(|e| e.key != SUMMARY_KEY && !e.key.is_empty())
         .count();
     if total_files < 5 {
-        // Too small to draw a line.
-        return Pillar {
+        // Too small to draw a line, but churn_pareto ran — a real (high) score.
+        return Some(Pillar {
             key: "change_concentration",
             display: messages::HEALTH_PILLAR_CHANGE_CONCENTRATION,
             score: 100.0,
             summary: LocalizedMessage::code(messages::HEALTH_SUMMARY_NOT_ENOUGH_FILES),
             actions: vec![],
-        };
+        });
     }
 
-    // How many of the top 20% of files are needed to cover 80% of churn?
-    // Healthier: curve is flatter, more files share churn.
-    let top_20_count = (total_files / 5).max(1);
+    // What share of total churn do the top 20% of files hold? Read the
+    // truncation-free value the collector computed over the FULL file list — the
+    // per-entry list here is capped at 50 rows and can't represent the real top
+    // 20% for larger repos, so deriving it from these rows pinned the score at
+    // ~100 on most repos. (finding #7)
     let cumulative_at_top20 = pareto
         .iter()
-        .filter(|e| e.key != "summary")
-        .nth(top_20_count.saturating_sub(1))
-        .and_then(|e| match e.values.get("cumulative_pct") {
+        .find(|e| e.key == SUMMARY_KEY)
+        .and_then(|e| match e.values.get("top20_pct") {
             Some(MetricValue::Count(n)) => Some(*n as f64),
             _ => None,
         })
@@ -621,13 +654,13 @@ fn score_change_concentration(by_name: &HashMap<&str, &MetricResult>) -> Pillar 
     let summary = LocalizedMessage::code(messages::HEALTH_SUMMARY_CHANGE_CONCENTRATION)
         .with_param("pct", format!("{:.0}", cumulative_at_top20));
 
-    Pillar {
+    Some(Pillar {
         key: "change_concentration",
         display: messages::HEALTH_PILLAR_CHANGE_CONCENTRATION,
         score,
         summary,
         actions: vec![],
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1588,10 +1621,11 @@ mod tests {
     }
 
     #[test]
-    fn commit_discipline_perfect_when_quality_missing() {
+    fn commit_discipline_absent_when_quality_missing() {
         let by_name = HashMap::new();
-        let p = score_commit_discipline(&by_name);
-        assert_eq!(p.score as u64, 100);
+        // With no quality report the pillar is omitted (renormalized away)
+        // rather than scoring a phantom 100 that inflates the overall. (#8)
+        assert!(score_commit_discipline(&by_name).is_none());
     }
 
     #[test]
@@ -1609,7 +1643,7 @@ mod tests {
         );
         let mut by_name = HashMap::new();
         by_name.insert("quality", &quality);
-        let p = score_commit_discipline(&by_name);
+        let p = score_commit_discipline(&by_name).expect("quality present");
         assert!(p.score < 100.0, "expected penalty, got score {}", p.score);
         assert!(!p.actions.is_empty(), "should surface actions");
     }
@@ -1644,7 +1678,7 @@ mod tests {
         );
         let mut by_name = HashMap::new();
         by_name.insert("complexity", &complex);
-        let p = score_refactoring_debt(&by_name);
+        let p = score_refactoring_debt(&by_name).expect("inputs present");
         assert!(p.score < 100.0);
         // One action for the CC=25 entry.
         assert_eq!(p.actions.len(), 1);
@@ -1664,7 +1698,7 @@ mod tests {
         );
         let mut by_name = HashMap::new();
         by_name.insert("debt_markers", &markers);
-        let p = score_refactoring_debt(&by_name);
+        let p = score_refactoring_debt(&by_name).expect("inputs present");
         assert!(
             p.score < 100.0,
             "stale + rotten markers should deduct points, got {}",
@@ -1700,7 +1734,7 @@ mod tests {
         );
         let mut by_name = HashMap::new();
         by_name.insert("large_sources", &large);
-        let p = score_refactoring_debt(&by_name);
+        let p = score_refactoring_debt(&by_name).expect("inputs present");
         assert!(
             p.score < 100.0,
             "huge files should deduct points, got {}",
@@ -1732,7 +1766,7 @@ mod tests {
         );
         let mut by_name = HashMap::new();
         by_name.insert("debt_markers", &markers);
-        let p = score_refactoring_debt(&by_name);
+        let p = score_refactoring_debt(&by_name).expect("inputs present");
         assert_eq!(
             p.score as u64, 100,
             "fresh markers (<180d) should not penalise"
@@ -1754,7 +1788,7 @@ mod tests {
         );
         let mut by_name = HashMap::new();
         by_name.insert("bloat", &bloat);
-        let p = score_tidiness(&by_name);
+        let p = score_tidiness(&by_name).expect("inputs present");
         assert_eq!(p.score as u64, 100);
     }
 
@@ -1775,7 +1809,7 @@ mod tests {
         );
         let mut by_name = HashMap::new();
         by_name.insert("bloat", &bloat);
-        let p = score_tidiness(&by_name);
+        let p = score_tidiness(&by_name).expect("inputs present");
         assert!(p.score < 100.0);
         assert!(!p.actions.is_empty());
         assert!(p.actions[0].command.code.contains("git rm"));
@@ -1797,9 +1831,11 @@ mod tests {
     #[test]
     fn compute_health_with_no_inputs_still_returns_result() {
         let tmp = std::env::temp_dir();
-        let result = compute_health(&[], &tmp).expect("should produce result");
+        // The health report is ALWAYS emitted (consumers key `reports.health`),
+        // but with no collector data every pillar is omitted and the overall is
+        // 0 rather than a fabricated 100. (finding #8, safe variant)
+        let result = compute_health(&[], &tmp).expect("health report always present");
         assert_eq!(result.name, "health");
-        // Without any collector data, every pillar is effectively 100.
         let overall = result.entry_groups[0].entries[0]
             .values
             .get("score")
@@ -1808,6 +1844,58 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert_eq!(overall, 100);
+        assert_eq!(overall, 0, "no data => no phantom 100");
+        // The pillars group exists but is empty (no pillar had data).
+        let pillars_group = result
+            .entry_groups
+            .iter()
+            .find(|g| g.name == "pillars")
+            .expect("pillars group present");
+        assert!(pillars_group.entries.is_empty());
+    }
+
+    #[test]
+    fn overall_renormalizes_over_present_pillars_only() {
+        // Only the commit_discipline pillar has data, and it is poor. The
+        // overall must equal that single pillar — not be pulled toward 100 by
+        // four absent pillars scoring a phantom 100. (finding #8)
+        let quality = mk_result(
+            "quality",
+            vec![
+                mk_entry(
+                    "low_quality_messages",
+                    &[("percent", MetricValue::Float(50.0))],
+                ),
+                mk_entry("revert_commits", &[("percent", MetricValue::Float(20.0))]),
+            ],
+        );
+        let mut by_name = HashMap::new();
+        by_name.insert("quality", &quality);
+        let pillar_score = score_commit_discipline(&by_name)
+            .expect("quality present")
+            .score
+            .round() as u64;
+
+        let result = compute_health(std::slice::from_ref(&quality), &std::env::temp_dir())
+            .expect("present");
+        let overall = result.entry_groups[0].entries[0]
+            .values
+            .get("score")
+            .and_then(|v| match v {
+                MetricValue::Count(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap();
+        assert!(pillar_score < 100, "sanity: the single pillar is penalised");
+        assert_eq!(
+            overall, pillar_score,
+            "overall reflects only the present pillar, not diluted toward 100"
+        );
+        let pillars = result
+            .entry_groups
+            .iter()
+            .find(|g| g.name == "pillars")
+            .unwrap();
+        assert_eq!(pillars.entries.len(), 1, "only one pillar row present");
     }
 }

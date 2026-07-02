@@ -9,17 +9,32 @@ use crate::types::{MetricEntry, MetricResult, MetricValue, OutputConfig};
 pub struct CsvWriter;
 
 impl CsvWriter {
+    /// Neutralize CSV formula injection (CWE-1236) for string-derived cells.
+    /// Spreadsheet apps execute cells beginning with `=`, `+`, `@` (or a
+    /// leading tab/CR). Prefixing such a cell with a single quote makes the
+    /// spreadsheet treat it as literal text. Numeric cells never reach here.
+    fn sanitize_cell(s: String) -> String {
+        if s.starts_with(['=', '+', '@', '\t', '\r']) {
+            let mut out = String::with_capacity(s.len() + 1);
+            out.push('\'');
+            out.push_str(&s);
+            out
+        } else {
+            s
+        }
+    }
+
     fn format_value(catalog: &Catalog, value: &MetricValue) -> String {
         match value {
             MetricValue::Count(n) => n.to_string(),
             MetricValue::SignedCount(n) => n.to_string(),
             MetricValue::Float(v) => format!("{v:.2}"),
-            MetricValue::Text(s) => s.clone(),
+            MetricValue::Text(s) => Self::sanitize_cell(s.clone()),
             MetricValue::Date(d) => d.to_string(),
-            MetricValue::Message(m) => catalog.translate(m),
+            MetricValue::Message(m) => Self::sanitize_cell(catalog.translate(m)),
             MetricValue::List(items) => {
                 let parts: Vec<String> = items.iter().map(|i| i.to_string()).collect();
-                format!("[{}]", parts.join(", "))
+                Self::sanitize_cell(format!("[{}]", parts.join(", ")))
             }
         }
     }
@@ -44,7 +59,7 @@ impl CsvWriter {
         csv_writer: &mut csv::Writer<W>,
     ) -> anyhow::Result<()> {
         for entry in entries {
-            let mut row = vec![entry.key.clone()];
+            let mut row = vec![Self::sanitize_cell(entry.key.clone())];
             for col in columns {
                 let val = entry
                     .values
@@ -84,7 +99,10 @@ impl CsvWriter {
 
             for group in &result.entry_groups {
                 for entry in &group.entries {
-                    let mut row = vec![group.name.clone(), entry.key.clone()];
+                    let mut row = vec![
+                        Self::sanitize_cell(group.name.clone()),
+                        Self::sanitize_cell(entry.key.clone()),
+                    ];
                     for col in &columns {
                         let val = entry
                             .values
@@ -212,6 +230,51 @@ mod tests {
         assert!(content.contains("name,commits,lines"));
         assert!(content.contains("alice,50,1200"));
         assert!(content.contains("bob,30,800"));
+    }
+
+    #[test]
+    fn test_csv_sanitizes_formula_injection() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("report.csv");
+        let path_str = path.to_str().unwrap().to_string();
+
+        let config = OutputConfig {
+            format: OutputFormat::Csv,
+            output_path: Some(path_str),
+            top: None,
+            quiet: false,
+            locale: "en".into(),
+        };
+
+        use crate::types::{Column, report_description, report_display};
+        let result = MetricResult {
+            name: "Authors".to_string(),
+            display_name: report_display("Authors"),
+            description: report_description("Authors"),
+            columns: vec![
+                Column::in_report("Authors", "note"),
+                Column::in_report("Authors", "commits"),
+            ],
+            entry_groups: vec![],
+            entries: vec![MetricEntry {
+                key: "=cmd()".to_string(),
+                values: HashMap::from([
+                    ("note".to_string(), MetricValue::Text("=cmd()".to_string())),
+                    ("commits".to_string(), MetricValue::Count(50)),
+                ]),
+            }],
+        };
+
+        let writer = CsvWriter;
+        writer.write(&[result], &config).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        // String-derived cells (key and Text value) are neutralized with a
+        // leading single quote; the numeric cell stays untouched.
+        assert!(content.contains("'=cmd()"));
+        assert!(!content.contains(",=cmd()"));
+        assert!(content.contains("50"));
+        assert!(!content.contains("'50"));
     }
 
     #[test]

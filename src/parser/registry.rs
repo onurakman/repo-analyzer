@@ -51,9 +51,14 @@ impl LanguageRegistry {
     }
 
     /// Looks up the language config for a file by its extension.
+    ///
+    /// The extension is taken from the last path component only, compared
+    /// case-insensitively. A component with no '.' (e.g. `Makefile`) has no
+    /// extension and yields `None`.
     pub fn get_for_file(&self, file_path: &str) -> Option<&LanguageConfig> {
-        let ext = file_path.rsplit('.').next()?;
-        let index = self.by_extension.get(ext)?;
+        let file_name = file_path.rsplit(['/', '\\']).next()?;
+        let ext = file_name.rsplit_once('.')?.1.to_lowercase();
+        let index = self.by_extension.get(&ext)?;
         self.configs.get(*index)
     }
 
@@ -344,6 +349,59 @@ mod tests {
         assert_eq!(constructs.len(), 1);
         assert_eq!(constructs[0].kind_str(), "function");
         assert_eq!(constructs[0].name(), "main");
+    }
+
+    #[test]
+    fn test_uppercase_extension_matches() {
+        let mut registry = LanguageRegistry::new();
+        registry.register(
+            &["rs"],
+            LanguageConfig {
+                name: "Rust",
+                language: rust_lang::language(),
+                query: rust_lang::query(),
+                construct_mapper: rust_lang::map_constructs,
+            },
+        );
+
+        // Extension comparison is case-insensitive.
+        assert_eq!(registry.get_for_file("FOO.RS").unwrap().name, "Rust");
+        assert_eq!(registry.get_for_file("src/Main.Rs").unwrap().name, "Rust");
+    }
+
+    #[test]
+    fn test_dotless_filename_returns_none() {
+        let mut registry = LanguageRegistry::new();
+        registry.register(
+            &["rs"],
+            LanguageConfig {
+                name: "Rust",
+                language: rust_lang::language(),
+                query: rust_lang::query(),
+                construct_mapper: rust_lang::map_constructs,
+            },
+        );
+
+        // A last component with no '.' has no extension.
+        assert!(registry.get_for_file("Makefile").is_none());
+        assert!(registry.get_for_file("src/Makefile").is_none());
+    }
+
+    #[test]
+    fn test_dot_in_directory_not_treated_as_extension() {
+        let mut registry = LanguageRegistry::new();
+        registry.register(
+            &["rs"],
+            LanguageConfig {
+                name: "Rust",
+                language: rust_lang::language(),
+                query: rust_lang::query(),
+                construct_mapper: rust_lang::map_constructs,
+            },
+        );
+
+        // The dot belongs to a directory, not the file name.
+        assert!(registry.get_for_file("dir.with.dot/file").is_none());
     }
 
     #[test]

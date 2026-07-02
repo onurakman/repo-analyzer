@@ -300,28 +300,10 @@ impl MetricCollector for ComplexityCollector {
         // Operates on HEAD tree, not per-commit diffs.
     }
 
-    fn inspect_repo(
-        &mut self,
-        repo: &gix::Repository,
-        progress: &crate::metrics::ProgressReporter,
-    ) -> anyhow::Result<()> {
-        let head_commit = match repo.head_commit() {
-            Ok(c) => c,
-            Err(_) => return Ok(()),
-        };
-        let tree = head_commit.tree()?;
-        let mut parsers: HashMap<&'static str, Parser> = HashMap::new();
-        let mut files_scanned = 0u64;
-        walk_tree(
-            repo,
-            &tree,
-            "",
-            &mut parsers,
-            self,
-            &mut files_scanned,
-            progress,
-        );
-        Ok(())
+    // Driven by the pipeline's shared source scan (see `as_source_scanner` /
+    // `SourceScanner`), so `inspect_repo` is a deliberate no-op. (finding #23)
+    fn as_source_scanner(&mut self) -> Option<&mut dyn crate::metrics::SourceScanner> {
+        Some(self)
     }
 
     fn finalize(&mut self) -> MetricResult {
@@ -370,6 +352,21 @@ impl MetricCollector for ComplexityCollector {
     }
 }
 
+impl crate::metrics::SourceScanner for ComplexityCollector {
+    fn scan_file(&mut self, path: &str, source: &str, tree: &tree_sitter::Tree) {
+        let Some(spec) = spec_for_path(path) else {
+            return;
+        };
+        let root = tree.root_node();
+        let line_types = classify_file_lines(source, spec.name);
+        let mut local: Vec<FunctionMetric> = Vec::new();
+        visit(&root, spec, path, source, &line_types, &mut local);
+        for m in local.drain(..) {
+            self.push_bounded(m);
+        }
+    }
+}
+
 fn classify(cc: u32) -> LocalizedMessage {
     match cc {
         0..=5 => LocalizedMessage::code(messages::COMPLEXITY_RECOMMENDATION_SIMPLE),
@@ -383,71 +380,10 @@ fn classify(cc: u32) -> LocalizedMessage {
     }
 }
 
-fn walk_tree(
-    repo: &gix::Repository,
-    tree: &gix::Tree,
-    prefix: &str,
-    parsers: &mut HashMap<&'static str, Parser>,
-    collector: &mut ComplexityCollector,
-    files_scanned: &mut u64,
-    progress: &crate::metrics::ProgressReporter,
-) {
-    for entry_res in tree.iter() {
-        let entry = match entry_res {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let name = entry.filename().to_string();
-        let full_path = if prefix.is_empty() {
-            name.clone()
-        } else {
-            format!("{prefix}/{name}")
-        };
-        let id = entry.oid();
-        let mode = entry.mode();
-
-        if mode.is_tree() {
-            if let Ok(subobj) = repo.find_object(id)
-                && let Ok(subtree) = subobj.try_into_tree()
-            {
-                walk_tree(
-                    repo,
-                    &subtree,
-                    &full_path,
-                    parsers,
-                    collector,
-                    files_scanned,
-                    progress,
-                );
-            }
-        } else if mode.is_blob() {
-            let Some(spec) = spec_for_path(&full_path) else {
-                continue;
-            };
-            let Ok(object) = repo.find_object(id) else {
-                continue;
-            };
-            let Ok(blob) = object.try_into_blob() else {
-                continue;
-            };
-            let Ok(source) = std::str::from_utf8(&blob.data) else {
-                continue;
-            };
-            // Parse into a per-file local Vec, then drain into the bounded
-            // heap so per-file allocation drops before we move on.
-            let mut local: Vec<FunctionMetric> = Vec::new();
-            analyze_source(spec, &full_path, source, parsers, &mut local);
-            for m in local.drain(..) {
-                collector.push_bounded(m);
-            }
-            *files_scanned += 1;
-            if (*files_scanned).is_multiple_of(200) {
-                progress.status(&format!("  complexity: {} files parsed...", *files_scanned));
-            }
-        }
-    }
-}
-
+/// Pre-classify every line of the file so each function metric can count
+/// *code* lines in its span (blanks and comment lines excluded). A single
+/// pass is needed for the whole file because block-comment state spans lines.
+#[allow(dead_code)] // retained as a test helper; production parsing is now shared (#23)
 fn analyze_source(
     spec: &'static LangSpec,
     file_path: &str,
@@ -468,9 +404,6 @@ fn analyze_source(
     visit(&root, spec, file_path, source, &line_types, out);
 }
 
-/// Pre-classify every line of the file so each function metric can count
-/// *code* lines in its span (blanks and comment lines excluded). A single
-/// pass is needed for the whole file because block-comment state spans lines.
 fn classify_file_lines(source: &str, lang_name: &'static str) -> Vec<LineType> {
     let lang = codestats_lang(lang_name);
     let mut state = CommentState::new();
@@ -598,15 +531,32 @@ fn count_cognitive(node: &Node, kinds: &[&str], func_kinds: &[&str]) -> u32 {
     walk(node, kinds, func_kinds, 0)
 }
 
-/// Count declared parameters for a function node. Finds the first descendant
-/// whose kind name contains `parameter` (covers `parameters`,
+/// Count declared parameters for a function node. Prefers the `parameters`
+/// field, falling back to an exact-kind whitelist (`parameters`,
 /// `formal_parameters`, `parameter_list`, `function_value_parameters`,
-/// `formal_parameter_list`) and returns its named-child count.
+/// `formal_parameter_list`). Any `type_parameter*` kind is explicitly skipped
+/// so generic functions don't report their type parameters as value
+/// parameters, and returns the parameter node's named-child count.
 fn count_params(func_node: &Node) -> u32 {
+    // Preferred: the grammar's dedicated `parameters` field.
+    if let Some(params) = func_node.child_by_field_name("parameters") {
+        return params.named_child_count() as u32;
+    }
+    const PARAM_KINDS: &[&str] = &[
+        "parameters",
+        "formal_parameters",
+        "parameter_list",
+        "function_value_parameters",
+        "formal_parameter_list",
+    ];
     let mut cursor = func_node.walk();
     for child in func_node.children(&mut cursor) {
         let k = child.kind();
-        if k.contains("parameter") || k == "formal_parameters" {
+        // Never confuse generic type parameters with value parameters.
+        if k.starts_with("type_parameter") {
+            continue;
+        }
+        if PARAM_KINDS.contains(&k) {
             return child.named_child_count() as u32;
         }
     }
@@ -946,6 +896,15 @@ mod tests {
 
         let go_src = "package p\nfunc f(a int, b string) {}\n";
         let m = analyze(&GO, go_src);
+        assert_eq!(m.iter().find(|x| x.name == "f").unwrap().nargs, 2);
+    }
+
+    #[test]
+    fn nargs_generic_function_excludes_type_parameters() {
+        // A generic function's `<T, U>` type parameters must not be counted as
+        // value parameters — only the two declared value params `a` and `b`.
+        let src = "fn f<T, U>(a: T, b: U) {}";
+        let m = analyze(&RUST, src);
         assert_eq!(m.iter().find(|x| x.name == "f").unwrap().nargs, 2);
     }
 

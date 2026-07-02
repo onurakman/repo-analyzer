@@ -42,9 +42,10 @@ impl MetricCollector for CouplingCollector {
         &mut self,
         store: &ChangeStore,
         progress: &crate::metrics::ProgressReporter,
-    ) -> Option<MetricResult> {
-        store
-            .with_conn(|conn| -> anyhow::Result<MetricResult> {
+    ) -> Option<anyhow::Result<MetricResult>> {
+        Some(
+            store
+                .with_conn(|conn| -> anyhow::Result<MetricResult> {
                 progress.status(&format!(
                     "  coupling: picking top {TOP_FILES} active source files..."
                 ));
@@ -59,7 +60,7 @@ impl MetricCollector for CouplingCollector {
                 let top_files: Vec<(String, i64)> = {
                     let mut stmt = conn.prepare(
                         "SELECT file_path, COUNT(*) AS cnt
-                           FROM changes
+                           FROM non_merge_changes
                           GROUP BY file_path
                           ORDER BY cnt DESC",
                     )?;
@@ -96,7 +97,7 @@ impl MetricCollector for CouplingCollector {
                 conn.execute_batch(
                     "CREATE TEMP TABLE __coupling_changes AS
                        SELECT ch.commit_oid, ch.file_path
-                         FROM changes ch
+                         FROM non_merge_changes ch
                          JOIN __coupling_files t ON t.file = ch.file_path;
                      CREATE INDEX __idx_coupling_commit
                          ON __coupling_changes(commit_oid, file_path);",
@@ -176,9 +177,9 @@ impl MetricCollector for CouplingCollector {
                     ],
                     entries,
                 })
-            })
-            .ok()?
-            .ok()
+                })
+                .and_then(|r| r),
+        )
     }
 }
 
@@ -254,7 +255,7 @@ mod tests {
 
         let mut coll = CouplingCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert!(!r.entries.is_empty());
         let entry = r.entries.first().unwrap();
@@ -281,7 +282,7 @@ mod tests {
 
         let mut coll = CouplingCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert!(
             r.entries.is_empty(),
@@ -308,7 +309,7 @@ mod tests {
 
         let mut coll = CouplingCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert!(
             r.entries.is_empty(),
@@ -328,7 +329,7 @@ mod tests {
 
         let mut coll = CouplingCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert!(r.entries.iter().all(|e| !e.key.contains("a.rs <-> a.rs")));
     }
@@ -350,7 +351,7 @@ mod tests {
 
         let mut coll = CouplingCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(r.entries[0].key, "a.rs <-> b.rs");
     }

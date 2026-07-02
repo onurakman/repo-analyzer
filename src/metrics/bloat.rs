@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gix::prelude::HeaderExt;
 
@@ -34,6 +34,12 @@ const SUSPICIOUS_PATTERNS: &[(&str, &str)] = &[
 ];
 
 const LARGE_FILE_THRESHOLD: u64 = 500 * 1024; // 500 KB
+
+/// Upper bound on the number of rows this report emits. Vendored trees can
+/// contain tens of thousands of files; without a cap the suspicious-pattern
+/// scan produced unbounded output. Directory aggregation collapses most of
+/// that, and this cap guards the rest.
+const MAX_ENTRIES: usize = 100;
 
 pub struct BloatCollector {
     files: Vec<(String, u64)>, // (path, size) from HEAD tree
@@ -79,6 +85,11 @@ impl MetricCollector for BloatCollector {
         let mut entries: Vec<MetricEntry> = Vec::new();
 
         for (path, size) in self.files.iter().take(30) {
+            // Vendored/build directory trees are aggregated below into one
+            // row per root, so skip their individual files here.
+            if matches!(suspicious(path), Some(Suspicion::Directory { .. })) {
+                continue;
+            }
             let recommendation = classify(path, *size);
             // Skip tiny files unless they match a suspicious pattern
             if *size < LARGE_FILE_THRESHOLD
@@ -100,22 +111,55 @@ impl MetricCollector for BloatCollector {
             });
         }
 
-        // Also scan entire tree for suspicious patterns regardless of size
+        // Also scan the entire tree for suspicious patterns regardless of
+        // size. Directory-type patterns (node_modules/, dist/, ...) are
+        // aggregated by their vendored root so a huge tree yields ONE row per
+        // root instead of one row per file. Individual suspicious/large files
+        // are deduped by path. This whole pass is linear in the file count.
+        let existing: HashSet<&str> = entries.iter().map(|e| e.key.as_str()).collect();
+        // root -> (summed size, recommendation code), with insertion order kept
+        // separately so output is deterministic before the size sort below.
+        let mut dir_totals: HashMap<String, (u64, &'static str)> = HashMap::new();
+        let mut dir_order: Vec<String> = Vec::new();
+        let mut file_seen: HashSet<String> = HashSet::new();
+        let mut file_rows: Vec<(String, u64, LocalizedMessage)> = Vec::new();
+
         for (path, size) in &self.files {
-            if entries.iter().any(|e| e.key == *path) {
+            if existing.contains(path.as_str()) {
+                continue;
+            }
+            if let Some(Suspicion::Directory { root, code }) = suspicious(path) {
+                let total = dir_totals.entry(root.clone()).or_insert_with(|| {
+                    dir_order.push(root);
+                    (0, code)
+                });
+                total.0 = total.0.saturating_add(*size);
                 continue;
             }
             let rec = classify(path, *size);
-            if rec.code != messages::BLOAT_RECOMMENDATION_OK {
-                let mut values = HashMap::new();
-                values.insert("size_bytes".into(), MetricValue::Count(*size));
-                values.insert("size_human".into(), MetricValue::Text(human_size(*size)));
-                values.insert("recommendation".into(), MetricValue::Message(rec));
-                entries.push(MetricEntry {
-                    key: path.clone(),
-                    values,
-                });
+            if rec.code == messages::BLOAT_RECOMMENDATION_OK {
+                continue;
             }
+            if file_seen.insert(path.clone()) {
+                file_rows.push((path.clone(), *size, rec));
+            }
+        }
+
+        for root in dir_order {
+            let (size, code) = dir_totals[&root];
+            let rec = LocalizedMessage::code(code).with_severity(Severity::Warning);
+            let mut values = HashMap::new();
+            values.insert("size_bytes".into(), MetricValue::Count(size));
+            values.insert("size_human".into(), MetricValue::Text(human_size(size)));
+            values.insert("recommendation".into(), MetricValue::Message(rec));
+            entries.push(MetricEntry { key: root, values });
+        }
+        for (path, size, rec) in file_rows {
+            let mut values = HashMap::new();
+            values.insert("size_bytes".into(), MetricValue::Count(size));
+            values.insert("size_human".into(), MetricValue::Text(human_size(size)));
+            values.insert("recommendation".into(), MetricValue::Message(rec));
+            entries.push(MetricEntry { key: path, values });
         }
 
         entries.sort_by(|a, b| {
@@ -129,6 +173,8 @@ impl MetricCollector for BloatCollector {
             };
             sb.cmp(&sa)
         });
+
+        entries.truncate(MAX_ENTRIES);
 
         MetricResult {
             name: "bloat".into(),
@@ -183,11 +229,51 @@ fn walk_tree(repo: &gix::Repository, tree: &gix::Tree, prefix: &str, out: &mut V
     }
 }
 
-fn classify(path: &str, size: u64) -> LocalizedMessage {
+/// How a path matched a [`SUSPICIOUS_PATTERNS`] entry.
+enum Suspicion {
+    /// A vendored/build directory tree, identified by its `root` (the path up
+    /// to and including the matched segment). Rows for these are aggregated so
+    /// the whole tree collapses to a single entry.
+    Directory { root: String, code: &'static str },
+    /// A standalone suspicious file (e.g. `*.min.js`, `.DS_Store`).
+    File { code: &'static str },
+}
+
+/// Match a path against the suspicious patterns, anchored to path-segment
+/// boundaries: `node_modules/` matches the segment `node_modules`, never a
+/// substring like `mynode_modules_backup`. Directory patterns take precedence
+/// so an entire vendored tree collapses to one root even when its files also
+/// match a file pattern (e.g. `node_modules/app.min.js`).
+fn suspicious(path: &str) -> Option<Suspicion> {
     for (pat, code) in SUSPICIOUS_PATTERNS {
-        if path.contains(pat) {
-            return LocalizedMessage::code(*code).with_severity(Severity::Warning);
+        if let Some(seg) = pat.strip_suffix('/') {
+            let mut root = String::new();
+            for part in path.split('/') {
+                if !root.is_empty() {
+                    root.push('/');
+                }
+                root.push_str(part);
+                if part == seg {
+                    return Some(Suspicion::Directory { root, code });
+                }
+            }
         }
+    }
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    for (pat, code) in SUSPICIOUS_PATTERNS {
+        if !pat.ends_with('/') && filename.ends_with(pat) {
+            return Some(Suspicion::File { code });
+        }
+    }
+    None
+}
+
+fn classify(path: &str, size: u64) -> LocalizedMessage {
+    if let Some(susp) = suspicious(path) {
+        let code = match susp {
+            Suspicion::Directory { code, .. } | Suspicion::File { code } => code,
+        };
+        return LocalizedMessage::code(code).with_severity(Severity::Warning);
     }
     if size >= 5 * 1024 * 1024 {
         LocalizedMessage::code(messages::BLOAT_RECOMMENDATION_VERY_LARGE_FILE)
@@ -250,5 +336,86 @@ mod tests {
             classify("node_modules/foo", 10).code,
             messages::BLOAT_RECOMMENDATION_VENDORED_DEPS
         );
+    }
+
+    #[test]
+    fn test_suspicious_is_segment_anchored() {
+        // Substring, not a real path segment -> no match.
+        assert!(suspicious("src/mynode_modules_backup/x").is_none());
+        // Real segment -> Directory match with the correct root.
+        match suspicious("frontend/node_modules/a/b.js") {
+            Some(Suspicion::Directory { root, .. }) => {
+                assert_eq!(root, "frontend/node_modules");
+            }
+            _ => panic!("expected Directory match"),
+        }
+    }
+
+    fn size_of(entry: &MetricEntry) -> u64 {
+        match entry.values.get("size_bytes") {
+            Some(MetricValue::Count(n)) => *n,
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn test_directory_aggregation() {
+        let mut c = BloatCollector::new();
+        // Two distinct vendored roots plus a build tree, many files each.
+        c.files = vec![
+            ("node_modules/a/x.js".into(), 100),
+            ("node_modules/b/y.js".into(), 200),
+            ("node_modules/c/z.js".into(), 300),
+            ("frontend/node_modules/p.js".into(), 40),
+            ("frontend/node_modules/q.js".into(), 60),
+            ("target/debug/app".into(), 1000),
+            ("target/debug/dep".into(), 500),
+            ("src/main.rs".into(), 10),
+        ];
+
+        let result = c.finalize();
+
+        // One row per vendored/build root, none per file.
+        let roots: Vec<&str> = result.entries.iter().map(|e| e.key.as_str()).collect();
+        assert!(roots.contains(&"node_modules"), "roots = {:?}", roots);
+        assert!(roots.contains(&"frontend/node_modules"), "roots = {:?}", roots);
+        assert!(roots.contains(&"target"), "roots = {:?}", roots);
+        // No individual file under an aggregated root leaks through.
+        assert!(
+            !roots.iter().any(|k| k.starts_with("node_modules/")
+                || k.starts_with("frontend/node_modules/")
+                || k.starts_with("target/")),
+            "roots = {:?}",
+            roots
+        );
+
+        let nm = result
+            .entries
+            .iter()
+            .find(|e| e.key == "node_modules")
+            .expect("node_modules root");
+        assert_eq!(size_of(nm), 600); // 100 + 200 + 300
+
+        let tgt = result
+            .entries
+            .iter()
+            .find(|e| e.key == "target")
+            .expect("target root");
+        assert_eq!(size_of(tgt), 1500); // 1000 + 500
+
+        // Columns/schema are unchanged.
+        assert_eq!(result.columns.len(), 3);
+    }
+
+    #[test]
+    fn test_max_entries_cap() {
+        let mut c = BloatCollector::new();
+        // Far more suspicious files than the cap: distinct .DS_Store paths.
+        c.files = (0..(MAX_ENTRIES + 50))
+            .map(|i| (format!("dir{i}/.DS_Store"), 10u64))
+            .collect();
+
+        let result = c.finalize();
+        assert!(result.entries.len() <= MAX_ENTRIES);
     }
 }

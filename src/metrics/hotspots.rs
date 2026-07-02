@@ -36,7 +36,8 @@ impl MetricCollector for HotspotsCollector {
         &mut self,
         store: &ChangeStore,
         _progress: &crate::metrics::ProgressReporter,
-    ) -> Option<MetricResult> {
+    ) -> Option<anyhow::Result<MetricResult>> {
+        Some((|| -> anyhow::Result<MetricResult> {
         let entries = store
             .with_conn(|conn| -> anyhow::Result<Vec<MetricEntry>> {
                 let mut out: Vec<MetricEntry> = Vec::new();
@@ -46,7 +47,8 @@ impl MetricCollector for HotspotsCollector {
                     "SELECT file_path,
                             COUNT(*)             AS changes,
                             COUNT(DISTINCT email) AS authors
-                       FROM changes
+                       FROM non_merge_changes
+                      WHERE file_path IN (SELECT file_path FROM live_files)
                       GROUP BY file_path",
                 )?;
                 let rows = stmt.query_map([], |row| {
@@ -80,7 +82,8 @@ impl MetricCollector for HotspotsCollector {
                             COUNT(*)                 AS changes,
                             COUNT(DISTINCT ch.email) AS authors
                        FROM constructs c
-                       JOIN changes ch ON c.change_id = ch.id
+                       JOIN non_merge_changes ch ON c.change_id = ch.id
+                      WHERE ch.file_path IN (SELECT file_path FROM live_files)
                       GROUP BY ch.file_path, c.qualified_name, c.kind",
                 )?;
                 let rows2 = stmt2.query_map([], |row| {
@@ -111,9 +114,7 @@ impl MetricCollector for HotspotsCollector {
                 }
 
                 Ok(out)
-            })
-            .ok()?
-            .ok()?;
+            })??;
 
         let mut entries = entries;
         entries.sort_by(|a, b| {
@@ -129,7 +130,7 @@ impl MetricCollector for HotspotsCollector {
         });
         entries.truncate(500);
 
-        Some(MetricResult {
+        Ok(MetricResult {
             name: "hotspots".into(),
             display_name: report_display("hotspots"),
             description: report_description("hotspots"),
@@ -144,6 +145,7 @@ impl MetricCollector for HotspotsCollector {
             ],
             entries,
         })
+        })())
     }
 }
 
@@ -222,7 +224,7 @@ mod tests {
 
         let mut coll = HotspotsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         let entry = r.entries.iter().find(|e| e.key == "a.rs").unwrap();
         match entry.values.get("changes") {
@@ -258,7 +260,7 @@ mod tests {
 
         let mut coll = HotspotsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
 
         let construct = r
@@ -287,7 +289,7 @@ mod tests {
 
         let mut coll = HotspotsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert!(r.entries.iter().any(|e| e.key == "real.rs"));
         assert!(!r.entries.iter().any(|e| e.key == "package-lock.json"));
@@ -307,7 +309,7 @@ mod tests {
 
         let mut coll = HotspotsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(r.entries[0].key, "big.rs");
     }

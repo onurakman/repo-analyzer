@@ -33,6 +33,15 @@ impl GitWalker {
         F: FnMut(CommitInfo) -> anyhow::Result<()>,
     {
         let repo = gix::open(&self.repo_path)?;
+
+        // A freshly `git init`ed repository has an unborn HEAD (a symbolic ref
+        // pointing at a branch that has no commits yet). `head_commit()` errors
+        // in that case, so short-circuit to zero commits — the downstream
+        // `total == 0` path already produces clean empty output.
+        if repo.head()?.is_unborn() {
+            return Ok(0);
+        }
+
         let head_commit = repo.head_commit()?;
 
         let walk = head_commit
@@ -64,11 +73,24 @@ impl GitWalker {
                 .unwrap_or_default()
                 .with_timezone(&offset);
 
-            // Apply time range filtering
-            if self.before_time_range(timestamp) {
-                // Commits are sorted newest-first, so if we're before the range, stop.
+            // Apply time range filtering.
+            //
+            // The traversal is ordered by COMMITTER time (`ByCommitTime`), so
+            // early termination must key off committer time — not the author
+            // time used for `timestamp`. On rebased/cherry-picked commits the
+            // author date can be far older than the committer date; such a
+            // commit surfaces near HEAD, and breaking on its old author date
+            // would silently drop every remaining in-range commit deeper in
+            // history. Committer time >= author time in the normal case, so
+            // this only ever terminates *later*, never dropping in-range work.
+            let committer_ts = DateTime::<Utc>::from_timestamp(info.commit_time(), 0)
+                .unwrap_or_default()
+                .fixed_offset();
+            if self.before_time_range(committer_ts) {
                 break;
             }
+            // Membership still uses author time (the stored `timestamp`) so the
+            // set of commits attributed to a range matches their author dates.
             if !self.in_time_range(timestamp) {
                 continue;
             }
@@ -92,6 +114,48 @@ impl GitWalker {
             count += 1;
         }
 
+        Ok(count)
+    }
+
+    /// Count matching commits WITHOUT decoding each commit object. The full
+    /// `walk` decodes author/message/parents for every commit just to count
+    /// them up front; here we only need the total for the progress bar, so we
+    /// lean on the commit-graph's `commit_time` and never touch the object db.
+    /// For `TimeRange::All` this is a pure oid count; for filtered ranges we
+    /// bucket by committer time (decode-free), which matches the early-break
+    /// logic and is exact enough for a progress total. (finding #31)
+    pub fn count(&self) -> anyhow::Result<u64> {
+        let repo = gix::open(&self.repo_path)?;
+        if repo.head()?.is_unborn() {
+            return Ok(0);
+        }
+        let head_commit = repo.head_commit()?;
+        let walk = head_commit
+            .id()
+            .ancestors()
+            .sorting(gix::revision::walk::Sorting::ByCommitTime(
+                CommitTimeOrder::NewestFirst,
+            ))
+            .use_commit_graph(true)
+            .all()?;
+
+        let mut count = 0u64;
+        for info_result in walk {
+            let info = info_result?;
+            if matches!(self.time_range, TimeRange::All) {
+                count += 1;
+                continue;
+            }
+            let ts = DateTime::<Utc>::from_timestamp(info.commit_time(), 0)
+                .unwrap_or_default()
+                .fixed_offset();
+            if self.before_time_range(ts) {
+                break;
+            }
+            if self.in_time_range(ts) {
+                count += 1;
+            }
+        }
         Ok(count)
     }
 
@@ -219,6 +283,48 @@ mod tests {
         let count = walker.walk(|_| Ok(())).expect("walk should succeed");
 
         assert!(count > 0, "should produce >0 commits");
+    }
+
+    /// Helper: create a temporary git repo with no commits (unborn HEAD).
+    fn create_empty_test_repo() -> TempDir {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let path = dir.path();
+
+        let status = Command::new("git")
+            .args(["init"])
+            .current_dir(path)
+            .output()
+            .expect("failed to run git init");
+        assert!(
+            status.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+
+        dir
+    }
+
+    #[test]
+    fn test_walk_unborn_head_repo() {
+        // A freshly `git init`ed repo has no commits (unborn HEAD). The walk
+        // should yield zero commits without erroring.
+        let dir = create_empty_test_repo();
+        let walker = GitWalker::new(
+            dir.path().to_str().unwrap().to_string(),
+            TimeRange::All,
+            Arc::new(Interner::new()),
+        );
+
+        let mut called = false;
+        let count = walker
+            .walk(|_| {
+                called = true;
+                Ok(())
+            })
+            .expect("walk should succeed on a repo with no commits");
+
+        assert_eq!(count, 0, "empty repo should walk to 0 commits");
+        assert!(!called, "callback should not fire for a repo with no commits");
     }
 
     #[test]

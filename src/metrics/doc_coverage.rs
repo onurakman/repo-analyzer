@@ -15,7 +15,6 @@ use std::collections::HashMap;
 
 use tree_sitter::{Language, Node, Parser};
 
-use crate::analysis::source_filter::is_source_file;
 use crate::metrics::MetricCollector;
 use crate::types::{
     Column, LocalizedMessage, MetricEntry, MetricResult, MetricValue, ParsedChange, Severity,
@@ -221,28 +220,10 @@ impl MetricCollector for DocCoverageCollector {
         // Head-tree walk; no per-commit work.
     }
 
-    fn inspect_repo(
-        &mut self,
-        repo: &gix::Repository,
-        progress: &crate::metrics::ProgressReporter,
-    ) -> anyhow::Result<()> {
-        let head_commit = match repo.head_commit() {
-            Ok(c) => c,
-            Err(_) => return Ok(()),
-        };
-        let tree = head_commit.tree()?;
-        let mut parsers: HashMap<&'static str, Parser> = HashMap::new();
-        let mut scanned = 0u64;
-        walk_tree(
-            repo,
-            &tree,
-            "",
-            &mut parsers,
-            &mut self.per_file,
-            &mut scanned,
-            progress,
-        );
-        Ok(())
+    // Driven by the pipeline's shared source scan; `inspect_repo` is a
+    // deliberate no-op. (finding #23)
+    fn as_source_scanner(&mut self) -> Option<&mut dyn crate::metrics::SourceScanner> {
+        Some(self)
     }
 
     fn finalize(&mut self) -> MetricResult {
@@ -323,86 +304,21 @@ fn classify(pct: u32) -> LocalizedMessage {
     }
 }
 
-fn walk_tree(
-    repo: &gix::Repository,
-    tree: &gix::Tree,
-    prefix: &str,
-    parsers: &mut HashMap<&'static str, Parser>,
-    out: &mut Vec<FileRow>,
-    scanned: &mut u64,
-    progress: &crate::metrics::ProgressReporter,
-) {
-    for entry_res in tree.iter() {
-        let Ok(entry) = entry_res else { continue };
-        let name = entry.filename().to_string();
-        let full_path = if prefix.is_empty() {
-            name.clone()
-        } else {
-            format!("{prefix}/{name}")
+impl crate::metrics::SourceScanner for DocCoverageCollector {
+    fn scan_file(&mut self, path: &str, source: &str, tree: &tree_sitter::Tree) {
+        let Some(spec) = spec_for_path(path) else {
+            return;
         };
-        let id = entry.oid();
-        let mode = entry.mode();
-
-        if mode.is_tree() {
-            if let Ok(subobj) = repo.find_object(id)
-                && let Ok(subtree) = subobj.try_into_tree()
-            {
-                walk_tree(repo, &subtree, &full_path, parsers, out, scanned, progress);
-            }
-        } else if mode.is_blob() {
-            let Some(spec) = spec_for_path(&full_path) else {
-                continue;
-            };
-            if !is_source_file(&full_path) {
-                continue;
-            }
-            let Ok(object) = repo.find_object(id) else {
-                continue;
-            };
-            let Ok(blob) = object.try_into_blob() else {
-                continue;
-            };
-            let Ok(source) = std::str::from_utf8(&blob.data) else {
-                continue;
-            };
-            if let Some(row) = analyze_file(spec, &full_path, source, parsers) {
-                out.push(row);
-            }
-            *scanned += 1;
-            if scanned.is_multiple_of(200) {
-                progress.status(&format!("  doc_coverage: {} files parsed...", *scanned));
-            }
-        }
+        let mut public = 0u32;
+        let mut documented = 0u32;
+        visit(&tree.root_node(), spec, source, &mut public, &mut documented);
+        self.per_file.push(FileRow {
+            file: path.to_string(),
+            language: spec.name,
+            public_items: public,
+            documented,
+        });
     }
-}
-
-fn analyze_file(
-    spec: &'static DocSpec,
-    file_path: &str,
-    source: &str,
-    parsers: &mut HashMap<&'static str, Parser>,
-) -> Option<FileRow> {
-    let parser = parsers.entry(spec.name).or_insert_with(|| {
-        let mut p = Parser::new();
-        let _ = p.set_language(&(spec.language)());
-        p
-    });
-    let tree = parser.parse(source, None)?;
-    let mut public = 0u32;
-    let mut documented = 0u32;
-    visit(
-        &tree.root_node(),
-        spec,
-        source,
-        &mut public,
-        &mut documented,
-    );
-    Some(FileRow {
-        file: file_path.to_string(),
-        language: spec.name,
-        public_items: public,
-        documented,
-    })
 }
 
 fn visit(node: &Node, spec: &DocSpec, source: &str, public: &mut u32, documented: &mut u32) {
@@ -518,17 +434,31 @@ fn has_child_kind_with_text_prefix(node: &Node, kind: &str, source: &str, prefix
 
 fn has_doc(node: &Node, source: &str, rule: DocRule) -> bool {
     match rule {
-        DocRule::TripleSlashOrBlockDoc => match node.prev_named_sibling() {
-            Some(prev) => {
-                let text = node_text(&prev, source);
-                let k = prev.kind();
-                (matches!(k, "line_comment" | "comment" | "documentation_comment")
-                    && text.trim_start().starts_with("///"))
-                    || (matches!(k, "block_comment" | "comment")
-                        && text.trim_start().starts_with("/**"))
+        DocRule::TripleSlashOrBlockDoc => {
+            // Rust items may carry attributes (`#[derive(...)]`, `#[inline]`,
+            // etc.) between the doc comment and the item. Skip backward over
+            // consecutive `attribute_item` siblings so the doc comment before
+            // them is still detected.
+            let mut prev = node.prev_named_sibling();
+            while let Some(p) = prev {
+                if p.kind() == "attribute_item" {
+                    prev = p.prev_named_sibling();
+                } else {
+                    break;
+                }
             }
-            None => false,
-        },
+            match prev {
+                Some(prev) => {
+                    let text = node_text(&prev, source);
+                    let k = prev.kind();
+                    (matches!(k, "line_comment" | "comment" | "documentation_comment")
+                        && text.trim_start().starts_with("///"))
+                        || (matches!(k, "block_comment" | "comment")
+                            && text.trim_start().starts_with("/**"))
+                }
+                None => false,
+            }
+        }
         DocRule::BlockDoc => match node.prev_named_sibling() {
             Some(prev) => {
                 let k = prev.kind();
@@ -565,6 +495,30 @@ fn has_doc(node: &Node, source: &str, rule: DocRule) -> bool {
     }
 }
 
+#[allow(dead_code)] // retained as a test helper; production parsing is now shared (#23)
+fn analyze_file(
+    spec: &'static DocSpec,
+    file_path: &str,
+    source: &str,
+    parsers: &mut HashMap<&'static str, Parser>,
+) -> Option<FileRow> {
+    let parser = parsers.entry(spec.name).or_insert_with(|| {
+        let mut p = Parser::new();
+        let _ = p.set_language(&(spec.language)());
+        p
+    });
+    let tree = parser.parse(source, None)?;
+    let mut public = 0u32;
+    let mut documented = 0u32;
+    visit(&tree.root_node(), spec, source, &mut public, &mut documented);
+    Some(FileRow {
+        file: file_path.to_string(),
+        language: spec.name,
+        public_items: public,
+        documented,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,6 +532,16 @@ mod tests {
     #[test]
     fn rust_pub_fn_with_doc_counts_documented() {
         let src = "/// Doc for foo.\npub fn foo() {}\nfn private_bar() {}\n";
+        let (public, documented) = scan(&RUST, src);
+        assert_eq!(public, 1);
+        assert_eq!(documented, 1);
+    }
+
+    #[test]
+    fn rust_documented_item_with_attributes_counts_documented() {
+        // The doc comment precedes one or more attributes; the item's immediate
+        // previous sibling is the attribute, not the comment.
+        let src = "/// Doc for Foo.\n#[derive(Clone, Copy)]\n#[repr(C)]\npub struct Foo;\n";
         let (public, documented) = scan(&RUST, src);
         assert_eq!(public, 1);
         assert_eq!(documented, 1);

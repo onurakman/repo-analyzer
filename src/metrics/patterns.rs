@@ -33,7 +33,8 @@ impl MetricCollector for PatternsCollector {
         &mut self,
         store: &ChangeStore,
         _progress: &crate::metrics::ProgressReporter,
-    ) -> Option<MetricResult> {
+    ) -> Option<anyhow::Result<MetricResult>> {
+        Some((|| -> anyhow::Result<MetricResult> {
         // SQLite %w is 0=Sun..6=Sat. Remap to 0=Mon..6=Sun so Monday is at index 0,
         // matching the original `%u` (1=Mon..7=Sun) / day_names layout.
         let (hourly, daily) = store
@@ -41,13 +42,18 @@ impl MetricCollector for PatternsCollector {
                 let mut hourly = [0u64; 24];
                 let mut daily = [0u64; 7];
 
+                // Bucket by the author's LOCAL wall-clock (commit_ts + tz_offset),
+                // not UTC, so a 9pm commit in +03:00 lands in the 21:00 slot
+                // rather than 18:00. (finding #41)
                 let mut stmt = conn.prepare(
                     "SELECT
-                        CAST(strftime('%H', datetime(commit_ts, 'unixepoch')) AS INTEGER) AS hour,
-                        CAST(strftime('%w', datetime(commit_ts, 'unixepoch')) AS INTEGER) AS dow,
+                        CAST(strftime('%H', datetime(commit_ts + tz_offset, 'unixepoch')) AS INTEGER) AS hour,
+                        CAST(strftime('%w', datetime(commit_ts + tz_offset, 'unixepoch')) AS INTEGER) AS dow,
                         COUNT(*) AS commits
                        FROM (
-                          SELECT commit_oid, MIN(commit_ts) AS commit_ts
+                          SELECT commit_oid,
+                                 MIN(commit_ts) AS commit_ts,
+                                 MIN(tz_offset) AS tz_offset
                             FROM changes GROUP BY commit_oid
                        )
                       GROUP BY hour, dow",
@@ -70,9 +76,7 @@ impl MetricCollector for PatternsCollector {
                     daily[day_idx] += cnt;
                 }
                 Ok((hourly, daily))
-            })
-            .ok()?
-            .ok()?;
+            })??;
 
         let hourly_entries: Vec<MetricEntry> = (0..24)
             .map(|h| {
@@ -99,7 +103,7 @@ impl MetricCollector for PatternsCollector {
             })
             .collect();
 
-        Some(MetricResult {
+        Ok(MetricResult {
             name: "patterns".into(),
             display_name: report_display("patterns"),
             description: report_description("patterns"),
@@ -121,6 +125,7 @@ impl MetricCollector for PatternsCollector {
                 },
             ],
         })
+        })())
     }
 }
 
@@ -215,7 +220,7 @@ mod tests {
         let store = store_with(&[]);
         let mut coll = PatternsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(group(&r, "hourly").entries.len(), 24);
         assert_eq!(group(&r, "daily").entries.len(), 7);
@@ -234,11 +239,56 @@ mod tests {
         let store = store_with(&[make_change_at("a.rs", "c1", 2025, 1, 13, 14)]);
         let mut coll = PatternsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(count_at(group(&r, "hourly"), "14:00"), 1);
         assert_eq!(count_at(group(&r, "hourly"), "13:00"), 0);
         assert_eq!(count_at(group(&r, "hourly"), "15:00"), 0);
+    }
+
+    #[test]
+    fn buckets_by_author_local_time_not_utc() {
+        // 21:00 at +03:00 is 18:00 UTC. The commit must land in the author's
+        // LOCAL 21:00 slot, not the 18:00 UTC slot. (finding #41)
+        let ts = FixedOffset::east_opt(3 * 3600)
+            .unwrap()
+            .with_ymd_and_hms(2025, 1, 13, 21, 0, 0)
+            .unwrap();
+        let change = ParsedChange {
+            diff: Arc::new(DiffRecord {
+                commit: Arc::new(CommitInfo {
+                    oid: "c1".into(),
+                    author: "dev".into(),
+                    email: "dev@x".into(),
+                    timestamp: ts,
+                    message: "m".into(),
+                    parent_ids: vec![],
+                }),
+                file_path: "a.rs".into(),
+                old_path: None,
+                status: FileStatus::Modified,
+                hunks: vec![],
+                additions: 1,
+                deletions: 0,
+            }),
+            constructs: vec![],
+        };
+        let store = store_with(&[change]);
+        let mut coll = PatternsCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
+            .expect("db result");
+        assert_eq!(
+            count_at(group(&r, "hourly"), "21:00"),
+            1,
+            "commit lands in the local 21:00 slot"
+        );
+        assert_eq!(
+            count_at(group(&r, "hourly"), "18:00"),
+            0,
+            "not the UTC 18:00 slot"
+        );
     }
 
     #[test]
@@ -247,7 +297,7 @@ mod tests {
         let store = store_with(&[make_change_at("a.rs", "csun", 2025, 1, 12, 10)]);
         let mut coll = PatternsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(count_at(group(&r, "daily"), "Sun"), 1);
         assert_eq!(count_at(group(&r, "daily"), "Mon"), 0);
@@ -263,7 +313,7 @@ mod tests {
         ]);
         let mut coll = PatternsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(count_at(group(&r, "daily"), "Mon"), 1);
         assert_eq!(count_at(group(&r, "daily"), "Sat"), 1);
@@ -280,7 +330,7 @@ mod tests {
         ]);
         let mut coll = PatternsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(count_at(group(&r, "hourly"), "09:00"), 1);
         assert_eq!(count_at(group(&r, "daily"), "Mon"), 1);
@@ -291,7 +341,7 @@ mod tests {
         let store = store_with(&[]);
         let mut coll = PatternsCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         // Hourly: order = 0..23 (used by writers to keep the table sorted by hour).
         let hourly = group(&r, "hourly");

@@ -34,16 +34,22 @@ impl MetricCollector for OwnershipCollector {
         &mut self,
         store: &ChangeStore,
         _progress: &crate::metrics::ProgressReporter,
-    ) -> Option<MetricResult> {
-        // Pull (file, email, lines_added) per author, then group in Rust to
-        // compute top_author and bus_factor (which require the full author
-        // distribution per file — hard to do in plain SQL without window funcs).
-        let rows = store
-            .with_conn(|conn| -> anyhow::Result<Vec<(String, String, u64)>> {
+    ) -> Option<anyhow::Result<MetricResult>> {
+        Some((|| -> anyhow::Result<MetricResult> {
+            // Pull (file, email, lines_added) per author, then group in Rust to
+            // compute top_author and bus_factor (which require the full author
+            // distribution per file — hard to do in plain SQL without window funcs).
+            let rows = store.with_conn(|conn| -> anyhow::Result<Vec<(String, String, u64)>> {
                 let mut stmt = conn.prepare(
-                    "SELECT file_path, email, SUM(additions) AS added
-                       FROM changes
-                      GROUP BY file_path, email",
+                    // Canonicalize to the HEAD name so a renamed file's
+                    // ownership isn't split across old/new paths. (finding #10)
+                    "SELECT COALESCE(cp.head_path, ch.file_path) AS canon,
+                            ch.email,
+                            SUM(ch.additions) AS added
+                       FROM non_merge_changes ch
+                       LEFT JOIN canonical_path cp ON cp.path = ch.file_path
+                      GROUP BY canon, ch.email
+                     HAVING canon IN (SELECT file_path FROM live_files)",
                 )?;
                 let iter = stmt.query_map([], |row| {
                     let file: String = row.get(0)?;
@@ -56,66 +62,79 @@ impl MetricCollector for OwnershipCollector {
                     out.push(r?);
                 }
                 Ok(out)
-            })
-            .ok()?
-            .ok()?;
+            })??;
 
-        // file → (email → lines_added). Keyed by String; SQLite already interns
-        // pages so memory pressure here is only from the in-flight row set.
-        let mut files: HashMap<String, HashMap<String, u64>> = HashMap::new();
-        for (file, email, added) in rows {
-            if !is_source_file(&file) {
-                continue;
+            // file → (email → lines_added). Keyed by String; SQLite already interns
+            // pages so memory pressure here is only from the in-flight row set.
+            let mut files: HashMap<String, HashMap<String, u64>> = HashMap::new();
+            for (file, email, added) in rows {
+                if !is_source_file(&file) {
+                    continue;
+                }
+                *files.entry(file).or_default().entry(email).or_insert(0) += added;
             }
-            *files.entry(file).or_default().entry(email).or_insert(0) += added;
-        }
 
-        let mut entries: Vec<MetricEntry> = files
-            .into_iter()
-            .map(|(file, authors)| {
-                let total_lines: u64 = authors.values().sum();
-                let total_authors = authors.len() as u64;
-                let top_author: String = authors
-                    .iter()
-                    .max_by_key(|(_, v)| **v)
-                    .map(|(name, _)| name.clone())
-                    .unwrap_or_default();
-                let bus_factor = compute_bus_factor(&authors, total_lines);
+            let mut entries: Vec<MetricEntry> = files
+                .into_iter()
+                .map(|(file, authors)| {
+                    let total_lines: u64 = authors.values().sum();
+                    let total_authors = authors.len() as u64;
+                    // Pick the author with the most lines; break ties
+                    // deterministically by (lines DESC, email ASC). `max_by`
+                    // yields the greatest under this total order: compare by
+                    // lines, then reverse email so the smallest email wins.
+                    let top_author: String = authors
+                        .iter()
+                        .max_by(|(email_a, lines_a), (email_b, lines_b)| {
+                            lines_a.cmp(lines_b).then_with(|| email_b.cmp(email_a))
+                        })
+                        .map(|(name, _)| name.clone())
+                        .unwrap_or_default();
+                    let bus_factor = compute_bus_factor(&authors, total_lines);
 
-                let mut values = HashMap::new();
-                values.insert("total_authors".into(), MetricValue::Count(total_authors));
-                values.insert("bus_factor".into(), MetricValue::Count(bus_factor));
-                values.insert("top_author".into(), MetricValue::Text(top_author));
-                values.insert("total_lines".into(), MetricValue::Count(total_lines));
-                MetricEntry { key: file, values }
+                    let mut values = HashMap::new();
+                    values.insert("total_authors".into(), MetricValue::Count(total_authors));
+                    values.insert("bus_factor".into(), MetricValue::Count(bus_factor));
+                    values.insert("top_author".into(), MetricValue::Text(top_author));
+                    values.insert("total_lines".into(), MetricValue::Count(total_lines));
+                    MetricEntry { key: file, values }
+                })
+                .collect();
+
+            // Deterministic ordering: bus_factor ASC (highest risk first),
+            // then total_lines DESC, then key ASC. Without this the order
+            // followed HashMap iteration and varied across runs.
+            entries.sort_by(|a, b| {
+                let count = |e: &MetricEntry, k: &str| match e.values.get(k) {
+                    Some(MetricValue::Count(n)) => *n,
+                    _ => u64::MAX,
+                };
+                count(a, "bus_factor")
+                    .cmp(&count(b, "bus_factor"))
+                    .then_with(|| count(b, "total_lines").cmp(&count(a, "total_lines")))
+                    .then_with(|| a.key.cmp(&b.key))
+            });
+
+            // Bound output: ownership can otherwise emit one entry per live
+            // source file, which is unbounded. The sort puts highest-risk
+            // (lowest bus_factor) first, so keeping the leading 500 retains the
+            // most-at-risk files.
+            entries.truncate(500);
+
+            Ok(MetricResult {
+                name: "ownership".into(),
+                display_name: report_display("ownership"),
+                description: report_description("ownership"),
+                entry_groups: vec![],
+                columns: vec![
+                    Column::in_report("ownership", "total_authors"),
+                    Column::in_report("ownership", "bus_factor"),
+                    Column::in_report("ownership", "top_author"),
+                    Column::in_report("ownership", "total_lines"),
+                ],
+                entries,
             })
-            .collect();
-
-        entries.sort_by(|a, b| {
-            let fa = match a.values.get("bus_factor") {
-                Some(MetricValue::Count(n)) => *n,
-                _ => u64::MAX,
-            };
-            let fb = match b.values.get("bus_factor") {
-                Some(MetricValue::Count(n)) => *n,
-                _ => u64::MAX,
-            };
-            fa.cmp(&fb)
-        });
-
-        Some(MetricResult {
-            name: "ownership".into(),
-            display_name: report_display("ownership"),
-            description: report_description("ownership"),
-            entry_groups: vec![],
-            columns: vec![
-                Column::in_report("ownership", "total_authors"),
-                Column::in_report("ownership", "bus_factor"),
-                Column::in_report("ownership", "top_author"),
-                Column::in_report("ownership", "total_lines"),
-            ],
-            entries,
-        })
+        })())
     }
 }
 
@@ -246,7 +265,7 @@ mod tests {
 
         let mut coll = OwnershipCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         let entry = r.entries.iter().find(|e| e.key == "a.rs").unwrap();
         match entry.values.get("top_author") {
@@ -272,7 +291,7 @@ mod tests {
 
         let mut coll = OwnershipCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert!(r.entries.iter().any(|e| e.key == "real.rs"));
         assert!(!r.entries.iter().any(|e| e.key == "Cargo.lock"));
@@ -290,10 +309,97 @@ mod tests {
 
         let mut coll = OwnershipCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         // Highest risk (lowest bus_factor) leads.
         assert_eq!(r.entries[0].key, "b.rs");
         assert_eq!(r.entries[1].key, "a.rs");
+    }
+
+    #[test]
+    fn finalize_from_db_is_deterministic_for_tied_inputs() {
+        // Three files that all tie on bus_factor and total_lines, plus a file
+        // with two equal-line authors that ties on top_author. Every ordering
+        // and tie-break must resolve identically on each run, so re-running
+        // against a fresh store yields byte-identical entry keys and values.
+        let build = || {
+            let store = store_with(&[
+                // Tie on (bus_factor 1, total_lines 100); resolved by key ASC.
+                make_change("c.rs", "c1", "zoe@x", 100),
+                make_change("a.rs", "c2", "amy@x", 100),
+                make_change("b.rs", "c3", "kim@x", 100),
+                // Two authors with equal lines: top_author tie-broken by email ASC.
+                make_change("d.rs", "c4", "zoe@x", 50),
+                make_change("d.rs", "c5", "amy@x", 50),
+            ]);
+            let mut coll = OwnershipCollector::new();
+            coll.finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+                .and_then(|r| r.ok())
+                .expect("db result")
+        };
+
+        let first = build();
+        let keys: Vec<String> = first.entries.iter().map(|e| e.key.clone()).collect();
+        // a.rs, b.rs, c.rs share (bus_factor 1, total_lines 100) → key ASC;
+        // d.rs has bus_factor 2 so it sorts last.
+        assert_eq!(keys, vec!["a.rs", "b.rs", "c.rs", "d.rs"]);
+
+        let d = first.entries.iter().find(|e| e.key == "d.rs").unwrap();
+        match d.values.get("top_author") {
+            // amy@x < zoe@x, so the email-ascending tie-break selects amy@x.
+            Some(MetricValue::Text(s)) => assert_eq!(s, "amy@x"),
+            other => panic!("expected Text(amy@x), got {other:?}"),
+        }
+
+        // Re-running from an independent store must reproduce the same order.
+        for _ in 0..5 {
+            let again = build();
+            let again_keys: Vec<String> =
+                again.entries.iter().map(|e| e.key.clone()).collect();
+            assert_eq!(again_keys, keys);
+        }
+    }
+
+    #[test]
+    fn finalize_from_db_caps_entries_at_500() {
+        // Build 600 source files. Files 0..=299 get a single author
+        // (bus_factor 1, highest risk); files 300..=599 get two equal-line
+        // authors (bus_factor 2). The 500-entry cap must keep the 300
+        // bus_factor-1 files plus the 200 lowest-key bus_factor-2 files, and
+        // drop the rest — never a bus_factor-1 file.
+        let mut changes = Vec::new();
+        for i in 0..600 {
+            let file = format!("f{i:04}.rs");
+            if i < 300 {
+                changes.push(make_change(&file, &format!("c{i}a"), "alice@x", 100));
+            } else {
+                changes.push(make_change(&file, &format!("c{i}a"), "alice@x", 50));
+                changes.push(make_change(&file, &format!("c{i}b"), "bob@x", 50));
+            }
+        }
+
+        let store = store_with(&changes);
+        let mut coll = OwnershipCollector::new();
+        let r = coll
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
+            .expect("db result");
+
+        assert_eq!(r.entries.len(), 500);
+        // Every retained bus_factor-1 file must survive the cap.
+        for i in 0..300 {
+            let key = format!("f{i:04}.rs");
+            assert!(
+                r.entries.iter().any(|e| e.key == key),
+                "expected {key} (bus_factor 1) to be retained"
+            );
+        }
+        // The retained set is exactly the lowest-bus_factor files: no entry may
+        // have a higher bus_factor than any dropped one would.
+        let bus_of = |e: &MetricEntry| match e.values.get("bus_factor") {
+            Some(MetricValue::Count(n)) => *n,
+            _ => u64::MAX,
+        };
+        assert!(r.entries.iter().all(|e| bus_of(e) <= 2));
     }
 }

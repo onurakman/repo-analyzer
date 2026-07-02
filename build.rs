@@ -122,15 +122,18 @@ struct LanguageConfig {
     keywords: Vec<String>,
 }
 
+// `file_patterns` and `keywords` are consumed at build time (pattern
+// disambiguation validation below) but were also emitted into the runtime
+// `Language` struct where nothing ever read them. They're dropped from the
+// generated struct/data; the build-time `LanguageConfig` still carries them.
+// (audit finding #46)
 const LANGUAGE_SCHEMA: &[(&str, &str)] = &[
     ("index", "usize"),
     ("name", "&'static str"),
-    ("file_patterns", "&'static [&'static str]"),
     ("line_comments", "&'static [&'static str]"),
     ("block_comments", "&'static [(&'static str, &'static str)]"),
     ("nested_blocks", "bool"),
     ("shebangs", "&'static [&'static str]"),
-    ("keywords", "&'static [&'static str]"),
 ];
 
 fn write_field(output: &mut String, name: &str, value: impl std::fmt::Display) {
@@ -162,11 +165,6 @@ fn render_languages(languages: &[LanguageConfig]) -> String {
         write_field(&mut output, "name", format_args!("{:?}", lang.name));
         write_field(
             &mut output,
-            "file_patterns",
-            render_slice(&lang.file_patterns, |v| format!("{v:?}")),
-        );
-        write_field(
-            &mut output,
             "line_comments",
             render_slice(&lang.line_comments, |v| format!("{v:?}")),
         );
@@ -180,11 +178,6 @@ fn render_languages(languages: &[LanguageConfig]) -> String {
             &mut output,
             "shebangs",
             render_slice(&lang.shebangs, |v| format!("{v:?}")),
-        );
-        write_field(
-            &mut output,
-            "keywords",
-            render_slice(&lang.keywords, |v| format!("{v:?}")),
         );
         output.push_str("    },\n");
     }
@@ -271,12 +264,57 @@ fn validate_languages(languages: &[LanguageConfig]) -> Result<()> {
     }
 }
 
+/// Deserialize the top-level language map, erroring on a duplicate key. A plain
+/// `IndexMap` silently keeps the last value for a repeated key, so a duplicated
+/// language name in languages.json5 would vanish without warning and the
+/// name/pattern validation below (which ran on the already-collapsed map) would
+/// never catch it. (audit finding #45)
+fn deserialize_unique_map<'de, D>(
+    deserializer: D,
+) -> result::Result<IndexMap<String, LanguageConfig>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct MapVisitor;
+    impl<'de> de::Visitor<'de> for MapVisitor {
+        type Value = IndexMap<String, LanguageConfig>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a map of language name to config")
+        }
+        fn visit_map<M>(self, mut access: M) -> result::Result<Self::Value, M::Error>
+        where
+            M: de::MapAccess<'de>,
+        {
+            let mut map = IndexMap::with_capacity(access.size_hint().unwrap_or(0));
+            while let Some((key, value)) = access.next_entry::<String, LanguageConfig>()? {
+                if map.contains_key(&key) {
+                    return Err(de::Error::custom(format!(
+                        "duplicate language key '{key}' in languages.json5"
+                    )));
+                }
+                map.insert(key, value);
+            }
+            Ok(map)
+        }
+    }
+    deserializer.deserialize_map(MapVisitor)
+}
+
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct LanguageFile {
+    #[serde(deserialize_with = "deserialize_unique_map")]
+    languages: IndexMap<String, LanguageConfig>,
+}
+
 fn main() -> Result<()> {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR")?;
     let json_path = Path::new(&manifest_dir).join("languages.json5");
     println!("cargo:rerun-if-changed={}", json_path.display());
     let json_content = fs::read_to_string(&json_path)?;
-    let language_map: IndexMap<String, LanguageConfig> = json5::from_str(&json_content)
+    let LanguageFile {
+        languages: language_map,
+    } = json5::from_str(&json_content)
         .map_err(|e| format!("Failed to parse languages.json5: {e}"))?;
     let languages = normalize_languages(language_map)?;
     validate_languages(&languages)?;

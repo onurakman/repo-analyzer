@@ -39,19 +39,26 @@ impl MetricCollector for ChurnCollector {
         &mut self,
         store: &ChangeStore,
         _progress: &crate::metrics::ProgressReporter,
-    ) -> Option<MetricResult> {
+    ) -> Option<anyhow::Result<MetricResult>> {
+        Some((|| -> anyhow::Result<MetricResult> {
         let entries = store
             .with_conn(|conn| -> anyhow::Result<Vec<MetricEntry>> {
                 // No LIMIT in SQL: non-code files are filtered out in Rust
                 // before the top-500 slice, so the cap applies to source files.
                 let mut stmt = conn.prepare(
-                    "SELECT file_path,
-                            SUM(additions) AS added,
-                            SUM(deletions) AS deleted,
+                    // Canonicalize to the current HEAD name so a renamed file's
+                    // churn is merged under one path rather than split across
+                    // its old and new names. Liveness is checked on the
+                    // canonical name. (finding #10)
+                    "SELECT COALESCE(cp.head_path, ch.file_path) AS canon,
+                            SUM(ch.additions) AS added,
+                            SUM(ch.deletions) AS deleted,
                             COUNT(*) AS change_count
-                       FROM changes
-                      GROUP BY file_path
-                      ORDER BY (SUM(additions) + SUM(deletions)) DESC",
+                       FROM non_merge_changes ch
+                       LEFT JOIN canonical_path cp ON cp.path = ch.file_path
+                      GROUP BY canon
+                     HAVING canon IN (SELECT file_path FROM live_files)
+                      ORDER BY (SUM(ch.additions) + SUM(ch.deletions)) DESC",
                 )?;
                 let rows = stmt.query_map([], |row| {
                     let file: String = row.get(0)?;
@@ -88,11 +95,9 @@ impl MetricCollector for ChurnCollector {
                     }
                 }
                 Ok(out)
-            })
-            .ok()?
-            .ok()?;
+            })??;
 
-        Some(MetricResult {
+        Ok(MetricResult {
             name: "churn".into(),
             display_name: report_display("churn"),
             description: report_description("churn"),
@@ -107,6 +112,7 @@ impl MetricCollector for ChurnCollector {
             ],
             entries,
         })
+        })())
     }
 }
 
@@ -162,6 +168,55 @@ mod tests {
     }
 
     #[test]
+    fn rename_merges_churn_under_head_name() {
+        let ts = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2025, 1, 15, 12, 0, 0)
+            .unwrap();
+        let mk = |oid: &str, file: &str, old: Option<&str>, status: FileStatus, add: u32, del: u32| {
+            ParsedChange {
+                diff: Arc::new(DiffRecord {
+                    commit: Arc::new(CommitInfo {
+                        oid: oid.into(),
+                        author: "dev".into(),
+                        email: "dev@test.com".into(),
+                        timestamp: ts,
+                        message: "m".into(),
+                        parent_ids: vec![],
+                    }),
+                    file_path: file.into(),
+                    old_path: old.map(Into::into),
+                    status,
+                    hunks: vec![],
+                    additions: add,
+                    deletions: del,
+                }),
+                constructs: vec![],
+            }
+        };
+        // a.rs added (10/3), then renamed to b.rs and edited more (20/5). Churn
+        // must show ONE row under the HEAD name b.rs with the merged totals,
+        // not two split rows. (finding #10)
+        let store = store_with(&[
+            mk("c1", "a.rs", None, FileStatus::Added, 10, 3),
+            mk("c2", "b.rs", Some("a.rs"), FileStatus::Renamed, 20, 5),
+        ]);
+        let r = ChurnCollector::new()
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .and_then(|r| r.ok())
+            .expect("db result");
+        assert_eq!(r.entries.len(), 1, "renamed file merged into one row");
+        assert_eq!(r.entries[0].key, "b.rs", "keyed by the HEAD name");
+        let get = |k: &str| match r.entries[0].values.get(k) {
+            Some(MetricValue::Count(n)) => *n,
+            _ => 0,
+        };
+        assert_eq!(get("lines_added"), 30, "10 + 20 merged");
+        assert_eq!(get("lines_deleted"), 8, "3 + 5 merged");
+        assert_eq!(get("change_count"), 2);
+    }
+
+    #[test]
     fn test_churn_accumulation() {
         let store = store_with(&[
             make_change("a.rs", "c1", 10, 3),
@@ -170,7 +225,7 @@ mod tests {
 
         let mut collector = ChurnCollector::new();
         let result = collector
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         let entry = result.entries.iter().find(|e| e.key == "a.rs").unwrap();
 
@@ -201,7 +256,7 @@ mod tests {
 
         let mut collector = ChurnCollector::new();
         let result = collector
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(result.entries[0].key, "big.rs");
         assert_eq!(result.entries[1].key, "small.rs");

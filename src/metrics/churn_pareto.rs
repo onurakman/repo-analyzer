@@ -9,6 +9,11 @@ use crate::types::{
     report_display,
 };
 
+/// Key of the aggregate summary row emitted first in the churn_pareto report.
+/// Exported so the health scorer filters it out with the exact same string
+/// instead of a hard-coded literal that drifts from this one. (findings #6, #7)
+pub const SUMMARY_KEY: &str = "<summary>";
+
 pub struct ChurnParetoCollector;
 
 impl Default for ChurnParetoCollector {
@@ -36,12 +41,13 @@ impl MetricCollector for ChurnParetoCollector {
         &mut self,
         store: &ChangeStore,
         _progress: &crate::metrics::ProgressReporter,
-    ) -> Option<MetricResult> {
+    ) -> Option<anyhow::Result<MetricResult>> {
+        Some((|| -> anyhow::Result<MetricResult> {
         let sorted = store
             .with_conn(|conn| -> anyhow::Result<Vec<(String, u64)>> {
                 let mut stmt = conn.prepare(
                     "SELECT file_path, SUM(additions + deletions) AS churn
-                       FROM changes
+                       FROM non_merge_changes
                       GROUP BY file_path
                      HAVING churn > 0
                       ORDER BY churn DESC",
@@ -60,9 +66,7 @@ impl MetricCollector for ChurnParetoCollector {
                     out.push((path, churn));
                 }
                 Ok(out)
-            })
-            .ok()?
-            .ok()?;
+            })??;
 
         let total_files = sorted.len() as u64;
         let total_churn: u64 = sorted.iter().map(|(_, c)| *c).sum();
@@ -77,9 +81,26 @@ impl MetricCollector for ChurnParetoCollector {
             let p80_pct = pct(p80, total_files);
             let p90_pct = pct(p90, total_files);
 
+            // Truncation-free Pareto signal for the health scorer: what share of
+            // total churn do the top 20% of files (over the FULL list) account
+            // for? The pillar can't recompute this from the top-50 display slice,
+            // so we expose it on the summary row's values. (finding #7)
+            let top20_files = ((total_files as f64 * 0.2).ceil() as u64).max(1);
+            let top20_churn: u64 = sorted
+                .iter()
+                .take(top20_files as usize)
+                .map(|(_, c)| *c)
+                .sum();
+            let top20_pct = (top20_churn.saturating_mul(100))
+                .checked_div(total_churn)
+                .unwrap_or(0);
+
             let mut values = HashMap::new();
             values.insert("rank".into(), MetricValue::Text("—".into()));
             values.insert("churn".into(), MetricValue::Count(total_churn));
+            // Consumed by the health `change_concentration` pillar; harmless
+            // extra field for other consumers (additive, summary row only).
+            values.insert("top20_pct".into(), MetricValue::Count(top20_pct));
             values.insert(
                 "pct_of_total".into(),
                 MetricValue::Message(
@@ -101,7 +122,7 @@ impl MetricCollector for ChurnParetoCollector {
                 ),
             );
             entries.push(MetricEntry {
-                key: "<summary>".into(),
+                key: SUMMARY_KEY.into(),
                 values,
             });
         }
@@ -122,7 +143,7 @@ impl MetricCollector for ChurnParetoCollector {
             });
         }
 
-        Some(MetricResult {
+        Ok(MetricResult {
             name: "churn_pareto".into(),
             display_name: report_display("churn_pareto"),
             description: report_description("churn_pareto"),
@@ -135,6 +156,7 @@ impl MetricCollector for ChurnParetoCollector {
             ],
             entries,
         })
+        })())
     }
 }
 

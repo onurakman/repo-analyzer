@@ -69,7 +69,8 @@ impl MetricCollector for QualityCollector {
         &mut self,
         store: &ChangeStore,
         _progress: &crate::metrics::ProgressReporter,
-    ) -> Option<MetricResult> {
+    ) -> Option<anyhow::Result<MetricResult>> {
+        Some((|| -> anyhow::Result<MetricResult> {
         // One row per distinct commit. Per-commit work stays bounded because
         // we only keep counters, never the full per-commit list.
         let (
@@ -128,9 +129,7 @@ impl MetricCollector for QualityCollector {
                     }
                     Ok((total_commits, short, low_q, revert, mega, merge, msg_chars))
                 },
-            )
-            .ok()?
-            .ok()?;
+            )??;
 
         let avg_msg_len = if total_commits > 0 {
             total_msg_chars as f64 / total_commits as f64
@@ -239,7 +238,7 @@ impl MetricCollector for QualityCollector {
             },
         ];
 
-        Some(MetricResult {
+        Ok(MetricResult {
             name: "quality".into(),
             display_name: report_display("quality"),
             description: report_description("quality"),
@@ -251,6 +250,7 @@ impl MetricCollector for QualityCollector {
             ],
             entries,
         })
+        })())
     }
 }
 
@@ -380,7 +380,7 @@ mod tests {
         let store = store_with(&[make_change("c1", "Add feature X with care", 10, 5, vec![])]);
         let mut coll = QualityCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         let keys: Vec<String> = r.entries.iter().map(|e| e.key.clone()).collect();
         for k in [
@@ -415,7 +415,7 @@ mod tests {
         ]);
         let mut coll = QualityCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(
             rec_code(entry(&r, "short_messages")),
@@ -442,7 +442,7 @@ mod tests {
         let store = store_with(&commits);
         let mut coll = QualityCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(
             rec_code(entry(&r, "low_quality_messages")),
@@ -461,7 +461,7 @@ mod tests {
         let store = store_with(&commits);
         let mut coll = QualityCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(
             rec_code(entry(&r, "mega_commits")),
@@ -479,7 +479,7 @@ mod tests {
         let store = store_with(&commits);
         let mut coll = QualityCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(
             rec_code(entry(&r, "revert_commits")),
@@ -510,7 +510,7 @@ mod tests {
         ]);
         let mut coll = QualityCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(
             rec_code(entry(&r, "merge_commits")),
@@ -523,7 +523,7 @@ mod tests {
         let store = store_with(&[make_change("c1", "Short msg", 1, 0, vec![])]);
         let mut coll = QualityCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(
             rec_code(entry(&r, "avg_message_length")),
@@ -536,7 +536,7 @@ mod tests {
         let store = store_with(&[make_change("c1", "msg ok", 1, 0, vec![])]);
         let mut coll = QualityCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         let baseline = entry(&r, "total_commits");
         match baseline.values.get("recommendation") {

@@ -35,8 +35,9 @@ impl MetricCollector for AuthorsCollector {
         &mut self,
         store: &ChangeStore,
         _progress: &crate::metrics::ProgressReporter,
-    ) -> Option<MetricResult> {
-        let entries = store
+    ) -> Option<anyhow::Result<MetricResult>> {
+        Some((|| -> anyhow::Result<MetricResult> {
+            let entries = store
             .with_conn(|conn| -> anyhow::Result<Vec<MetricEntry>> {
                 let mut stmt = conn.prepare(
                     "SELECT email,
@@ -46,7 +47,7 @@ impl MetricCollector for AuthorsCollector {
                             COUNT(DISTINCT date(commit_ts, 'unixepoch'))        AS active_days,
                             MIN(commit_ts)                                      AS first_ts,
                             MAX(commit_ts)                                      AS last_ts
-                       FROM changes
+                       FROM non_merge_changes
                       GROUP BY email
                       ORDER BY commits DESC",
                 )?;
@@ -84,25 +85,24 @@ impl MetricCollector for AuthorsCollector {
                     out.push(MetricEntry { key: email, values });
                 }
                 Ok(out)
-            })
-            .ok()?
-            .ok()?;
+            })??;
 
-        Some(MetricResult {
-            name: "authors".into(),
-            display_name: report_display("authors"),
-            description: report_description("authors"),
-            columns: vec![
-                Column::in_report("authors", "commits"),
-                Column::in_report("authors", "lines_added"),
-                Column::in_report("authors", "lines_deleted"),
-                Column::in_report("authors", "active_days"),
-                Column::in_report("authors", "first_commit"),
-                Column::in_report("authors", "last_commit"),
-            ],
-            entries,
-            entry_groups: vec![],
-        })
+            Ok(MetricResult {
+                name: "authors".into(),
+                display_name: report_display("authors"),
+                description: report_description("authors"),
+                columns: vec![
+                    Column::in_report("authors", "commits"),
+                    Column::in_report("authors", "lines_added"),
+                    Column::in_report("authors", "lines_deleted"),
+                    Column::in_report("authors", "active_days"),
+                    Column::in_report("authors", "first_commit"),
+                    Column::in_report("authors", "last_commit"),
+                ],
+                entries,
+                entry_groups: vec![],
+            })
+        })())
     }
 }
 
@@ -173,7 +173,7 @@ mod tests {
 
         let mut c = AuthorsCollector::new();
         let r = c
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db");
         assert_eq!(r.entries.len(), 2);
 

@@ -1,8 +1,10 @@
 //! Translation catalog for [`crate::types::LocalizedMessage`].
 //!
 //! Locale JSON files live in `/locales/<code>.json` and are bundled into the
-//! binary with [`include_str!`]. `en.json` is the source of truth; other
-//! locales are expected to be translated copies with identical keys.
+//! binary with [`include_str!`]. `en.json` is the source of truth. Currently
+//! `en` is the only bundled locale (see [`SUPPORTED_LOCALES`]); any other code
+//! requested via `--locale` falls back to `en` with a warning on stderr.
+//! Additional locales are expected to be translated copies with identical keys.
 //!
 //! The catalog is a flat map `code → template`, where `template` may contain
 //! `{{param_name}}` placeholders that [`Catalog::translate`] substitutes from
@@ -15,6 +17,18 @@ use crate::types::LocalizedMessage;
 
 const EN_JSON: &str = include_str!("../locales/en.json");
 
+/// Locale codes that ship with a bundled catalog. Any value passed to
+/// [`Catalog::load`] that is not listed here falls back to `en`. This is the
+/// single source of truth for the set of locales the CLI actually supports, so
+/// `--locale` help text and validation can reference it instead of drifting.
+pub const SUPPORTED_LOCALES: &[&str] = &["en"];
+
+/// Whether `locale` has a bundled catalog (i.e. is honoured rather than
+/// silently falling back to `en`).
+pub fn is_supported(locale: &str) -> bool {
+    SUPPORTED_LOCALES.contains(&locale)
+}
+
 /// Flat `code → template` translation map for one locale.
 #[derive(Debug, Clone)]
 pub struct Catalog {
@@ -23,13 +37,27 @@ pub struct Catalog {
 
 impl Catalog {
     /// Load a bundled locale by its short code. Unknown codes fall back to
-    /// `en`. Returns a catalog even on malformed JSON (empty map) so the CLI
+    /// `en` and emit a warning on stderr so the fallback is visible rather than
+    /// silent. Returns a catalog even on malformed JSON (empty map) so the CLI
     /// never panics on startup — missing keys still surface via the code
     /// fallback in [`Catalog::translate`].
+    ///
+    /// The warning is unconditional (no `--quiet` is reachable here); it goes to
+    /// stderr only, so it never contaminates stdout output such as JSON or CSV.
     pub fn load(locale: &str) -> Self {
-        let raw = match locale {
-            "en" => EN_JSON,
-            _ => EN_JSON,
+        let raw = if is_supported(locale) {
+            match locale {
+                "en" => EN_JSON,
+                // Every code in `SUPPORTED_LOCALES` must have a matching arm.
+                _ => EN_JSON,
+            }
+        } else {
+            eprintln!(
+                "warning: unsupported locale {locale:?}; falling back to \"en\" \
+                 (supported locales: {})",
+                SUPPORTED_LOCALES.join(", ")
+            );
+            EN_JSON
         };
         let entries: HashMap<String, String> = serde_json::from_str(raw).unwrap_or_default();
         Self { entries }
@@ -115,5 +143,28 @@ mod tests {
         let cat = Catalog::load("en");
         // Catalog should at least parse without panicking.
         let _ = cat.translate_code("anything");
+    }
+
+    #[test]
+    fn supported_locales_report_en_only() {
+        assert!(is_supported("en"));
+        assert!(!is_supported("tr"));
+        assert!(!is_supported("does-not-exist"));
+        // Every advertised locale must actually be loadable.
+        assert!(SUPPORTED_LOCALES.contains(&"en"));
+    }
+
+    #[test]
+    fn unknown_locale_falls_back_to_en_catalog() {
+        // Falls back to the en bundle instead of an empty map: the same known
+        // code resolves identically for `en` and for an unsupported locale.
+        let en = Catalog::load("en");
+        let fallback = Catalog::load("xx-unknown");
+        let probe = en
+            .entries
+            .keys()
+            .next()
+            .expect("bundled en catalog should not be empty");
+        assert_eq!(en.translate_code(probe), fallback.translate_code(probe));
     }
 }

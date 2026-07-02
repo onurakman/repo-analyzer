@@ -122,10 +122,13 @@ fn aggregate(classified: Vec<(&'static str, u64)>) -> Vec<LanguageShare> {
         })
         .collect();
 
+    // Sort by the underlying code-line counts (not the rounded percentage,
+    // which makes ties order non-deterministically), with a stable tie-break
+    // on language name.
     out.sort_by(|a, b| {
-        b.percentage
-            .partial_cmp(&a.percentage)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        b.code_lines
+            .cmp(&a.code_lines)
+            .then_with(|| a.language.cmp(&b.language))
     });
     out
 }
@@ -229,6 +232,22 @@ mod tests {
     fn empty_dir_returns_empty_vec() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(repo_composition(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn equal_rounded_percent_orders_by_code_lines() {
+        // Two languages whose percentages both round to 50.00 (2 decimals) but
+        // have different underlying code_lines. Ordering must be deterministic:
+        // the higher code_lines comes first, regardless of the rounded percent.
+        let classified = vec![("Alpha", 100_000u64), ("Bravo", 100_001u64)];
+        let comp = aggregate(classified);
+        assert_eq!(comp.len(), 2);
+        // Rounded percentages tie...
+        assert_eq!(comp[0].percentage, comp[1].percentage);
+        // ...but the underlying counts break the tie deterministically.
+        assert!(comp[0].code_lines > comp[1].code_lines);
+        assert_eq!(comp[0].language, "Bravo");
+        assert_eq!(comp[1].language, "Alpha");
     }
 
     #[test]

@@ -39,9 +39,10 @@ impl MetricCollector for ConstructOwnershipCollector {
         &mut self,
         store: &ChangeStore,
         progress: &crate::metrics::ProgressReporter,
-    ) -> Option<MetricResult> {
-        store
-            .with_conn(|conn| -> anyhow::Result<MetricResult> {
+    ) -> Option<anyhow::Result<MetricResult>> {
+        Some(
+            store
+                .with_conn(|conn| -> anyhow::Result<MetricResult> {
                 progress.status(&format!(
                     "  construct_ownership: selecting top {TOP_CONSTRUCTS} constructs..."
                 ));
@@ -52,7 +53,7 @@ impl MetricCollector for ConstructOwnershipCollector {
                     "DROP TABLE IF EXISTS __top_constructs;
                      CREATE TEMP TABLE __top_constructs AS
                        SELECT ch.file_path AS file, c.qualified_name AS qn, c.kind AS kind
-                         FROM constructs c JOIN changes ch ON c.change_id = ch.id
+                         FROM constructs c JOIN non_merge_changes ch ON c.change_id = ch.id
                         GROUP BY ch.file_path, c.qualified_name, c.kind
                         ORDER BY SUM(c.lines_touched) DESC
                         LIMIT {TOP_CONSTRUCTS};"
@@ -72,7 +73,7 @@ impl MetricCollector for ConstructOwnershipCollector {
                     "SELECT ch.file_path, c.qualified_name, c.kind, ch.email,
                             SUM(c.lines_touched) AS touches
                        FROM constructs c
-                       JOIN changes ch ON c.change_id = ch.id
+                       JOIN non_merge_changes ch ON c.change_id = ch.id
                        JOIN __top_constructs t
                          ON t.file = ch.file_path
                         AND t.qn   = c.qualified_name
@@ -171,9 +172,9 @@ impl MetricCollector for ConstructOwnershipCollector {
                     ],
                     entries,
                 })
-            })
-            .ok()?
-            .ok()
+                })
+                .and_then(|r| r),
+        )
     }
 }
 
@@ -313,7 +314,7 @@ mod tests {
 
         let mut coll = ConstructOwnershipCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert!(!r.entries.is_empty());
         let entry = r
@@ -349,7 +350,7 @@ mod tests {
 
         let mut coll = ConstructOwnershipCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert!(r.entries.iter().any(|e| e.key.starts_with("real.rs")));
         assert!(!r.entries.iter().any(|e| e.key.contains("Cargo.lock")));
@@ -366,7 +367,7 @@ mod tests {
 
         let mut coll = ConstructOwnershipCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         let entry = r.entries.first().unwrap();
         for key in [
@@ -399,7 +400,7 @@ mod tests {
 
         let mut coll = ConstructOwnershipCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         // Rows are sorted bus_factor ASC, then touches DESC; lowest bus
         // factor (highest risk) leads the report.

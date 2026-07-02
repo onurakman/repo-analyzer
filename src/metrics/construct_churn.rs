@@ -36,7 +36,8 @@ impl MetricCollector for ConstructChurnCollector {
         &mut self,
         store: &ChangeStore,
         _progress: &crate::metrics::ProgressReporter,
-    ) -> Option<MetricResult> {
+    ) -> Option<anyhow::Result<MetricResult>> {
+        Some((|| -> anyhow::Result<MetricResult> {
         let entries = store
             .with_conn(|conn| -> anyhow::Result<Vec<MetricEntry>> {
                 let mut stmt = conn.prepare(
@@ -48,7 +49,7 @@ impl MetricCollector for ConstructChurnCollector {
                             COUNT(DISTINCT ch.email)  AS unique_authors,
                             MAX(ch.commit_ts)         AS last_ts
                        FROM constructs c
-                       JOIN changes ch ON c.change_id = ch.id
+                       JOIN non_merge_changes ch ON c.change_id = ch.id
                       GROUP BY ch.file_path, c.qualified_name, c.kind
                       ORDER BY changes DESC
                       LIMIT 500",
@@ -93,11 +94,9 @@ impl MetricCollector for ConstructChurnCollector {
                     });
                 }
                 Ok(out)
-            })
-            .ok()?
-            .ok()?;
+            })??;
 
-        Some(MetricResult {
+        Ok(MetricResult {
             name: "construct_churn".into(),
             display_name: report_display("construct_churn"),
             description: report_description("construct_churn"),
@@ -112,6 +111,7 @@ impl MetricCollector for ConstructChurnCollector {
             ],
             entries,
         })
+        })())
     }
 }
 
@@ -210,7 +210,7 @@ mod tests {
 
         let mut coll = ConstructChurnCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert_eq!(r.entries.len(), 2, "two distinct constructs");
         let foo = r.entries.iter().find(|e| e.key.ends_with("::foo")).unwrap();
@@ -235,7 +235,7 @@ mod tests {
 
         let mut coll = ConstructChurnCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert!(r.entries.iter().any(|e| e.key.starts_with("real.rs")));
         assert!(
@@ -255,7 +255,7 @@ mod tests {
 
         let mut coll = ConstructChurnCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert!(r.entries.first().unwrap().key.ends_with("::often"));
     }
@@ -271,7 +271,7 @@ mod tests {
 
         let mut coll = ConstructChurnCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         let entry = r.entries.first().unwrap();
         for key in [

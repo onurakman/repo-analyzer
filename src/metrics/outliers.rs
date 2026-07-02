@@ -46,7 +46,8 @@ impl MetricCollector for OutliersCollector {
         &mut self,
         store: &ChangeStore,
         _progress: &crate::metrics::ProgressReporter,
-    ) -> Option<MetricResult> {
+    ) -> Option<anyhow::Result<MetricResult>> {
+        Some((|| -> anyhow::Result<MetricResult> {
         // Push both threshold filters into SQL — any file that fails both is
         // dead weight we don't want to drag into Rust. Status-deleted files
         // are already excluded via the HAVING clause. ORDER BY + LIMIT caps
@@ -85,9 +86,7 @@ impl MetricCollector for OutliersCollector {
                     out.push(r?);
                 }
                 Ok(out)
-            })
-            .ok()?
-            .ok()?;
+            })??;
 
         // SQL already enforced the threshold; only the Rust-only
         // `is_source_file` check remains here.
@@ -117,7 +116,7 @@ impl MetricCollector for OutliersCollector {
             cb.cmp(&ca)
         });
 
-        Some(MetricResult {
+        Ok(MetricResult {
             name: "outliers".into(),
             display_name: report_display("outliers"),
             description: report_description("outliers"),
@@ -130,6 +129,7 @@ impl MetricCollector for OutliersCollector {
             ],
             entries,
         })
+        })())
     }
 }
 
@@ -265,7 +265,7 @@ mod tests {
 
         let mut coll = OutliersCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert!(
             r.entries.is_empty(),
@@ -288,7 +288,7 @@ mod tests {
 
         let mut coll = OutliersCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         let entry = r
             .entries
@@ -325,7 +325,7 @@ mod tests {
 
         let mut coll = OutliersCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert!(
             !r.entries.iter().any(|e| e.key == "gone.rs"),
@@ -357,7 +357,7 @@ mod tests {
 
         let mut coll = OutliersCollector::new();
         let r = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert!(r.entries.iter().any(|e| e.key == "real.rs"));
         assert!(!r.entries.iter().any(|e| e.key == "package-lock.json"));

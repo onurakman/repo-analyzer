@@ -35,34 +35,36 @@ impl MetricCollector for AgeCollector {
         &mut self,
         store: &ChangeStore,
         _progress: &crate::metrics::ProgressReporter,
-    ) -> Option<MetricResult> {
-        // status=2 means Deleted; skip files that were ever deleted.
+    ) -> Option<anyhow::Result<MetricResult>> {
+        Some((|| -> anyhow::Result<MetricResult> {
+        // Only files that currently exist at HEAD (live_files): a file whose
+        // last change is a deletion is excluded, but one deleted and later
+        // re-added keeps its full history under this path. (finding #12)
         let entries = store
             .with_conn(|conn| -> anyhow::Result<Vec<MetricEntry>> {
                 let mut stmt = conn.prepare(
-                    "SELECT file_path,
-                            MIN(commit_ts)                AS first_ts,
-                            MAX(commit_ts)                AS last_ts,
-                            COUNT(*)                      AS change_count,
-                            MAX(CASE WHEN status = 2 THEN 1 ELSE 0 END) AS ever_deleted
-                       FROM changes
-                      GROUP BY file_path",
+                    // Canonicalize to the HEAD name so a renamed file keeps its
+                    // full age/history under one path. (finding #10)
+                    "SELECT COALESCE(cp.head_path, c.file_path) AS canon,
+                            MIN(c.commit_ts)              AS first_ts,
+                            MAX(c.commit_ts)              AS last_ts,
+                            COUNT(*)                      AS change_count
+                       FROM changes c
+                       LEFT JOIN canonical_path cp ON cp.path = c.file_path
+                      GROUP BY canon
+                     HAVING canon IN (SELECT file_path FROM live_files)",
                 )?;
                 let rows = stmt.query_map([], |row| {
                     let file: String = row.get(0)?;
                     let first_ts: i64 = row.get(1)?;
                     let last_ts: i64 = row.get(2)?;
                     let change_count: i64 = row.get(3)?;
-                    let deleted: i64 = row.get(4)?;
-                    Ok((file, first_ts, last_ts, change_count as u64, deleted != 0))
+                    Ok((file, first_ts, last_ts, change_count as u64))
                 })?;
                 let mut out = Vec::new();
                 let today = Utc::now().date_naive();
                 for r in rows {
-                    let (file, first_ts, last_ts, change_count, deleted) = r?;
-                    if deleted {
-                        continue;
-                    }
+                    let (file, first_ts, last_ts, change_count) = r?;
                     let first_seen = ts_to_date(first_ts);
                     let last_modified = ts_to_date(last_ts);
                     let age_days = (today - first_seen).num_days().max(0) as u64;
@@ -90,9 +92,7 @@ impl MetricCollector for AgeCollector {
                     out.push(MetricEntry { key: file, values });
                 }
                 Ok(out)
-            })
-            .ok()?
-            .ok()?;
+            })??;
 
         let mut entries = entries;
         entries.sort_by(|a, b| {
@@ -107,7 +107,7 @@ impl MetricCollector for AgeCollector {
             sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        Some(MetricResult {
+        Ok(MetricResult {
             name: "age".into(),
             display_name: report_display("age"),
             description: report_description("age"),
@@ -122,6 +122,7 @@ impl MetricCollector for AgeCollector {
             ],
             entries,
         })
+        })())
     }
 }
 
@@ -215,7 +216,7 @@ mod tests {
 
         let mut coll = AgeCollector::new();
         let result = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert!(result.entries.iter().any(|e| e.key == "alive.rs"));
         assert!(
@@ -237,7 +238,7 @@ mod tests {
 
         let mut coll = AgeCollector::new();
         let result = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         assert!(result.entries.len() >= 2, "expected at least two entries");
         assert_eq!(result.entries[0].key, "hot.rs");
@@ -250,7 +251,7 @@ mod tests {
 
         let mut coll = AgeCollector::new();
         let result = coll
-            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None))
+            .finalize_from_db(&store, &crate::metrics::ProgressReporter::new(None)).and_then(|r| r.ok())
             .expect("db result");
         let entry = result.entries.iter().find(|e| e.key == "a.rs").unwrap();
         for key in [

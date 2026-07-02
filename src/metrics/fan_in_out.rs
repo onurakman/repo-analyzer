@@ -228,12 +228,74 @@ pub(crate) fn collect_blobs(
 
 // --- Import extraction (regex) ----------------------------------------------------
 
-fn rust_re() -> &'static Regex {
+fn rust_use_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| {
-        // captures the path inside `use ...;` — best-effort, ignores braces
-        Regex::new(r"^[ \t]*(?:pub\s+)?use\s+([A-Za-z_][\w:]*)").unwrap()
-    })
+    // Capture the whole path body of a `use ...;` statement (everything up to
+    // the terminating `;`), so brace groups can be expanded downstream.
+    R.get_or_init(|| Regex::new(r"^[ \t]*(?:pub\s+)?use\s+([^;]+);").unwrap())
+}
+
+/// Expand a Rust `use` path body into individual import paths, so a grouped
+/// import like `crate::foo::{bar, baz}` yields `crate::foo::bar` and
+/// `crate::foo::baz` (previously only the parent module resolved, undercounting
+/// fan-in). One level of braces is handled — the common case. (finding #15)
+fn expand_rust_use(body: &str) -> Vec<String> {
+    let body = body.trim();
+    let Some(open) = body.find('{') else {
+        // No group: a plain `use a::b::c`. Drop any `as alias`.
+        let head = body.split(" as ").next().unwrap_or(body).trim();
+        return if head.is_empty() {
+            vec![]
+        } else {
+            vec![head.to_string()]
+        };
+    };
+    let prefix = &body[..open]; // includes the trailing `::`
+    let close = body.rfind('}').unwrap_or(body.len());
+    let group = &body[open + 1..close.min(body.len())];
+    let mut out = Vec::new();
+    for item in split_top_level_commas(group) {
+        // Only the head segment matters for file resolution; ignore any nested
+        // `::{...}` and `as alias`.
+        let head = item
+            .split("::{")
+            .next()
+            .unwrap_or(item)
+            .split(" as ")
+            .next()
+            .unwrap_or(item)
+            .trim();
+        if head.is_empty() {
+            continue;
+        }
+        if head == "self" || head == "*" {
+            // `self`/glob refer to the module named by the prefix itself.
+            out.push(prefix.trim_end_matches("::").to_string());
+        } else {
+            out.push(format!("{prefix}{head}"));
+        }
+    }
+    out
+}
+
+/// Split on commas that are not nested inside `{...}` (one-level brace depth).
+fn split_top_level_commas(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            ',' if depth <= 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
 }
 
 fn rust_mod_re() -> &'static Regex {
@@ -256,10 +318,10 @@ pub(crate) fn extract_imports(lang: Lang, source: &str) -> Vec<String> {
     match lang {
         Lang::Rust => {
             for line in source.lines() {
-                if let Some(c) = rust_re().captures(line)
+                if let Some(c) = rust_use_re().captures(line)
                     && let Some(m) = c.get(1)
                 {
-                    out.push(m.as_str().to_string());
+                    out.extend(expand_rust_use(m.as_str()));
                 }
                 if let Some(c) = rust_mod_re().captures(line)
                     && let Some(m) = c.get(1)
@@ -306,41 +368,92 @@ pub(crate) fn resolve_import(
     }
 }
 
-/// Try to resolve a Rust import path like `crate::foo::bar` or `mod:foo` to a file in the repo.
+/// Split a repo path into `(dir, stem)`, e.g. `src/metrics/foo.rs` ->
+/// `("src/metrics", "foo")`.
+fn split_dir_stem(path: &str) -> (&str, &str) {
+    let (dir, file) = path.rsplit_once('/').unwrap_or(("", path));
+    (dir, file.strip_suffix(".rs").unwrap_or(file))
+}
+
+fn join_dir(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+const MOD_FILE_STEMS: [&str; 3] = ["mod", "lib", "main"];
+
+/// Try to resolve a Rust import path like `crate::foo::bar`, `self::x`,
+/// `super::y`, or `mod:foo` to a file in the repo. `super::`/`self::` are
+/// resolved relative to the importer's module directory rather than the crate
+/// root — the old code treated them like `crate::` and missed them. (finding #15)
 fn resolve_rust(raw: &str, importer: &str, paths: &HashSet<String>) -> Option<String> {
+    let (importer_dir, importer_stem) = split_dir_stem(importer);
+    let importer_is_mod = MOD_FILE_STEMS.contains(&importer_stem);
+
     if let Some(name) = raw.strip_prefix("mod:") {
-        // `mod foo;` — sibling file in importer's directory
-        let dir = importer.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-        for cand in candidate_rust_paths(dir, name) {
-            if paths.contains(&cand) {
-                return Some(cand);
+        // `mod foo;` — a `mod.rs`/`lib.rs`/`main.rs` declares siblings in its
+        // own dir; `foo.rs` declares submodules in `foo/`. Try both.
+        let mut bases = vec![importer_dir.to_string()];
+        if !importer_is_mod {
+            bases.push(join_dir(importer_dir, importer_stem));
+        }
+        for base in &bases {
+            for cand in candidate_rust_paths(base, name) {
+                if paths.contains(&cand) {
+                    return Some(cand);
+                }
             }
         }
         return None;
     }
-    // Strip leading `crate::`, `self::`, `super::` — best effort
-    let trimmed = raw
-        .strip_prefix("crate::")
-        .or_else(|| raw.strip_prefix("self::"))
-        .or_else(|| raw.strip_prefix("super::"))
-        .unwrap_or(raw);
 
-    // External crate? Skip.
-    if !raw.starts_with("crate::") && !raw.starts_with("self::") && !raw.starts_with("super::") {
-        return None;
-    }
+    // Base directories to resolve the path against + the remainder after the
+    // leading keyword.
+    let (bases, rest): (Vec<String>, &str) = if let Some(r) = raw.strip_prefix("crate::") {
+        (vec!["src".to_string()], r)
+    } else if let Some(r) = raw.strip_prefix("self::") {
+        // `self` = the importer's own module; submodules of `foo.rs` live in `foo/`.
+        let mut b = vec![importer_dir.to_string()];
+        if !importer_is_mod {
+            b.push(join_dir(importer_dir, importer_stem));
+        }
+        (b, r)
+    } else if let Some(r) = raw.strip_prefix("super::") {
+        // `super` = the parent module: the importer's dir, or its parent when
+        // the importer itself is a `mod.rs`/`lib.rs`/`main.rs`.
+        let parent = if importer_is_mod {
+            split_dir_stem(importer_dir).0.to_string()
+        } else {
+            importer_dir.to_string()
+        };
+        (vec![parent], r)
+    } else {
+        return None; // external crate
+    };
 
-    let parts: Vec<&str> = trimmed.split("::").collect();
+    let parts: Vec<&str> = rest.split("::").filter(|s| !s.is_empty()).collect();
     if parts.is_empty() {
         return None;
     }
-    // Walk longest prefix down to shortest, trying to resolve to src/<parts>.rs or .../mod.rs
+    // Longest prefix down to shortest: `a::b::c` -> a/b/c.rs, a/b/c/mod.rs, a/b…
     for take in (1..=parts.len()).rev() {
         let joined = parts[..take].join("/");
-        let cands = [format!("src/{joined}.rs"), format!("src/{joined}/mod.rs")];
-        for c in cands {
-            if paths.contains(&c) {
-                return Some(c);
+        for base in &bases {
+            let prefix = if base.is_empty() {
+                String::new()
+            } else {
+                format!("{base}/")
+            };
+            for cand in [
+                format!("{prefix}{joined}.rs"),
+                format!("{prefix}{joined}/mod.rs"),
+            ] {
+                if paths.contains(&cand) {
+                    return Some(cand);
+                }
             }
         }
     }
@@ -474,6 +587,47 @@ mod tests {
         assert!(imps.iter().any(|s| s == "crate::a::b::C"));
         assert!(imps.iter().any(|s| s == "std::collections::HashMap"));
         assert!(imps.iter().any(|s| s == "mod:foo"));
+    }
+
+    #[test]
+    fn rust_brace_group_expands_to_each_item() {
+        // `use crate::foo::{bar, baz}` must resolve BOTH foo/bar.rs and
+        // foo/baz.rs, not just the parent module. (finding #15)
+        let imps = expand_rust_use("crate::foo::{bar, baz as qux, self}");
+        assert!(imps.contains(&"crate::foo::bar".to_string()));
+        assert!(imps.contains(&"crate::foo::baz".to_string()));
+        assert!(imps.contains(&"crate::foo".to_string())); // `self`
+
+        let p = paths(&["src/foo/bar.rs", "src/foo/baz.rs", "src/lib.rs"]);
+        assert_eq!(
+            resolve_rust("crate::foo::bar", "src/lib.rs", &p).as_deref(),
+            Some("src/foo/bar.rs")
+        );
+        assert_eq!(
+            resolve_rust("crate::foo::baz", "src/lib.rs", &p).as_deref(),
+            Some("src/foo/baz.rs")
+        );
+    }
+
+    #[test]
+    fn rust_super_resolves_relative_to_parent_module() {
+        // `super::helper` from src/metrics/foo.rs must resolve src/metrics/helper.rs,
+        // not src/helper.rs (the old crate-root behavior). (finding #15)
+        let p = paths(&["src/metrics/foo.rs", "src/metrics/helper.rs", "src/lib.rs"]);
+        assert_eq!(
+            resolve_rust("super::helper::Thing", "src/metrics/foo.rs", &p).as_deref(),
+            Some("src/metrics/helper.rs")
+        );
+    }
+
+    #[test]
+    fn rust_self_resolves_into_own_module_dir() {
+        // `self::sub` from src/metrics/foo.rs -> src/metrics/foo/sub.rs. (finding #15)
+        let p = paths(&["src/metrics/foo.rs", "src/metrics/foo/sub.rs"]);
+        assert_eq!(
+            resolve_rust("self::sub::Thing", "src/metrics/foo.rs", &p).as_deref(),
+            Some("src/metrics/foo/sub.rs")
+        );
     }
 
     #[test]

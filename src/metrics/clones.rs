@@ -16,12 +16,11 @@
 //! False negatives happen on Type-3 clones (modified copies) and on
 //! macro-heavy code where tree-sitter collapses the macro.
 
-use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 
-use tree_sitter::{Language, Node, Parser};
+use tree_sitter::{Language, Node};
 
-use crate::analysis::source_filter::is_source_file;
 use crate::metrics::MetricCollector;
 use crate::types::{
     Column, MetricEntry, MetricResult, MetricValue, ParsedChange, report_description,
@@ -80,6 +79,42 @@ struct LangSpec {
     name: &'static str,
     language: fn() -> Language,
     function_kinds: &'static [&'static str],
+}
+
+/// Per-language set of tree-sitter `kind_id`s (u16) for the kind categories we
+/// test membership against on every AST node. Precomputing these once per
+/// language turns the hot-path checks in `visit` / `hash_walk` from ~32 linear
+/// `&str` comparisons per node into a handful of `u16` hash-set lookups.
+///
+/// Built by scanning every visible node kind in the `Language` and keeping the
+/// ids whose kind name is in the corresponding string list. This makes
+/// `set.contains(&node.kind_id())` exactly equivalent to the previous
+/// `LIST.contains(&node.kind())`, so clone hashes and results are unchanged.
+struct KindIds {
+    function_kinds: HashSet<u16>,
+    comment_kinds: HashSet<u16>,
+    normalized_kinds: HashSet<u16>,
+}
+
+impl KindIds {
+    fn new(language: &Language, spec: &LangSpec) -> Self {
+        let ids_for = |targets: &[&str]| -> HashSet<u16> {
+            let mut set = HashSet::new();
+            for id in 0..language.node_kind_count() as u16 {
+                if let Some(kind) = language.node_kind_for_id(id)
+                    && targets.contains(&kind)
+                {
+                    set.insert(id);
+                }
+            }
+            set
+        };
+        Self {
+            function_kinds: ids_for(spec.function_kinds),
+            comment_kinds: ids_for(COMMENT_KINDS),
+            normalized_kinds: ids_for(NORMALIZED_KINDS),
+        }
+    }
 }
 
 const RUST: LangSpec = LangSpec {
@@ -148,8 +183,9 @@ const DART: LangSpec = LangSpec {
     name: "Dart",
     language: || tree_sitter_dart::LANGUAGE.into(),
     function_kinds: &[
-        "function_signature",
-        "method_signature",
+        "function_declaration",
+        "method_declaration",
+        "local_function_declaration",
         "function_expression",
         "lambda_expression",
     ],
@@ -184,6 +220,8 @@ struct FunctionRecord {
 
 pub struct ClonesCollector {
     records: Vec<FunctionRecord>,
+    /// Per-language `kind_id` sets, cached across files during the shared scan.
+    kinds: HashMap<&'static str, KindIds>,
 }
 
 impl Default for ClonesCollector {
@@ -196,6 +234,7 @@ impl ClonesCollector {
     pub fn new() -> Self {
         Self {
             records: Vec::new(),
+            kinds: HashMap::new(),
         }
     }
 }
@@ -207,28 +246,10 @@ impl MetricCollector for ClonesCollector {
 
     fn process(&mut self, _change: &ParsedChange) {}
 
-    fn inspect_repo(
-        &mut self,
-        repo: &gix::Repository,
-        progress: &crate::metrics::ProgressReporter,
-    ) -> anyhow::Result<()> {
-        let head_commit = match repo.head_commit() {
-            Ok(c) => c,
-            Err(_) => return Ok(()),
-        };
-        let tree = head_commit.tree()?;
-        let mut parsers: HashMap<&'static str, Parser> = HashMap::new();
-        let mut scanned = 0u64;
-        walk_tree(
-            repo,
-            &tree,
-            "",
-            &mut parsers,
-            &mut self.records,
-            &mut scanned,
-            progress,
-        );
-        Ok(())
+    // Driven by the pipeline's shared source scan; `inspect_repo` is a
+    // deliberate no-op. (finding #23)
+    fn as_source_scanner(&mut self) -> Option<&mut dyn crate::metrics::SourceScanner> {
+        Some(self)
     }
 
     fn finalize(&mut self) -> MetricResult {
@@ -311,91 +332,33 @@ impl MetricCollector for ClonesCollector {
     }
 }
 
-fn walk_tree(
-    repo: &gix::Repository,
-    tree: &gix::Tree,
-    prefix: &str,
-    parsers: &mut HashMap<&'static str, Parser>,
-    records: &mut Vec<FunctionRecord>,
-    scanned: &mut u64,
-    progress: &crate::metrics::ProgressReporter,
-) {
-    for entry_res in tree.iter() {
-        let Ok(entry) = entry_res else { continue };
-        let name = entry.filename().to_string();
-        let full_path = if prefix.is_empty() {
-            name.clone()
-        } else {
-            format!("{prefix}/{name}")
+impl crate::metrics::SourceScanner for ClonesCollector {
+    fn scan_file(&mut self, path: &str, source: &str, tree: &tree_sitter::Tree) {
+        let Some(spec) = spec_for_path(path) else {
+            return;
         };
-        let id = entry.oid();
-        let mode = entry.mode();
-
-        if mode.is_tree() {
-            if let Ok(subobj) = repo.find_object(id)
-                && let Ok(subtree) = subobj.try_into_tree()
-            {
-                walk_tree(
-                    repo, &subtree, &full_path, parsers, records, scanned, progress,
-                );
-            }
-        } else if mode.is_blob() {
-            let Some(spec) = spec_for_path(&full_path) else {
-                continue;
-            };
-            if !is_source_file(&full_path) {
-                continue;
-            }
-            let Ok(object) = repo.find_object(id) else {
-                continue;
-            };
-            let Ok(blob) = object.try_into_blob() else {
-                continue;
-            };
-            let Ok(source) = std::str::from_utf8(&blob.data) else {
-                continue;
-            };
-            analyze_file(spec, &full_path, source, parsers, records);
-            *scanned += 1;
-            if scanned.is_multiple_of(200) {
-                progress.status(&format!("  clones: {} files parsed...", *scanned));
-            }
-        }
+        let kinds = self
+            .kinds
+            .entry(spec.name)
+            .or_insert_with(|| KindIds::new(&(spec.language)(), spec));
+        visit(&tree.root_node(), kinds, path, source, &mut self.records);
     }
-}
-
-fn analyze_file(
-    spec: &'static LangSpec,
-    file_path: &str,
-    source: &str,
-    parsers: &mut HashMap<&'static str, Parser>,
-    out: &mut Vec<FunctionRecord>,
-) {
-    let parser = parsers.entry(spec.name).or_insert_with(|| {
-        let mut p = Parser::new();
-        let _ = p.set_language(&(spec.language)());
-        p
-    });
-    let Some(tree) = parser.parse(source, None) else {
-        return;
-    };
-    visit(&tree.root_node(), spec, file_path, source, out);
 }
 
 fn visit(
     node: &Node,
-    spec: &LangSpec,
+    kinds: &KindIds,
     file_path: &str,
     source: &str,
     out: &mut Vec<FunctionRecord>,
 ) {
-    if spec.function_kinds.contains(&node.kind()) {
+    if kinds.function_kinds.contains(&node.kind_id()) {
         let name = function_name(node, source).unwrap_or_else(|| "<anonymous>".into());
         let start = node.start_position().row as u32 + 1;
         let end = node.end_position().row as u32 + 1;
         let size_lines = end.saturating_sub(start).saturating_add(1);
         if size_lines >= MIN_CLONE_LINES {
-            let hash = ast_hash(node, spec.function_kinds);
+            let hash = ast_hash(node, kinds);
             out.push(FunctionRecord {
                 hash,
                 file: file_path.to_string(),
@@ -407,12 +370,21 @@ fn visit(
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        visit(&child, spec, file_path, source, out);
+        visit(&child, kinds, file_path, source, out);
     }
 }
 
 fn function_name(node: &Node, source: &str) -> Option<String> {
-    let name_node = node.child_by_field_name("name")?;
+    // Most grammars expose `name` directly on the function node. Dart's
+    // function_declaration / method_declaration instead wrap a
+    // function_signature / method_signature child that carries the name, so
+    // fall back to that child's name field. (finding #19)
+    let name_node = node.child_by_field_name("name").or_else(|| {
+        let mut cursor = node.walk();
+        node.children(&mut cursor)
+            .find(|c| c.kind().ends_with("_signature"))
+            .and_then(|sig| sig.child_by_field_name("name"))
+    })?;
     let bytes = source.as_bytes();
     let start = name_node.start_byte();
     let end = name_node.end_byte();
@@ -427,40 +399,45 @@ fn function_name(node: &Node, source: &str) -> Option<String> {
 /// literal nodes collapse to a single token so renames and literal changes do
 /// not break the hash. Comments are skipped. Nested functions are skipped so
 /// their body doesn't contaminate the outer hash.
-fn ast_hash(node: &Node, func_kinds: &[&str]) -> u64 {
+fn ast_hash(node: &Node, kinds: &KindIds) -> u64 {
     let mut hasher = DefaultHasher::new();
-    hash_walk(node, func_kinds, true, &mut hasher);
+    hash_walk(node, kinds, true, &mut hasher);
     hasher.finish()
 }
 
-fn hash_walk(node: &Node, func_kinds: &[&str], is_root: bool, hasher: &mut DefaultHasher) {
-    let kind = node.kind();
+fn hash_walk(node: &Node, kinds: &KindIds, is_root: bool, hasher: &mut DefaultHasher) {
+    let kind_id = node.kind_id();
     // Skip nested functions (they get their own record).
-    if !is_root && func_kinds.contains(&kind) {
+    if !is_root && kinds.function_kinds.contains(&kind_id) {
         "<nested_fn>".hash(hasher);
         return;
     }
-    if COMMENT_KINDS.contains(&kind) {
+    if kinds.comment_kinds.contains(&kind_id) {
         return;
     }
-    if NORMALIZED_KINDS.contains(&kind) {
+    if kinds.normalized_kinds.contains(&kind_id) {
         "_".hash(hasher);
         return;
     }
-    kind.hash(hasher);
+    // Hash the kind *name* (not the id) so the hash stays stable across
+    // grammar-version symbol-numbering changes and identical across languages.
+    node.kind().hash(hasher);
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        hash_walk(&child, func_kinds, false, hasher);
+        hash_walk(&child, kinds, false, hasher);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tree_sitter::Parser;
 
     fn hash_of(spec: &'static LangSpec, src: &str) -> u64 {
         let mut parser = Parser::new();
-        let _ = parser.set_language(&(spec.language)());
+        let language: Language = (spec.language)();
+        let _ = parser.set_language(&language);
+        let kinds = KindIds::new(&language, spec);
         let tree = parser.parse(src, None).unwrap();
         let root = tree.root_node();
         // Find the first function-like node.
@@ -477,7 +454,7 @@ mod tests {
             None
         }
         let func = find(&root, spec).expect("function");
-        ast_hash(&func, spec.function_kinds)
+        ast_hash(&func, &kinds)
     }
 
     #[test]
@@ -512,6 +489,36 @@ mod tests {
     }
 
     #[test]
+    fn dart_named_function_clone_detected() {
+        // Regression: Dart named functions must be recognized via the
+        // `function_declaration` node (which spans the body), not the
+        // ~1-line `function_signature`. Two functions differing only in
+        // identifier names must share a hash, with real names attached.
+        let a = "int add(int a, int b) {\n  var total = a + b;\n  return total;\n}\n";
+        let b = "int sumTwo(int x, int y) {\n  var result = x + y;\n  return result;\n}\n";
+        assert_eq!(hash_of(&DART, a), hash_of(&DART, b));
+
+        // The declaration node carries a real function name (not <anonymous>).
+        let mut parser = Parser::new();
+        let _ = parser.set_language(&(DART.language)());
+        let tree = parser.parse(a, None).unwrap();
+        fn find<'a>(node: &Node<'a>, spec: &LangSpec) -> Option<Node<'a>> {
+            if spec.function_kinds.contains(&node.kind()) {
+                return Some(*node);
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(found) = find(&child, spec) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let func = find(&tree.root_node(), &DART).expect("dart function");
+        assert_eq!(function_name(&func, a).as_deref(), Some("add"));
+    }
+
+    #[test]
     fn finalize_groups_duplicates_and_ranks_by_payoff() {
         // Seed records manually to avoid needing a real repo. Two groups:
         //   group A: 30-line function cloned twice → payoff 30
@@ -541,6 +548,41 @@ mod tests {
             first_key.contains("b/f0.rs"),
             "expected 50-line group first, got {first_key}"
         );
+    }
+
+    #[test]
+    fn kind_id_sets_match_string_membership() {
+        // The perf fix replaces `LIST.contains(&node.kind())` with
+        // `set.contains(&node.kind_id())`. For results to stay byte-identical
+        // the id-set membership must agree with the string-list membership for
+        // every visible node kind in every supported language.
+        for spec in SUPPORTED {
+            let language: Language = (spec.language)();
+            let kinds = KindIds::new(&language, spec);
+            for id in 0..language.node_kind_count() as u16 {
+                let Some(name) = language.node_kind_for_id(id) else {
+                    continue;
+                };
+                assert_eq!(
+                    kinds.function_kinds.contains(&id),
+                    spec.function_kinds.contains(&name),
+                    "{}: function_kinds mismatch for id {id} ({name})",
+                    spec.name
+                );
+                assert_eq!(
+                    kinds.comment_kinds.contains(&id),
+                    COMMENT_KINDS.contains(&name),
+                    "{}: comment_kinds mismatch for id {id} ({name})",
+                    spec.name
+                );
+                assert_eq!(
+                    kinds.normalized_kinds.contains(&id),
+                    NORMALIZED_KINDS.contains(&name),
+                    "{}: normalized_kinds mismatch for id {id} ({name})",
+                    spec.name
+                );
+            }
+        }
     }
 
     #[test]
