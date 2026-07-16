@@ -6,6 +6,12 @@
 //!
 //! No git, no history — just HEAD-of-working-tree snapshot. Intended for a fast
 //! "what is this repo written in?" answer.
+//!
+//! Filtering uses [`is_composition_file`], NOT the stricter `is_source_file`
+//! that code-focused metrics use: structured config/data dialects (YAML,
+//! JSON, TOML, …) count here, so a Helm-chart or Kubernetes-manifest repo
+//! reports YAML instead of coming back empty. Prose/docs (Markdown, …),
+//! lockfiles, and vendored content stay excluded.
 
 use std::collections::HashMap;
 use std::fs;
@@ -15,7 +21,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::analysis::line_classifier::count_lines;
-use crate::analysis::source_filter::is_source_file;
+use crate::analysis::source_filter::is_composition_file;
 use crate::langs::detect_language_info;
 
 /// Per-language share of the codebase (by real code lines at HEAD of the
@@ -74,9 +80,10 @@ pub fn repo_composition(root: &Path) -> Vec<LanguageShare> {
 
 fn classify_file(path: &Path) -> Option<(&'static str, u64)> {
     let path_str = path.to_str()?;
-    // Drop lockfiles, manifests, docs, data/markup dialects (YAML/JSON/TOML/
-    // Markdown/XML…) — shared with every code-focused metric.
-    if !is_source_file(path_str) {
+    // Drop lockfiles, manifests, docs/prose, vendored and generated content —
+    // but keep structured config/data (YAML/JSON/TOML/XML…), which IS part of
+    // the answer to "what is this repo written in?".
+    if !is_composition_file(path_str) {
         return None;
     }
     let meta = fs::metadata(path).ok()?;
@@ -232,6 +239,50 @@ mod tests {
     fn empty_dir_returns_empty_vec() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(repo_composition(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn helm_chart_repo_reports_yaml_and_dockerfile() {
+        // Regression: an infra repo (Helm chart + Dockerfiles) used to come
+        // back empty/partial because YAML was filtered out entirely and
+        // `Dockerfile.<purpose>` was undetected.
+        let tmp = tempfile::tempdir().unwrap();
+        write_file(
+            tmp.path(),
+            "chart/values.yaml",
+            "replicaCount: 1\nimage:\n  repo: demo\n",
+        );
+        write_file(
+            tmp.path(),
+            "chart/templates/deployment.yaml",
+            "apiVersion: apps/v1\nkind: Deployment\n",
+        );
+        write_file(
+            tmp.path(),
+            "Dockerfile.tools",
+            "FROM alpine:3\nRUN echo hi\n",
+        );
+
+        let comp = repo_composition(tmp.path());
+        let langs: Vec<&str> = comp.iter().map(|s| s.language.as_str()).collect();
+        assert!(langs.contains(&"YAML"), "YAML missing from {langs:?}");
+        assert!(
+            langs.contains(&"Dockerfile"),
+            "Dockerfile missing from {langs:?}"
+        );
+        let yaml = comp.iter().find(|s| s.language == "YAML").unwrap();
+        assert_eq!(yaml.files, 2);
+    }
+
+    #[test]
+    fn prose_and_lockfiles_stay_out_of_composition() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_file(tmp.path(), "src/main.rs", "fn main() {}\n");
+        write_file(tmp.path(), "README.md", "# Title\n\nSome prose.\n");
+        write_file(tmp.path(), "pnpm-lock.yaml", "lockfileVersion: 9\n");
+        let comp = repo_composition(tmp.path());
+        assert_eq!(comp.len(), 1);
+        assert_eq!(comp[0].language, "Rust");
     }
 
     #[test]

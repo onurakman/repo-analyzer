@@ -1,9 +1,17 @@
 //! Classifies file paths as "source code" vs configuration / data / markup.
 //!
-//! Used by code-focused metrics (hotspots, churn, coupling, outliers, module
-//! coupling) to drop paths like `pom.xml`, `package-lock.json`, or README
-//! files that are not refactorable source code and would otherwise dominate
-//! rankings.
+//! Two public predicates share one classification pipeline:
+//!
+//! * [`is_source_file`] — "is this a plausible refactor / architecture
+//!   target?" Used by code-focused metrics (hotspots, churn, coupling,
+//!   outliers, module coupling) to drop paths like `pom.xml`,
+//!   `package-lock.json`, or README files that would otherwise dominate
+//!   rankings. Accepts only [`PathClass::Code`].
+//! * [`is_composition_file`] — "is this part of what the repo is written
+//!   in?" Used by language composition (`--quick-composition`). Also accepts
+//!   [`PathClass::ConfigData`], so an infra-heavy repo full of Helm charts /
+//!   Kubernetes manifests / Dockerfiles reports YAML instead of pretending
+//!   the files don't exist. Prose and docs stay excluded.
 //!
 //! Classification rules (conservative: "unknown = not code"):
 //! 1. Paths ending in `.lock` are always data.
@@ -20,44 +28,66 @@
 //!    vendor/, bower_components/, `*.min.js`, generated protobuf, fixtures, …)
 //!    are rejected via [`linguist::is_vendored`].
 //! 6. Otherwise, detect the language via [`crate::langs::detect_language_info`].
-//!    If the language name is in [`NON_CODE_LANGUAGES`], it's not source code.
-//!    If no language is detected, treat it as not source code.
+//!    [`PROSE_LANGUAGES`] are never source; [`CONFIG_DATA_LANGUAGES`] are
+//!    [`PathClass::ConfigData`]; everything else detected is
+//!    [`PathClass::Code`]. If no language is detected, treat it as not source.
 
 use crate::langs::detect_language_info;
 use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
 
-/// Process-wide memoization cache for [`is_source_file`]. Classification is
+/// Three-way classification produced by the pipeline and memoized in
+/// [`CACHE`]. Split so the two public predicates can draw different lines
+/// over one cached result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathClass {
+    /// Human-maintained source code — a plausible refactor target.
+    Code,
+    /// Structured configuration / data dialects (YAML, JSON, TOML, XML, …):
+    /// not refactorable code, but part of "what is this repo written in?".
+    ConfigData,
+    /// Everything else: lockfiles, vendored/generated content, prose, docs.
+    NonSource,
+}
+
+/// Process-wide memoization cache for the classification pipeline. It is
 /// pure (depends only on the path string) and involves ~168 fancy-regex
 /// checks plus language detection, yet 16+ collectors re-classify the same
 /// paths repeatedly. Caching by path collapses that to one classification per
 /// distinct path for the whole process lifetime.
-static CACHE: LazyLock<RwLock<HashMap<String, bool>>> =
+static CACHE: LazyLock<RwLock<HashMap<String, PathClass>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
-/// Language names (as they appear in `languages.json5`) treated as non-code:
-/// data formats, markup, docs, and configuration dialects without logic.
-const NON_CODE_LANGUAGES: &[&str] = &[
+/// Language names (as they appear in `languages.json5`) that are structured
+/// configuration / data rather than code: excluded from refactor-target
+/// metrics, but counted by language composition.
+const CONFIG_DATA_LANGUAGES: &[&str] = &[
     "Apache Config",
-    "AsciiDoc",
-    "BibTeX",
-    "CSV",
     "Dotenv",
     "EditorConfig",
     "INI",
     "JSON",
     "JSON5",
-    "Markdown",
     "Nginx Config",
+    "TOML",
+    "WiX",
+    "XML",
+    "YAML",
+];
+
+/// Language names (as they appear in `languages.json5`) that are prose,
+/// docs, or plain data exports: excluded from BOTH refactor-target metrics
+/// and language composition (a docs-heavy repo is not "written in Markdown").
+const PROSE_LANGUAGES: &[&str] = &[
+    "AsciiDoc",
+    "BibTeX",
+    "CSV",
+    "Markdown",
     "Org",
     "reStructuredText",
     "Roff",
     "SVG",
     "Textile",
-    "TOML",
-    "WiX",
-    "XML",
-    "YAML",
 ];
 
 /// Path segments that indicate generated, vendored, cache, or asset-pipeline
@@ -180,6 +210,20 @@ const NON_CODE_FILENAMES: &[&str] = &[
 /// and lockfiles all return `false`.
 #[must_use]
 pub fn is_source_file(path: &str) -> bool {
+    classify(path) == PathClass::Code
+}
+
+/// Returns `true` when the path counts toward the repo's language
+/// composition: source code plus structured config/data dialects
+/// ([`CONFIG_DATA_LANGUAGES`] — YAML, JSON, TOML, …). Lockfiles, vendored /
+/// generated content, and prose ([`PROSE_LANGUAGES`]) stay excluded.
+#[must_use]
+pub fn is_composition_file(path: &str) -> bool {
+    classify(path) != PathClass::NonSource
+}
+
+/// Memoizing entry point for the classification pipeline.
+fn classify(path: &str) -> PathClass {
     // Read-lock fast path: return a previously computed classification without
     // re-running the regex/language-detection pipeline.
     if let Ok(cache) = CACHE.read()
@@ -188,7 +232,7 @@ pub fn is_source_file(path: &str) -> bool {
         return cached;
     }
 
-    let result = classify_source_file(path);
+    let result = classify_path(path);
 
     // Write-lock to memoize the result on miss.
     if let Ok(mut cache) = CACHE.write() {
@@ -198,26 +242,28 @@ pub fn is_source_file(path: &str) -> bool {
     result
 }
 
-/// Pure classification pipeline behind [`is_source_file`]. Kept separate so the
-/// public entry point can memoize results in [`CACHE`]. The behaviour here must
-/// remain byte-identical to the previous inline implementation.
-fn classify_source_file(path: &str) -> bool {
+/// Pure classification pipeline behind [`classify`]. Kept separate so the
+/// entry point can memoize results in [`CACHE`]. Steps 1-5 (lockfiles,
+/// explicit non-source names, hash-named artifacts, asset/build segments,
+/// linguist vendor patterns) reject outright; the detected language then
+/// splits the survivors into code vs config/data vs prose.
+fn classify_path(path: &str) -> PathClass {
     let name = path.rsplit('/').next().unwrap_or(path);
 
     // Any *.lock file is a generated artifact, regardless of language detection.
     if name.ends_with(".lock") {
-        return false;
+        return PathClass::NonSource;
     }
 
     if NON_CODE_FILENAMES
         .iter()
         .any(|n| name.eq_ignore_ascii_case(n))
     {
-        return false;
+        return PathClass::NonSource;
     }
 
     if is_content_hashed(name) {
-        return false;
+        return PathClass::NonSource;
     }
 
     // Substring match with a synthetic leading slash so that both
@@ -230,7 +276,7 @@ fn classify_source_file(path: &str) -> bool {
         .iter()
         .any(|seg| path.contains(seg) || path.starts_with(&seg[1..]))
     {
-        return false;
+        return PathClass::NonSource;
     }
 
     // Linguist's curated vendor.yml — catches `node_modules/`, `vendor/`,
@@ -238,12 +284,14 @@ fn classify_source_file(path: &str) -> bool {
     // test fixtures, etc. Failure-open: treat a regex error as "not vendored"
     // so a broken upstream pattern never blocks legitimate source files.
     if linguist::is_vendored(path).unwrap_or(false) {
-        return false;
+        return PathClass::NonSource;
     }
 
     match detect_language_info(path, None) {
-        Some(lang) => !NON_CODE_LANGUAGES.contains(&lang.name),
-        None => false,
+        Some(lang) if PROSE_LANGUAGES.contains(&lang.name) => PathClass::NonSource,
+        Some(lang) if CONFIG_DATA_LANGUAGES.contains(&lang.name) => PathClass::ConfigData,
+        Some(_) => PathClass::Code,
+        None => PathClass::NonSource,
     }
 }
 
@@ -294,6 +342,39 @@ mod tests {
         assert!(!is_source_file(".github/workflows/ci.yml"));
         assert!(!is_source_file("pyproject.toml"));
         assert!(!is_source_file("tsconfig.json"));
+    }
+
+    #[test]
+    fn config_files_count_toward_composition() {
+        // Helm charts / Kubernetes manifests ARE what an infra repo is
+        // written in — composition must see them even though
+        // refactor-target metrics don't.
+        assert!(is_composition_file("chart/values.yaml"));
+        assert!(is_composition_file("chart/templates/deployment.yaml"));
+        assert!(is_composition_file("k8s/deployment.yml"));
+        assert!(is_composition_file("config/settings.toml"));
+        assert!(is_composition_file("data/fixture.json"));
+        // Source code obviously counts too.
+        assert!(is_composition_file("src/main.rs"));
+        assert!(is_composition_file("Dockerfile"));
+    }
+
+    #[test]
+    fn prose_lockfiles_and_vendored_excluded_from_composition() {
+        // Prose/docs: a docs-heavy repo is not "written in Markdown".
+        assert!(!is_composition_file("README.md"));
+        assert!(!is_composition_file("docs/guide.adoc"));
+        // Lockfiles and manifests stay out even though they'd detect as
+        // YAML/JSON/TOML.
+        assert!(!is_composition_file("pnpm-lock.yaml"));
+        assert!(!is_composition_file("web/package.json"));
+        assert!(!is_composition_file("Cargo.lock"));
+        // Vendored / build-output paths stay out regardless of language.
+        assert!(!is_composition_file("node_modules/pkg/config.yaml"));
+        assert!(!is_composition_file("dist/app.js"));
+        // `.github/` is on Linguist's vendor list — GitHub itself excludes
+        // workflow files from language stats; we match that behaviour.
+        assert!(!is_composition_file(".github/workflows/ci.yml"));
     }
 
     #[test]

@@ -46,10 +46,23 @@ pub fn detect_language_info(filename: &str, content: Option<&str>) -> Option<&'s
     }
 
     let resolved: &'static str = match candidates.len() {
-        // No glob/filename match: fall back to codestats' shebang detection
-        // for extensionless scripts (`script` with `#!/usr/bin/env python`).
-        // Linguist has no shebang-only API.
-        0 => return content.and_then(detect_from_shebang),
+        // No glob/filename match: try the multi-Dockerfile convention, then
+        // fall back to codestats' shebang detection for extensionless
+        // scripts (`script` with `#!/usr/bin/env python`). Linguist has no
+        // shebang-only API.
+        0 => {
+            // `Dockerfile.<purpose>` / `Containerfile.<purpose>` (e.g.
+            // `Dockerfile.tools`, `Dockerfile.dev`) match neither a Linguist
+            // filename nor a known extension, so without this they vanish
+            // from every metric. Only reached when extension detection found
+            // nothing, so a real extension (`Dockerfile.md` → Markdown)
+            // still wins above.
+            let basename = filename.rsplit('/').next().unwrap_or(filename);
+            if basename.starts_with("Dockerfile.") || basename.starts_with("Containerfile.") {
+                return map_to_codestats("Dockerfile");
+            }
+            return content.and_then(detect_from_shebang);
+        }
         1 => candidates[0],
         _ => match content {
             Some(c) => {
@@ -175,6 +188,24 @@ mod tests {
     fn literal_filename_match() {
         let mk = detect_language_info("Makefile", None).expect("Makefile should be detected");
         assert_eq!(mk.name, "Makefile");
+    }
+
+    #[test]
+    fn dockerfile_with_purpose_suffix_detected() {
+        // Multi-Dockerfile convention: Dockerfile.<purpose> has no Linguist
+        // filename/extension entry, so the explicit fallback must catch it.
+        for name in [
+            "Dockerfile.tools",
+            "infra/docker/Dockerfile.backend",
+            "Containerfile.dev",
+        ] {
+            let lang = detect_language_info(name, None)
+                .unwrap_or_else(|| panic!("{name} should be detected"));
+            assert_eq!(lang.name, "Dockerfile", "{name}");
+        }
+        // A real extension still wins over the convention fallback.
+        let md = detect_language_info("Dockerfile.md", None).expect("markdown");
+        assert_eq!(md.name, "Markdown");
     }
 
     #[test]
