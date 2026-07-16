@@ -421,17 +421,17 @@ fn resolve_rust(raw: &str, importer: &str, paths: &HashSet<String>) -> Option<St
             b.push(join_dir(importer_dir, importer_stem));
         }
         (b, r)
-    } else if let Some(r) = raw.strip_prefix("super::") {
+    } else {
         // `super` = the parent module: the importer's dir, or its parent when
-        // the importer itself is a `mod.rs`/`lib.rs`/`main.rs`.
+        // the importer itself is a `mod.rs`/`lib.rs`/`main.rs`. Anything not
+        // starting with a path keyword is an external crate -> None.
+        let r = raw.strip_prefix("super::")?;
         let parent = if importer_is_mod {
             split_dir_stem(importer_dir).0.to_string()
         } else {
             importer_dir.to_string()
         };
         (vec![parent], r)
-    } else {
-        return None; // external crate
     };
 
     let parts: Vec<&str> = rest.split("::").filter(|s| !s.is_empty()).collect();

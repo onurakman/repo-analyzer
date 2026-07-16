@@ -78,10 +78,7 @@ pub fn detect_language_info(filename: &str, content: Option<&str>) -> Option<&'s
                     return Some(lang);
                 }
                 let disamb = linguist::disambiguate(filename, c).unwrap_or_default();
-                match disamb.first() {
-                    Some(d) => d.name,
-                    None => return None,
-                }
+                disamb.first()?.name
             }
             None => {
                 // No content means heuristic rules can't fire. Still try
