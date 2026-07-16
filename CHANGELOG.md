@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.18](https://github.com/onurakman/repo-analyzer/compare/v0.1.17...v0.1.18) (2026-07-16)
+
+
+### Features
+
+* Count config/data languages in composition and detect Dockerfile.&lt;purpose&gt; ([ed3888f](https://github.com/onurakman/repo-analyzer/commit/ed3888f1245547d3685215d7747ff19fde24d924))
+
+
+### Bug Fixes
+
+* Resolve clippy question_mark lints from Rust 1.97 ([d062d65](https://github.com/onurakman/repo-analyzer/commit/d062d6594855cf54f6ee5dc0057397388b099ab4))
+
 ## [0.1.17](https://github.com/onurakman/repo-analyzer/compare/v0.1.16...v0.1.17) (2026-07-02)
 
 
