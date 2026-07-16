@@ -50,7 +50,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # Error handling
 thiserror = "2"
 anyhow = "1"
-regex = "1.12.3"
+regex = "1.13.0"
 
 # Disk-backed change store — spills collector aggregation state to a temp
 # SQLite database so memory stays bounded on huge repos.
