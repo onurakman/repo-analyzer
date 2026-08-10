@@ -37,7 +37,7 @@ serde_json = "1"
 csv = "1"
 
 # Output
-comfy-table = "7"
+comfy-table = "8"
 indicatif = "0.18"
 
 # Pipeline
