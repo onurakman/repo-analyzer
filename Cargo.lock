@@ -1777,14 +1777,12 @@ dependencies = [
 
 [[package]]
 name = "linguist"
-version = "0.1.10"
+version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8770b251cb72fcd4871d9d657aaee00f71f9ac293ee69af498619fc1e958d195"
+checksum = "5d4e596b019c00e2f341ba9f7481f496d42227ae2d10615d5d0d77674fee2ef5"
 dependencies = [
- "clap",
  "fancy-regex",
  "linguist-types",
- "once_cell",
  "serde",
  "serde_json",
  "serde_yaml_ng",
